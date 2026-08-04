@@ -1,0 +1,118 @@
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { AdCampaign, AdCampaignStatus } from './entities/ad-campaign.entity';
+import { BannerAd, BannerPlacement } from './entities/banner-ad.entity';
+import { SponsoredLocation } from './entities/sponsored-location.entity';
+import {
+  CreateBannerAdDto,
+  CreateCampaignDto,
+  CreateSponsoredLocationDto,
+} from './dto/advertising.dto';
+import { haversineDistanceKm } from '../common/utils/geo.util';
+
+@Injectable()
+export class AdvertisingService {
+  constructor(
+    @InjectRepository(AdCampaign)
+    private readonly campaignsRepo: Repository<AdCampaign>,
+    @InjectRepository(BannerAd)
+    private readonly bannersRepo: Repository<BannerAd>,
+    @InjectRepository(SponsoredLocation)
+    private readonly locationsRepo: Repository<SponsoredLocation>,
+  ) {}
+
+  // ---- Campaigns ----
+
+  async createCampaign(dto: CreateCampaignDto): Promise<AdCampaign> {
+    return this.campaignsRepo.save(
+      this.campaignsRepo.create({
+        ...dto,
+        budget: dto.budget?.toFixed(2) ?? null,
+        startDate: dto.startDate ? new Date(dto.startDate) : null,
+        endDate: dto.endDate ? new Date(dto.endDate) : null,
+      }),
+    );
+  }
+
+  async listCampaigns(): Promise<AdCampaign[]> {
+    return this.campaignsRepo.find({ order: { createdAt: 'DESC' } });
+  }
+
+  async setCampaignStatus(id: string, status: AdCampaignStatus): Promise<AdCampaign> {
+    const campaign = await this.campaignsRepo.findOne({ where: { id } });
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    campaign.status = status;
+    return this.campaignsRepo.save(campaign);
+  }
+
+  // ---- Banner ads ----
+
+  async createBanner(dto: CreateBannerAdDto): Promise<BannerAd> {
+    return this.bannersRepo.save(
+      this.bannersRepo.create({
+        ...dto,
+        startDate: dto.startDate ? new Date(dto.startDate) : null,
+        endDate: dto.endDate ? new Date(dto.endDate) : null,
+      }),
+    );
+  }
+
+  async listAllBanners(): Promise<BannerAd[]> {
+    return this.bannersRepo.find({ order: { createdAt: 'DESC' } });
+  }
+
+  /** Active banners for a placement, within their date window if one is set. */
+  async listActiveBanners(placement: BannerPlacement): Promise<BannerAd[]> {
+    const now = new Date();
+    return this.bannersRepo
+      .createQueryBuilder('b')
+      .where('b.placement = :placement', { placement })
+      .andWhere('b.isActive = true')
+      .andWhere('(b.startDate IS NULL OR b.startDate <= :now)', { now })
+      .andWhere('(b.endDate IS NULL OR b.endDate >= :now)', { now })
+      .getMany();
+  }
+
+  async recordImpression(id: string): Promise<void> {
+    await this.bannersRepo.increment({ id }, 'impressions', 1);
+  }
+
+  /** Records the click and returns the click-through URL. */
+  async recordClick(id: string): Promise<string> {
+    const banner = await this.bannersRepo.findOne({ where: { id } });
+    if (!banner) throw new NotFoundException('Banner not found');
+    await this.bannersRepo.increment({ id }, 'clicks', 1);
+    return banner.targetUrl;
+  }
+
+  async setBannerActive(id: string, isActive: boolean): Promise<BannerAd> {
+    const banner = await this.bannersRepo.findOne({ where: { id } });
+    if (!banner) throw new NotFoundException('Banner not found');
+    banner.isActive = isActive;
+    return this.bannersRepo.save(banner);
+  }
+
+  // ---- Sponsored locations ----
+
+  async createSponsoredLocation(dto: CreateSponsoredLocationDto): Promise<SponsoredLocation> {
+    return this.locationsRepo.save(this.locationsRepo.create(dto));
+  }
+
+  async listAllSponsoredLocations(): Promise<SponsoredLocation[]> {
+    return this.locationsRepo.find({ order: { createdAt: 'DESC' } });
+  }
+
+  /** Sponsored pins within their own radius of the given map point — verified with real distance math, not a bounding box. */
+  async findNearbySponsoredLocations(lat: number, lng: number): Promise<SponsoredLocation[]> {
+    const active = await this.locationsRepo.find({ where: { isActive: true } });
+    const nearby = active.filter(
+      (loc) => haversineDistanceKm(lat, lng, loc.lat, loc.lng) <= loc.radiusKm,
+    );
+
+    // Impressions count each time a pin actually shows on someone's map.
+    await Promise.all(nearby.map((loc) => this.locationsRepo.increment({ id: loc.id }, 'impressions', 1)));
+
+    return nearby;
+  }
+}

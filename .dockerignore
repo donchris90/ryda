@@ -1,0 +1,11 @@
+node_modules
+dist
+coverage
+uploads
+.env
+.git
+.github
+*.log
+npm-debug.log*
+e2e-test*.sh
+test-websocket.js

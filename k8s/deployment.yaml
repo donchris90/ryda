@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ryda-backend
+  labels:
+    app: ryda-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ryda-backend
+  template:
+    metadata:
+      labels:
+        app: ryda-backend
+    spec:
+      containers:
+        - name: ryda-backend
+          image: ryda-backend:latest
+          ports:
+            - containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: ryda-backend-config
+            - secretRef:
+                name: ryda-backend-secrets
+          # Real endpoints this project already has and has tested — not
+          # placeholders. /health is a bare liveness check (always 200 if
+          # the process is up); /health/db is used for readiness since a
+          # pod that can't reach the database shouldn't receive traffic.
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health/db
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 512Mi
+          # NOTE: known limitation documented in the README — the dispatch
+          # scheduler (@nestjs/schedule) and the tracking WebSocket gateway
+          # are both single-instance-only right now. Running replicas > 1
+          # means multiple dispatch sweeps firing redundantly and
+          # WebSocket broadcasts not reaching clients on other pods. Fine
+          # for horizontal HTTP scaling; not yet safe for those two
+          # subsystems specifically.

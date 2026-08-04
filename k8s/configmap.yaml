@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ryda-backend-config
+data:
+  NODE_ENV: 'production'
+  PORT: '3000'
+  DB_HOST: 'postgres'
+  DB_PORT: '5432'
+  DB_NAME: 'ryda'
+  DB_SYNCHRONIZE: 'false' # production uses migrations — see MIGRATIONS.md
+  REDIS_HOST: 'redis'
+  REDIS_PORT: '6379'
+  DEFAULT_CURRENCY: 'NGN'
+  STORAGE_DRIVER: 's3'
+  SEARCH_DRIVER: 'postgres'
+  LOG_LEVEL: 'info'

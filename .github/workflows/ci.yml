@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ryda_ci
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DB_HOST: localhost
+      DB_PORT: 5432
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: ryda_ci
+      DB_SYNCHRONIZE: 'true'
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+      JWT_ACCESS_SECRET: ci-test-access-secret
+      JWT_REFRESH_SECRET: ci-test-refresh-secret
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: Unit tests
+        run: npm test -- --ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Boot smoke test
+        # Not the full e2e bash suite (that's a manual/scheduled job — 19
+        # scripts with real timed delays don't belong gating every PR) —
+        # just confirms the built app actually starts and /health responds,
+        # against the real Postgres/Redis services above.
+        run: |
+          node dist/main.js &
+          APP_PID=$!
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:3000/api/v1/health && break
+            sleep 1
+          done
+          curl -sf http://localhost:3000/api/v1/health || (echo "Health check failed" && exit 1)
+          curl -sf http://localhost:3000/api/v1/health/db || (echo "DB health check failed" && exit 1)
+          curl -sf http://localhost:3000/api/v1/health/redis || (echo "Redis health check failed" && exit 1)
+          kill $APP_PID
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: docker build -t ryda-backend:${{ github.sha }} .
