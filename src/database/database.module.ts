@@ -13,6 +13,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
         username: config.get<string>('database.username'),
         password: config.get<string>('database.password'),
         database: config.get<string>('database.name'),
+        ssl: config.get('database.ssl'),
         autoLoadEntities: true,
         // Dev convenience only — turn this off and use migrations in production.
         synchronize: config.get<boolean>('database.synchronize'),

@@ -1,0 +1,97 @@
+# Render Blueprint — deploys the backend, a Postgres database, and a
+# Redis-compatible Key Value store together from this one file.
+# https://render.com/docs/blueprint-spec
+#
+# To deploy: push this file to your repo, then in the Render Dashboard
+# choose New > Blueprint and point it at this repo. Render reads this
+# file and provisions everything below in one go.
+#
+# Everything defaults to the Free instance type so the first deploy
+# costs nothing — see backend/README.md for the real tradeoffs of
+# staying on Free long-term (the Postgres free tier expires 30 days
+# after creation; the free Key Value instance loses its data on every
+# restart, which is an acceptable tradeoff for a job queue like this
+# app's notification delivery, but not for anything needing durable
+# storage).
+
+services:
+  - type: web
+    name: ryda-backend
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install && npm run build
+    startCommand: npm run start:prod
+    healthCheckPath: /api/v1/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      # Wired automatically from the database/keyvalue services defined
+      # below — this backend supports a single connection-string env var
+      # for both (see backend/README.md), so no manual host/port/password
+      # assembly is needed here.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: ryda-postgres
+          property: connectionString
+      - key: DB_SSL
+        value: "true"
+      # Fine for a first deploy on a fresh database — creates all tables
+      # from the entities directly. Switch to the existing migration
+      # workflow (see package.json's migration:* scripts) before this
+      # holds real user data you can't afford to lose to an auto-sync.
+      - key: DB_SYNCHRONIZE
+        value: "true"
+
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: ryda-redis
+          property: connectionString
+
+      # Generated randomly by Render on first deploy — you never see or
+      # set these yourself, which is exactly right for a real secret.
+      - key: JWT_ACCESS_SECRET
+        generateValue: true
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+
+      # Everything below is optional — the backend already runs in a
+      # documented simulated/dev mode for each of these when left blank
+      # (no fake payments charged, no fake SMS sent, Haversine distance
+      # instead of real routing). sync: false means Render prompts you
+      # for a value during Blueprint creation but never stores it in
+      # this file — fill in only the ones you actually have.
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: PAYSTACK_PUBLIC_KEY
+        sync: false
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER
+        sync: false
+      - key: SENDGRID_API_KEY
+        sync: false
+      - key: ADMIN_PHONE
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+
+  - type: keyvalue
+    name: ryda-redis
+    plan: free
+    region: oregon
+    ipAllowList: [] # internal-only — the web service reaches it over Render's private network, no external access needed
+    maxmemoryPolicy: noeviction # this backs a job queue (BullMQ), not a cache — losing queued notifications under memory pressure is worse than the default eviction policies
+
+databases:
+  - name: ryda-postgres
+    plan: free
+    region: oregon
+    postgresMajorVersion: "16" # matches what this backend was built and tested against
+    ipAllowList: [] # internal-only by default; add your own IP here temporarily if you need to connect a local DB client

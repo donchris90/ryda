@@ -1635,6 +1635,48 @@ groupBy switching (day/week/month) confirmed working, and non-staff
 access correctly rejected. Full regression and Jest suite clean
 throughout.
 
+## Deploying (Render)
+
+`render.yaml` deploys the backend, a Postgres database, and a Redis-
+compatible Key Value store together as a single Render Blueprint — push
+to GitHub, then in the Render Dashboard choose New > Blueprint and point
+it at the repo.
+
+This needed two real portability fixes first, not just a YAML file:
+this backend originally only accepted discrete `DB_HOST`/`DB_PORT`/etc.
+and `REDIS_HOST`/`REDIS_PORT`/etc. — but Render (like Railway, Heroku,
+Supabase, Neon, and most other hosts) hands you a single connection
+string instead. Added `DATABASE_URL` and `REDIS_URL` support, both with
+a graceful fallback to the original discrete vars when unset, so local
+dev is completely unaffected — verified with a real running app,
+including a password containing special characters, correctly
+URL-decoded. Also added `DB_SSL` (off by default — local Postgres has
+no TLS listener; most hosted Postgres requires it) and pinned the Node
+version via `.node-version` to match what this backend has actually
+been built and tested against.
+
+**Honest tradeoffs of staying on Render's Free tier**, confirmed
+directly against Render's own docs rather than assumed: the free
+Postgres instance expires 30 days after creation (14-day grace period
+after that before deletion) — fine to start, but mark your calendar or
+upgrade to Basic (~$6-7/month) before then if this holds data you care
+about. The free Key Value instance loses all its data on every restart
+— an acceptable tradeoff for what this app actually uses Redis for (a
+BullMQ job queue backing notification delivery, scheduled-ride
+activation, and reconciliation auto-settlement — losing in-flight jobs
+occasionally is a minor, recoverable issue), but would be a real problem
+if anything here depended on Redis for durable storage, which nothing
+does. The free web service spins down after 15 minutes of inactivity
+(~1 minute cold start on the next request) — annoying for interactive
+testing, a non-issue for anything that tolerates a slow first request.
+
+**One manual step after first deploy**: this doesn't seed an admin
+account automatically. Run `npm run seed:admin` once via Render's Shell
+tab (with `ADMIN_PHONE`/`ADMIN_PASSWORD`/etc. already set as env vars
+from the Blueprint, so the shell picks them up automatically).
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

@@ -30,6 +30,7 @@ export const envValidationSchema = Joi.object({
 
   REDIS_HOST: Joi.string().optional(),
   REDIS_PORT: Joi.number().optional(),
+  REDIS_URL: Joi.string().optional(),
 }).unknown(true); // this project reads many more env vars directly via ConfigService — don't reject those
 
 const INSECURE_DEFAULTS = ['dev-access-secret-change-me', 'dev-refresh-secret-change-me'];

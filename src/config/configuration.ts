@@ -1,12 +1,46 @@
+import { resolveDatabaseConfig } from './resolve-db-config.util';
+
+/**
+ * Most hosts (Render, Railway, Upstash, Heroku-style add-ons) hand you a
+ * single REDIS_URL rather than discrete host/port/password — supporting
+ * both here, in one place, means every consumer (BullMQ setup, the
+ * health check) benefits without needing its own parsing logic. Falls
+ * back to the discrete REDIS_HOST/REDIS_PORT/REDIS_PASSWORD vars (the
+ * original local-dev shape) when REDIS_URL isn't set.
+ */
+function resolveRedisConfig() {
+  if (process.env.REDIS_URL) {
+    try {
+      const url = new URL(process.env.REDIS_URL);
+      return {
+        host: url.hostname,
+        port: url.port ? parseInt(url.port, 10) : 6379,
+        password: url.password || undefined,
+      };
+    } catch {
+      // Falls through to the discrete vars below if REDIS_URL is malformed
+      // rather than crashing config resolution over a typo.
+    }
+  }
+  return {
+    host: process.env.REDIS_HOST ?? 'localhost',
+    port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
+    password: process.env.REDIS_PASSWORD || undefined,
+  };
+}
+
 export default () => ({
   port: parseInt(process.env.PORT ?? '3000', 10),
   nodeEnv: process.env.NODE_ENV ?? 'development',
   database: {
-    host: process.env.DB_HOST ?? 'localhost',
-    port: parseInt(process.env.DB_PORT ?? '5432', 10),
-    username: process.env.DB_USERNAME ?? 'postgres',
-    password: process.env.DB_PASSWORD ?? 'postgres',
-    name: process.env.DB_NAME ?? 'ryda',
+    ...resolveDatabaseConfig(),
+    // Off by default (local Postgres has no TLS listener) — most hosted
+    // Postgres (Render, Heroku, Railway) requires it. Their certs
+    // typically aren't in Node's default trust store, hence
+    // rejectUnauthorized: false — the standard, widely-used pattern for
+    // connecting to these hosts, not a real security loosening for a
+    // connection that's already authenticated by username/password.
+    ssl: (process.env.DB_SSL ?? 'false') === 'true' ? { rejectUnauthorized: false } : false,
     synchronize: (process.env.DB_SYNCHRONIZE ?? 'true') === 'true',
   },
   jwt: {
@@ -98,11 +132,7 @@ export default () => ({
     openSearchUsername: process.env.OPENSEARCH_USERNAME ?? '',
     openSearchPassword: process.env.OPENSEARCH_PASSWORD ?? '',
   },
-  redis: {
-    host: process.env.REDIS_HOST ?? 'localhost',
-    port: parseInt(process.env.REDIS_PORT ?? '6379', 10),
-    password: process.env.REDIS_PASSWORD || undefined,
-  },
+  redis: resolveRedisConfig(),
   incentives: {
     defaultStreakReward: parseFloat(process.env.DEFAULT_STREAK_REWARD ?? '2000'),
   },

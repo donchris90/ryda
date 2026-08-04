@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { DataSource } from 'typeorm';
+import { resolveDatabaseConfig } from './config/resolve-db-config.util';
 
 /**
  * Used only by the TypeORM CLI (`npm run migration:*`) — the running app
@@ -9,13 +10,16 @@ import { DataSource } from 'typeorm';
  * `TypeOrmModule.forFeature()` across every module). This DataSource globs
  * the same `*.entity.ts` files directly instead.
  */
+const dbConfig = resolveDatabaseConfig();
+
 export default new DataSource({
   type: 'postgres',
-  host: process.env.DB_HOST ?? 'localhost',
-  port: parseInt(process.env.DB_PORT ?? '5432', 10),
-  username: process.env.DB_USERNAME ?? 'postgres',
-  password: process.env.DB_PASSWORD ?? 'postgres',
-  database: process.env.DB_NAME ?? 'ryda',
+  host: dbConfig.host,
+  port: dbConfig.port,
+  username: dbConfig.username,
+  password: dbConfig.password,
+  database: dbConfig.name,
+  ssl: (process.env.DB_SSL ?? 'false') === 'true' ? { rejectUnauthorized: false } : false,
   entities: [__dirname + '/**/*.entity{.ts,.js}'],
   migrations: [__dirname + '/database/migrations/*{.ts,.js}'],
   synchronize: false, // migrations only, deliberately — this is the whole point of this file existing
