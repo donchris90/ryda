@@ -20,7 +20,14 @@ services:
     runtime: node
     plan: free
     region: oregon
-    buildCommand: npm install && npm run build
+    # --include=dev is required here, not optional: NODE_ENV=production
+    # is set below (correctly, for runtime), but npm's default behavior
+    # is to skip devDependencies entirely when NODE_ENV=production is
+    # already set during `npm install` — and the build tools themselves
+    # (typescript, @nestjs/cli, ts-node) all live in devDependencies.
+    # Without this flag, `npm run build` fails because `nest` doesn't
+    # exist yet. Found by tracing a real failed deploy, not assumed.
+    buildCommand: npm install --include=dev && npm run build
     startCommand: npm run start:prod
     healthCheckPath: /api/v1/health
     envVars:
