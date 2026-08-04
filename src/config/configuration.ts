@@ -73,6 +73,9 @@ export default () => ({
     refereeBonus: parseFloat(process.env.REFERRAL_REFEREE_BONUS ?? '500'),
     referrerBonus: parseFloat(process.env.REFERRAL_REFERRER_BONUS ?? '500'),
   },
+  wallet: {
+    minWithdrawalAmount: parseFloat(process.env.MIN_WITHDRAWAL_AMOUNT ?? '500'),
+  },
   twilio: {
     accountSid: process.env.TWILIO_ACCOUNT_SID ?? '',
     authToken: process.env.TWILIO_AUTH_TOKEN ?? '',

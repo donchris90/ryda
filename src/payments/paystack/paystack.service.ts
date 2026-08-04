@@ -139,6 +139,18 @@ export class PaystackService {
     };
   }
 
+  /**
+   * Verifies an account number actually belongs to a real account at the
+   * given bank, returning the bank's own record of the account holder's
+   * name — used before ever creating a transfer recipient, so a driver
+   * can't (accidentally or otherwise) register a withdrawal destination
+   * under a name that doesn't match the real account.
+   */
+  async resolveAccountNumber(accountNumber: string, bankCode: string): Promise<{ accountName: string }> {
+    const data = await this.request('GET', `/bank/resolve?account_number=${accountNumber}&bank_code=${bankCode}`);
+    return { accountName: data.account_name };
+  }
+
   /** Registers a driver's bank account as a payout recipient — required once before transfers. */
   async createTransferRecipient(params: {
     name: string;

@@ -2,8 +2,10 @@ import {
   BadRequestException,
   Body,
   Controller,
+  forwardRef,
   Get,
   HttpCode,
+  Inject,
   Param,
   Post,
   Query,
@@ -28,6 +30,7 @@ import { Audit } from '../audit/decorators/audit.decorator';
 import { RequirePermission } from '../common/permissions/require-permission.decorator';
 import { PermissionsGuard } from '../common/permissions/permissions.guard';
 import { Permission } from '../common/permissions/permission.enum';
+import { WithdrawalsService } from '../wallets/withdrawals.service';
 
 @ApiTags('payments')
 @Controller('payments')
@@ -35,6 +38,8 @@ export class PaymentsController {
   constructor(
     private readonly paymentsService: PaymentsService,
     private readonly paystack: PaystackService,
+    @Inject(forwardRef(() => WithdrawalsService))
+    private readonly withdrawalsService: WithdrawalsService,
   ) {}
 
   @Post('cards/add-init')
@@ -115,6 +120,19 @@ export class PaymentsController {
     }
 
     const event = JSON.parse(rawBody);
+
+    if (event.event === 'transfer.success' || event.event === 'transfer.failed' || event.event === 'transfer.reversed') {
+      const transferReference: string | undefined = event?.data?.reference;
+      if (transferReference) {
+        await this.withdrawalsService.handleTransferWebhook(
+          transferReference,
+          event.event === 'transfer.success',
+          event.event !== 'transfer.success' ? (event?.data?.failure_reason ?? `Paystack reported ${event.event}`) : undefined,
+        );
+      }
+      return { received: true };
+    }
+
     const reference: string | undefined = event?.data?.reference;
     if (!reference) return { received: true };
 

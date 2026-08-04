@@ -1675,6 +1675,129 @@ account automatically. Run `npm run seed:admin` once via Render's Shell
 tab (with `ADMIN_PHONE`/`ADMIN_PASSWORD`/etc. already set as env vars
 from the Blueprint, so the shell picks them up automatically).
 
+## Driver app Tier 1: referral summary + document file upload
+
+Two real backend gaps found while building the driver app's Referral
+Centre and Documents screens, not assumed beforehand:
+
+- **No self-service referral endpoint existed at all** — only the
+  automated grant logic that fires on a referee's first completed ride.
+  Added `GET /promotions/referrals/mine` (total earned, invite history
+  with names). Added `UsersService.findByIds()` as a genuinely reusable
+  batch-fetch, since nothing like it existed.
+- **No way to actually get a document URL** — `POST /drivers/documents`
+  always expected a pre-existing `documentUrl` string, but nothing
+  produced one for driver documents specifically (the pattern already
+  existed for profile photos, just never had a driver-documents
+  equivalent). Added `POST /drivers/documents/upload-file`, a real
+  multipart endpoint reusing the same `StorageService` as profile
+  photos.
+
+Also confirmed (not assumed) that `Ride.commissionAmount`/
+`driverEarnings` were already returned by the driver's own ride-history
+endpoint — the "commission breakdown" feature needed a UI change only,
+not new backend work.
+
+Verified end-to-end: a real referrer/referee flow with a real completed
+ride, confirming the correct bonus amount and referee name; a genuine
+multipart file upload (not simulated) producing a real URL, submitted
+as a document record, confirmed present afterward. A test-script bug
+caught along the way — my test claimed a driver went online but never
+actually made that call, which surfaced as a confusing "ride not found"
+result until traced back to its real cause (a 400 on accept, not a
+lookup bug). Full regression and Jest suite clean throughout.
+
+## Wallet withdrawal — the real feature, built with care given it moves actual money
+
+The low-level Paystack transfer integration already existed
+(`createTransferRecipient`, `initiateTransfer`, `listBanks`) — nothing
+was ever wired into an actual withdrawal feature. Built the missing
+layer:
+
+- **Real account verification, not a self-reported name.** Added
+  `PaystackService.resolveAccountNumber()` — the account name shown and
+  stored comes from Paystack's own bank records, checked before a
+  transfer recipient is ever created. The existing
+  `createTransferRecipient()` took `name` as a bare input parameter
+  with nothing verifying it — closed that gap rather than build on top
+  of it uncritically.
+- **`BankAccount`** — a driver's saved payout destination, first one
+  added becomes the default automatically.
+- **`WithdrawalRequest`** — a real status lifecycle
+  (pending/processing/completed/failed), not an instant fire-and-forget.
+  Debit-then-transfer, reusing `WalletsService.debit()`'s existing
+  row-locked balance check rather than reimplementing it. If Paystack's
+  initiate-transfer call fails immediately, the debit is reversed right
+  away; if it fails later (the normal case — transfers settle
+  asynchronously), the extended Paystack webhook handler
+  (`transfer.success`/`transfer.failed`/`transfer.reversed`) refunds
+  the wallet then.
+- **A genuine circular dependency**, handled properly: `WalletsModule`
+  needs `PaystackService` (from `PaymentsModule`), and the webhook
+  handler in `PaymentsController` needs `WithdrawalsService` (from
+  `WalletsModule`) to route transfer events back. Used NestJS's
+  `forwardRef()` on both sides — and didn't just trust `tsc` passing as
+  proof this actually works, since circular DI resolution is a runtime
+  concern, not a compile-time one. Verified by actually booting the
+  app and confirming "Nest application successfully started," not
+  assumed from a clean type-check.
+
+**Honest about what's verified and what isn't**: every validation path
+is tested live — clean rejection (not a crash) when Paystack isn't
+configured, confirmed the server survives that rejection, wrong-owner
+bank account access denied, auth required throughout. What's **not**
+verified, and can't be from this environment: the actual happy path of
+adding a real bank account and receiving a real payout, since that
+needs genuine Paystack credentials this sandbox doesn't have — the same
+honest limitation that applies to every other real Paystack integration
+in this build (refunds, card charges).
+
+## Shift tracking + driver analytics — the shared foundation for both
+
+A real finding before writing any new tracking code: acceptance rate
+and driver-attributed cancellation rate needed **zero new
+infrastructure**. `RideOffer.status` and `Ride.cancelledBy` already
+existed and were already populated by the real accept/decline/cancel
+flows — this only ever needed new aggregation queries against data that
+was already there. The one thing genuinely missing was online-hours/
+shift tracking, since nothing timestamped availability transitions at
+all.
+
+- **`DriverAvailability.BREAK`** — a new status. Dispatch's driver
+  search already does an exact match on `'online'`, not "anything but
+  offline," so a driver on break is automatically excluded from ride
+  offers with zero changes needed to dispatch logic. Verified live, not
+  assumed: confirmed the existing filter behavior rather than trust
+  that it would "just work."
+- **`DriverAvailabilityLog`** — one row per continuous period in a
+  given status, written by `DriversService.setAvailability()` on every
+  real change. This is the single choke point every availability
+  transition already goes through — including `ON_TRIP`, set
+  automatically by the ride-acceptance flow — so no other code needed
+  touching to get complete coverage.
+- **No separate "start shift" concept** — a shift is derived from the
+  log: the continuous run of ONLINE/BREAK rows between two OFFLINE
+  boundaries, matching how Uber/Bolt-style apps actually work. Going
+  online *is* starting your shift.
+- **Shift grouping is done in application code, not SQL** — a driver's
+  shift count is naturally small, and walk-and-bucket-on-status-change
+  is far clearer this way than a window-function query would be.
+
+Verified end-to-end with real elapsed time, not just checking that
+numbers appeared: online → break → online → offline, then confirmed
+the *exact* recorded durations at the raw database level (3.04s, 2.09s,
+1.03s) matched the test's real `sleep` calls to the millisecond — not
+just that the API returned something plausible. Also confirmed a real
+completed ride correctly produces a 100% acceptance rate and 0%
+cancellation rate, and that non-drivers are rejected from every new
+endpoint. Full regression clean throughout.
+
+## Known gaps / next steps
+
+## Known gaps / next steps
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

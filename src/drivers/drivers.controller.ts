@@ -1,4 +1,5 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -17,6 +18,7 @@ import { PermissionsGuard } from '../common/permissions/permissions.guard';
 import { Permission } from '../common/permissions/permission.enum';
 import { PassengersService } from '../passengers/passengers.service';
 import { CreateEmergencyContactDto } from '../passengers/dto/passengers.dto';
+import { StorageService } from '../storage/storage.service';
 
 @Controller('drivers')
 @UseGuards(JwtAuthGuard)
@@ -25,6 +27,7 @@ export class DriversController {
     private readonly driversService: DriversService,
     private readonly documentsService: DriverDocumentsService,
     private readonly passengersService: PassengersService,
+    private readonly storageService: StorageService,
   ) {}
 
   // ---- Emergency contacts ----
@@ -106,6 +109,26 @@ export class DriversController {
   }
 
   // ---- Documents ----
+
+  /**
+   * UploadDocumentDto expects a documentUrl string, not a file directly
+   * — there was no endpoint that actually produced one for driver
+   * documents (the pattern already exists for profile photos, on
+   * UsersController, just never had a driver-documents equivalent).
+   * Two-step flow: upload the file here to get a URL, then submit that
+   * URL via POST /drivers/documents with the document type.
+   */
+  @Post('documents/upload-file')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.DRIVER)
+  @UseInterceptors(FileInterceptor('file'))
+  async uploadDocumentFile(@UploadedFile() file: Express.Multer.File) {
+    const { url } = await this.storageService.upload(
+      { buffer: file.buffer, originalname: file.originalname, mimetype: file.mimetype },
+      'driver-documents',
+    );
+    return { url };
+  }
 
   @Post('documents')
   @UseGuards(RolesGuard)

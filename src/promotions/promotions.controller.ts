@@ -22,6 +22,12 @@ export class PromotionsController {
     return this.promotionsService.validate(dto.code, user.id, dto.fareAmount);
   }
 
+  @Get('promotions/referrals/mine')
+  @UseGuards(JwtAuthGuard)
+  myReferrals(@CurrentUser() user: User) {
+    return this.promotionsService.getReferralSummary(user.id);
+  }
+
   @Get('admin/promotions')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.MARKETING, UserRole.SUPER_ADMIN)

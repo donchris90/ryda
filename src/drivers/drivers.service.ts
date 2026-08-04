@@ -4,8 +4,9 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, IsNull } from 'typeorm';
 import { DriverProfile } from './entities/driver-profile.entity';
+import { DriverAvailabilityLog } from './entities/driver-availability-log.entity';
 import { DriverLevel } from '../common/enums/driver-level.enum';
 import {
   DriverApprovalStatus,
@@ -42,6 +43,8 @@ export class DriversService {
   constructor(
     @InjectRepository(DriverProfile)
     private readonly driversRepo: Repository<DriverProfile>,
+    @InjectRepository(DriverAvailabilityLog)
+    private readonly availabilityLogRepo: Repository<DriverAvailabilityLog>,
     private readonly events: EventEmitter2,
     private readonly fraudService: FraudService,
   ) {}
@@ -136,6 +139,23 @@ export class DriversService {
     const saved = await this.driversRepo.save(profile);
 
     if (previous !== availability) {
+      // Close whatever period was open, then start a new one — this is
+      // the entire tracking mechanism online-hours/shift/break history
+      // is built on. ON_TRIP transitions also get logged here (driven
+      // by ride acceptance/completion elsewhere, not this endpoint
+      // directly, but still a real availability change worth tracking).
+      const open = await this.availabilityLogRepo.findOne({
+        where: { driverUserId: userId, endedAt: IsNull() },
+        order: { startedAt: 'DESC' },
+      });
+      if (open) {
+        open.endedAt = new Date();
+        await this.availabilityLogRepo.save(open);
+      }
+      await this.availabilityLogRepo.save(
+        this.availabilityLogRepo.create({ driverUserId: userId, status: availability }),
+      );
+
       if (availability === DriverAvailability.ONLINE) {
         this.events.emit('driver.online', { driverUserId: userId });
       } else if (availability === DriverAvailability.OFFLINE) {

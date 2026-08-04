@@ -250,4 +250,38 @@ export class PromotionsService {
     this.events.emit('referral.bonus_granted', { userId: refereeUserId, amount: refereeBonus.toFixed(2) });
     this.events.emit('referral.bonus_granted', { userId: referrer.id, amount: referrerBonus.toFixed(2) });
   }
+
+  /**
+   * There was no self-service way for a user to see their own referral
+   * earnings or invite history at all — only the automated grant logic
+   * above existed. Found missing while building the driver app's
+   * Referral Centre. User.referralCode itself is already returned by
+   * GET /users/me, so this only needs to cover what wasn't already
+   * available: total earned, and who's actually signed up with the code.
+   */
+  async getReferralSummary(userId: string) {
+    const grants = await this.referralGrantsRepo.find({
+      where: { referrerUserId: userId },
+      order: { createdAt: 'DESC' },
+    });
+
+    const totalEarned = grants.reduce((sum, g) => sum + parseFloat(g.referrerBonus), 0);
+
+    const refereeIds = grants.map((g) => g.refereeUserId);
+    const referees = refereeIds.length ? await this.usersService.findByIds(refereeIds) : [];
+    const refereeById = new Map(referees.map((u) => [u.id, u]));
+
+    return {
+      totalEarned: totalEarned.toFixed(2),
+      totalReferrals: grants.length,
+      invites: grants.map((g) => {
+        const referee = refereeById.get(g.refereeUserId);
+        return {
+          name: referee ? `${referee.firstName} ${referee.lastName}` : 'Unknown',
+          bonusEarned: g.referrerBonus,
+          joinedAt: g.createdAt,
+        };
+      }),
+    };
+  }
 }

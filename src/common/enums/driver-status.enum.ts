@@ -10,6 +10,7 @@ export enum DriverAvailability {
   OFFLINE = 'offline',
   ONLINE = 'online',
   ON_TRIP = 'on_trip',
+  BREAK = 'break',
 }
 
 export enum KycStatus {

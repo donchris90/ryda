@@ -2,16 +2,27 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { DriverProfile } from './entities/driver-profile.entity';
 import { DriverDocument } from './entities/driver-document.entity';
+import { DriverAvailabilityLog } from './entities/driver-availability-log.entity';
+import { Ride } from '../rides/entities/ride.entity';
+import { RideOffer } from '../dispatch/entities/ride-offer.entity';
 import { DriversService } from './drivers.service';
 import { DriverDocumentsService } from './driver-documents.service';
+import { DriverAnalyticsService } from './driver-analytics.service';
 import { DriversController } from './drivers.controller';
+import { DriverAnalyticsController } from './driver-analytics.controller';
 import { FraudModule } from '../fraud/fraud.module';
 import { PassengersModule } from '../passengers/passengers.module';
+import { StorageModule } from '../storage/storage.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([DriverProfile, DriverDocument]), FraudModule, PassengersModule],
-  providers: [DriversService, DriverDocumentsService],
-  controllers: [DriversController],
-  exports: [DriversService, DriverDocumentsService],
+  imports: [
+    TypeOrmModule.forFeature([DriverProfile, DriverDocument, DriverAvailabilityLog, Ride, RideOffer]),
+    FraudModule,
+    PassengersModule,
+    StorageModule,
+  ],
+  providers: [DriversService, DriverDocumentsService, DriverAnalyticsService],
+  controllers: [DriversController, DriverAnalyticsController],
+  exports: [DriversService, DriverDocumentsService, DriverAnalyticsService],
 })
 export class DriversModule {}

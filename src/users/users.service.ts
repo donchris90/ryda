@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
 import { User } from './entities/user.entity';
 import { UserRole } from '../common/enums/user-role.enum';
@@ -21,6 +21,11 @@ export class UsersService {
     @InjectRepository(User)
     private readonly usersRepo: Repository<User>,
   ) {}
+
+  async findByIds(ids: string[]): Promise<User[]> {
+    if (ids.length === 0) return [];
+    return this.usersRepo.find({ where: { id: In(ids) } });
+  }
 
   async findByPhone(phone: string): Promise<User | null> {
     return this.usersRepo.findOne({ where: { phone } });
