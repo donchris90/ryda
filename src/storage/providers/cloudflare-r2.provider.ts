@@ -2,6 +2,7 @@ import { Injectable, InternalServerErrorException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 
 const PRESIGNED_URL_TTL_SECONDS = 7 * 24 * 60 * 60;
 
@@ -23,6 +24,17 @@ export class CloudflareR2Provider {
             region: 'auto',
             endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
             credentials: { accessKeyId, secretAccessKey },
+            // Without this, a misconfigured account ID, wrong bucket, or
+            // an unreachable endpoint hangs the request indefinitely —
+            // Render's own proxy eventually kills it and returns a
+            // non-JSON response, which is exactly what produced the
+            // generic "could not upload, try again" fallback rather than
+            // a real error message. Same class of bug already fixed for
+            // Google Maps, Nominatim, and Paystack.
+            requestHandler: new NodeHttpHandler({
+              connectionTimeout: 5000,
+              requestTimeout: 15000,
+            }),
           })
         : null;
   }

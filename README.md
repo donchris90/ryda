@@ -1900,6 +1900,40 @@ succeeds once all three are approved, and going offline confirmed to
 work regardless of document status. Full regression (now with the
 updated setup) and Jest suite clean.
 
+## Fixed a real bug from a live report: document uploads hanging instead of failing
+
+A driver reported "could not upload this document, try again" — the
+driver app's *fallback* error message, used specifically when a
+response isn't clean JSON at all, not a normal rejected request.
+Combined with Render's live logs showing no completed request log line
+for the upload whatsoever, this pointed at something hanging rather
+than failing cleanly.
+
+Traced it to the same class of bug already found and fixed for Google
+Maps, Nominatim, and Paystack earlier in this build: the R2 (and plain
+S3) client had zero timeout configured. A misconfigured account ID,
+wrong bucket, or unreachable endpoint would hang the request
+indefinitely rather than error out — Render's own proxy eventually
+kills a request like that and returns a non-JSON response, which is
+exactly what produced the generic fallback text instead of a real
+error message.
+
+Fixed with a real connection/request timeout (`@smithy/node-http-handler`,
+5s connect / 15s total) on both `CloudflareR2Provider` and `S3Provider`
+— added as an explicit dependency rather than relying on it being
+available transitively through `@aws-sdk/client-s3`, since an
+undeclared transitive dependency is fragile if AWS SDK's internals ever
+change.
+
+Verified with a real timed request against deliberately bogus R2
+credentials: completed in ~1 second with a clean JSON 500 response,
+not a hang — confirming the fix's core value (fast, clean failure)
+even though this sandbox's own network restrictions mean it can't
+exercise the exact 15-second timeout boundary against a genuinely slow
+(rather than blocked) endpoint. Full regression clean throughout.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 - **Payment gateway, notification providers, and now Google Maps are real

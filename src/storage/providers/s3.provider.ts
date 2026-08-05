@@ -2,6 +2,7 @@ import { Injectable, InternalServerErrorException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 
 const PRESIGNED_URL_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days
 
@@ -20,6 +21,13 @@ export class S3Provider {
         ? new S3Client({
             region: this.config.get<string>('storage.s3Region'),
             credentials: { accessKeyId, secretAccessKey },
+            // Same fix as CloudflareR2Provider — see that file for why
+            // this matters (a misconfigured/unreachable endpoint hangs
+            // the request indefinitely without it).
+            requestHandler: new NodeHttpHandler({
+              connectionTimeout: 5000,
+              requestTimeout: 15000,
+            }),
           })
         : null;
   }
