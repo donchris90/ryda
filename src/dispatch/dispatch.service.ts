@@ -39,6 +39,12 @@ export class DispatchService {
   ) {}
 
   /**
+   * Not called automatically anywhere anymore — the passenger picks a
+   * driver themselves now (see rides.service.ts requestRide()). Left in
+   * place, working and tested, as a real capability that could be wired
+   * back in later — e.g. an "auto-assign for me" fallback button on the
+   * driver-list screen, for a passenger who doesn't want to choose.
+   *
    * Offers the ride to the nearest eligible driver who hasn't already been
    * tried for this ride (declined or timed out). No-ops quietly if nobody's
    * available — the ride stays "searching" and broadcast-accept still works.
@@ -120,13 +126,47 @@ export class DispatchService {
     );
   }
 
-  /** Driver explicitly declines their offer — immediately tries the next-nearest driver. */
+  /** Driver explicitly declines their offer — the passenger picks someone else themselves, no automatic reassignment. */
   async markDeclined(rideId: string, driverUserId: string): Promise<void> {
     await this.offersRepo.update(
       { rideId, driverUserId, status: RideOfferStatus.PENDING },
       { status: RideOfferStatus.DECLINED },
     );
-    await this.offerToNearestDriver(rideId);
+  }
+
+  /**
+   * The passenger's explicit choice, not a ranking decision — no
+   * "nearest eligible" logic here, this driver is who they picked.
+   * Supersedes any existing pending offer for this ride first (from an
+   * earlier selection that expired or was declined), so there's always
+   * at most one live offer per ride — the exclusivity check in
+   * RidesService.acceptRide() depends on that invariant holding.
+   */
+  async offerToSpecificDriver(rideId: string, driverUserId: string): Promise<RideOffer> {
+    await this.offersRepo.update(
+      { rideId, status: RideOfferStatus.PENDING },
+      { status: RideOfferStatus.SUPERSEDED },
+    );
+
+    const ride = await this.ridesRepo.findOne({ where: { id: rideId } });
+    let distanceKm = 0;
+    if (ride) {
+      const candidates = await this.driversService.findNearby(
+        { lat: ride.pickupLat, lng: ride.pickupLng },
+        { limit: 20 },
+      );
+      distanceKm = candidates.find((c) => c.userId === driverUserId)?.distanceKm ?? 0;
+    }
+
+    const timeoutSeconds = this.config.get<number>('dispatch.offerTimeoutSeconds')!;
+    return this.offersRepo.save(
+      this.offersRepo.create({
+        rideId,
+        driverUserId,
+        distanceKm,
+        expiresAt: new Date(Date.now() + timeoutSeconds * 1000),
+      }),
+    );
   }
 
   async getMyPendingOffer(rideId: string, driverUserId: string): Promise<RideOffer | null> {
@@ -135,14 +175,24 @@ export class DispatchService {
     });
   }
 
+  /** Used by RidesService.acceptRide()'s exclusivity check — is *anyone* currently offered this ride, and who. */
+  async getPendingOfferForRide(rideId: string): Promise<RideOffer | null> {
+    return this.offersRepo.findOne({
+      where: { rideId, status: RideOfferStatus.PENDING },
+    });
+  }
+
   /** Exposed for the health check — confirms the scheduler is actually still running, not just registered. */
   lastSweepAt: Date | null = null;
 
   /**
-   * Periodic sweep: expires offers past their deadline and, for any ride
-   * that's still searching, immediately tries the next-nearest driver.
-   * This is what makes reassignment automatic rather than requiring the
-   * driver to actively decline.
+   * Periodic sweep: expires offers past their deadline. Used to
+   * auto-reassign to the next-nearest driver here too — that's exactly
+   * the "system silently picks a different driver instead of the
+   * passenger" behavior this feature was rebuilt to remove. Now it only
+   * does the expiry bookkeeping; the passenger's app polls/detects the
+   * expired offer and shows them the driver list again to choose
+   * themselves.
    */
   @Interval(15000)
   async expireStaleOffersAndReassign(): Promise<void> {
@@ -153,15 +203,9 @@ export class DispatchService {
     });
     if (stale.length === 0) return;
 
-    const rideIds = new Set<string>();
     for (const offer of stale) {
       offer.status = RideOfferStatus.EXPIRED;
-      rideIds.add(offer.rideId);
     }
     await this.offersRepo.save(stale);
-
-    for (const rideId of rideIds) {
-      await this.offerToNearestDriver(rideId);
-    }
   }
 }

@@ -7,10 +7,12 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { UserRole } from '../common/enums/user-role.enum';
 import { User } from '../users/entities/user.entity';
 import { RidesService } from './rides.service';
+import { DispatchService } from '../dispatch/dispatch.service';
 import { FareEstimateDto } from './dto/fare-estimate.dto';
 import { RequestRideDto } from './dto/request-ride.dto';
 import { CancelRideDto } from './dto/cancel-ride.dto';
 import { RateRideDto } from './dto/rate-ride.dto';
+import { SelectDriverDto } from './dto/select-driver.dto';
 import { CancelledBy, RideStatus } from '../common/enums/ride.enum';
 import { AddTipDto, VerifyPinDto } from './dto/tip-and-pin.dto';
 
@@ -18,7 +20,10 @@ import { AddTipDto, VerifyPinDto } from './dto/tip-and-pin.dto';
 @ApiBearerAuth('access-token')
 @Controller('rides')
 export class RidesController {
-  constructor(private readonly ridesService: RidesService) {}
+  constructor(
+    private readonly ridesService: RidesService,
+    private readonly dispatchService: DispatchService,
+  ) {}
 
   @ApiOperation({
     summary: 'Get a fare estimate',
@@ -129,6 +134,36 @@ export class RidesController {
   @Roles(UserRole.ADMIN, UserRole.DISPATCHER)
   nearbyDrivers(@Param('id') id: string, @Query('radiusKm') radiusKm?: string) {
     return this.ridesService.findNearbyDrivers(id, radiusKm ? parseFloat(radiusKm) : undefined);
+  }
+
+  /**
+   * The passenger-facing equivalent, with what a passenger actually
+   * needs to choose someone — name, vehicle, ETA — not the bare
+   * ops-console shape above.
+   */
+  @Get(':id/selectable-drivers')
+  @UseGuards(JwtAuthGuard)
+  selectableDrivers(@Param('id') id: string) {
+    return this.ridesService.findSelectableDrivers(id);
+  }
+
+  @Post(':id/select-driver')
+  @UseGuards(JwtAuthGuard)
+  selectDriver(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: SelectDriverDto) {
+    return this.ridesService.selectDriver(id, user.id, dto.driverUserId);
+  }
+
+  /**
+   * Lets the passenger's app know whether there's currently a live
+   * offer out (and to render a waiting/countdown state) or whether it
+   * should show the driver list again — the ride's own status alone
+   * doesn't distinguish these, since it stays SEARCHING through the
+   * whole select → wait → maybe-expire → select-again cycle.
+   */
+  @Get(':id/current-offer')
+  @UseGuards(JwtAuthGuard)
+  currentOffer(@Param('id') id: string) {
+    return this.dispatchService.getPendingOfferForRide(id);
   }
 
   @Patch(':id/accept')

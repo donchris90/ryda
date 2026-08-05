@@ -17,6 +17,7 @@ import { haversineDistanceKm } from '../common/utils/geo.util';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { FraudService } from '../fraud/fraud.service';
 import { User } from '../users/entities/user.entity';
+import { DriverDocumentsService } from './driver-documents.service';
 
 // Trips required to progress to the next level.
 const LEVEL_PROGRESSION: { level: DriverLevel; minTrips: number; minRating: number }[] = [
@@ -47,6 +48,7 @@ export class DriversService {
     private readonly availabilityLogRepo: Repository<DriverAvailabilityLog>,
     private readonly events: EventEmitter2,
     private readonly fraudService: FraudService,
+    private readonly documentsService: DriverDocumentsService,
   ) {}
 
   async onboard(userId: string, dto: OnboardDriverDto): Promise<DriverProfile> {
@@ -133,6 +135,14 @@ export class DriversService {
     const profile = await this.findByUserId(userId);
     if (profile.approvalStatus !== DriverApprovalStatus.APPROVED) {
       throw new BadRequestException('Driver is not approved to go online');
+    }
+    if (availability === DriverAvailability.ONLINE || availability === DriverAvailability.BREAK) {
+      const documentsApproved = await this.documentsService.hasAllRequiredApproved(profile.id);
+      if (!documentsApproved) {
+        throw new BadRequestException(
+          "You can't go online yet — your license, insurance, and roadworthiness documents all need to be approved first. Check the Documents section of your profile.",
+        );
+      }
     }
     const previous = profile.availability;
     profile.availability = availability;

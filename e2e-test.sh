@@ -45,6 +45,16 @@ VEHICLE_ID=$(echo "$VEHICLE" | jget id)
 echo "vehicle id: $VEHICLE_ID"
 
 echo
+echo "== 5b. Approve required documents (license, insurance, roadworthiness) — now a genuine prerequisite for going online, simulated via SQL same as the driver-profile approval above =="
+su postgres -c "psql -d ryda -c \"
+INSERT INTO driver_documents (id, \\\"driverProfileId\\\", type, \\\"documentUrl\\\", status, \\\"createdAt\\\", \\\"updatedAt\\\")
+VALUES
+  (gen_random_uuid(), '$DRIVER_PROFILE_ID', 'drivers_license', 'https://example.com/license.jpg', 'approved', now(), now()),
+  (gen_random_uuid(), '$DRIVER_PROFILE_ID', 'insurance', 'https://example.com/insurance.jpg', 'approved', now(), now()),
+  (gen_random_uuid(), '$DRIVER_PROFILE_ID', 'road_worthiness', 'https://example.com/roadworthiness.jpg', 'approved', now(), now());
+\""
+
+echo
 echo "== 6. Driver goes online =="
 ONLINE=$(curl -s -X PATCH $BASE/drivers/availability/online -H "Authorization: Bearer $DRIVER_TOKEN")
 echo "$ONLINE"

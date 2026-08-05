@@ -49,6 +49,20 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { TransactionCategory } from '../common/enums/transaction.enum';
 import { DriverAvailability, DriverApprovalStatus } from '../common/enums/driver-status.enum';
 
+export interface SelectableDriverResult {
+  driverUserId: string;
+  firstName: string;
+  lastName: string;
+  rating: number;
+  level: DriverProfile['level'];
+  distanceKm: number;
+  etaMinutes: number;
+  vehicleMake: string | null;
+  vehicleModel: string | null;
+  vehicleColor: string | null;
+  vehiclePlateNumber: string | null;
+}
+
 @Injectable()
 export class RidesService {
   constructor(
@@ -183,12 +197,12 @@ export class RidesService {
         { rideId: savedRide.id },
         { delay, jobId: `activate-${savedRide.id}` },
       );
-    } else {
-      // Best-effort — if nobody's nearby right now the ride just stays
-      // "searching" and any online driver can still claim it via the
-      // existing broadcast-accept flow.
-      await this.dispatchService.offerToNearestDriver(savedRide.id).catch(() => undefined);
     }
+    // No automatic dispatch here anymore — the passenger picks a driver
+    // themselves from the nearby-drivers list (GET /rides/:id/nearby-drivers)
+    // and targets them explicitly (POST /rides/:id/select-driver). The ride
+    // just sits SEARCHING until they do. See dispatch.service.ts for why
+    // the old auto-pick-nearest behavior was removed as the primary flow.
 
     return savedRide;
   }
@@ -496,8 +510,8 @@ export class RidesService {
 
     ride.status = RideStatus.SEARCHING;
     await this.ridesRepo.save(ride);
-
-    await this.dispatchService.offerToNearestDriver(ride.id).catch(() => undefined);
+    // No auto-dispatch — same reasoning as requestRide() above. The
+    // passenger picks a driver from the list once the ride activates.
   }
 
   async findForDriver(driverId: string): Promise<Ride[]> {
@@ -519,10 +533,101 @@ export class RidesService {
     );
   }
 
+  /**
+   * The passenger-facing version, for actually choosing a driver rather
+   * than an internal ops view — needs a name and vehicle to be
+   * meaningful to a passenger, which findNearbyDrivers() above
+   * deliberately doesn't include (kept lean for its one existing
+   * caller, the dispatch console).
+   *
+   * ETA is a straight-line-distance estimate, not real routing — this
+   * environment has no Google Directions key configured, and even where
+   * one is, calling it per-candidate for a whole list on every refresh
+   * would be slow and expensive. 28 km/h is a reasonable average urban
+   * driving speed assumption for a Lagos-style city; genuinely
+   * traffic-aware ETA is what the ride-tracking screen's real routing
+   * (already built, uses Directions when configured) is for, once
+   * there's a single specific driver to route to.
+   */
+  async findSelectableDrivers(rideId: string): Promise<SelectableDriverResult[]> {
+    const ride = await this.findById(rideId);
+    const candidates = await this.driversService.findNearby(
+      { lat: ride.pickupLat, lng: ride.pickupLng },
+      { city: ride.city ?? undefined, limit: 20 },
+    );
+    if (candidates.length === 0) return [];
+
+    const ASSUMED_AVG_SPEED_KMH = 28;
+
+    const userIds = candidates.map((c) => c.userId);
+    const vehicleIds = candidates.map((c) => c.vehicleId).filter((v): v is string => !!v);
+    const [users, vehicles] = await Promise.all([
+      this.usersService.findByIds(userIds),
+      Promise.all(vehicleIds.map((id) => this.vehiclesService.findById(id).catch(() => null))),
+    ]);
+    const userById = new Map(users.map((u) => [u.id, u]));
+    const vehicleById = new Map(vehicles.filter((v): v is NonNullable<typeof v> => !!v).map((v) => [v.id, v]));
+
+    return candidates.map((c) => {
+      const user = userById.get(c.userId);
+      const vehicle = c.vehicleId ? vehicleById.get(c.vehicleId) : undefined;
+      return {
+        driverUserId: c.userId,
+        firstName: user?.firstName ?? 'Driver',
+        lastName: user?.lastName ?? '',
+        rating: c.rating,
+        level: c.level,
+        distanceKm: c.distanceKm,
+        etaMinutes: Math.max(1, Math.round((c.distanceKm / ASSUMED_AVG_SPEED_KMH) * 60)),
+        vehicleMake: vehicle?.make ?? null,
+        vehicleModel: vehicle?.model ?? null,
+        vehicleColor: vehicle?.color ?? null,
+        vehiclePlateNumber: vehicle?.plateNumber ?? null,
+      };
+    });
+  }
+
+  /**
+   * The passenger targets a specific driver directly — no "nearest"
+   * ranking involved, this is their explicit choice. Any previous
+   * pending offer for this ride (from an earlier selection that expired
+   * or was declined) is superseded first, so there's never more than
+   * one live offer per ride — the exclusivity check in acceptRide()
+   * below depends on that being true.
+   */
+  async selectDriver(rideId: string, passengerId: string, driverUserId: string): Promise<void> {
+    const ride = await this.findById(rideId);
+    if (ride.passengerId !== passengerId) throw new ForbiddenException('This is not your ride');
+    if (ride.status !== RideStatus.SEARCHING) {
+      throw new BadRequestException(`Cannot select a driver while the ride is ${ride.status}`);
+    }
+
+    const driverProfile = await this.driversService.findByUserId(driverUserId);
+    if (driverProfile.approvalStatus !== DriverApprovalStatus.APPROVED) {
+      throw new BadRequestException('This driver is not currently available.');
+    }
+    if (driverProfile.availability !== DriverAvailability.ONLINE) {
+      throw new BadRequestException('This driver is no longer online — pick another from the list.');
+    }
+
+    await this.dispatchService.offerToSpecificDriver(rideId, driverUserId);
+  }
+
   async acceptRide(rideId: string, driverUserId: string): Promise<Ride> {
     const ride = await this.findById(rideId);
     if (ride.status !== RideStatus.SEARCHING && ride.status !== RideStatus.REQUESTED) {
       throw new BadRequestException(`Ride cannot be accepted from status ${ride.status}`);
+    }
+
+    // If the passenger has a pending offer out to a specific driver,
+    // only that driver may accept — otherwise a different driver could
+    // swoop in via broadcast-accept while the chosen one is still
+    // deciding, which would defeat the entire point of letting the
+    // passenger pick. No pending offer at all (nobody's been selected
+    // yet) still allows the plain broadcast-accept path below.
+    const pendingOffer = await this.dispatchService.getPendingOfferForRide(rideId);
+    if (pendingOffer && pendingOffer.driverUserId !== driverUserId) {
+      throw new ForbiddenException('This ride is currently offered to another driver.');
     }
 
     const driverProfile = await this.driversService.findByUserId(driverUserId);

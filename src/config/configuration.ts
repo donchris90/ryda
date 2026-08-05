@@ -105,7 +105,7 @@ export default () => ({
     cancellationFee: parseFloat(process.env.CANCELLATION_FEE ?? '500'),
   },
   dispatch: {
-    offerTimeoutSeconds: parseInt(process.env.DISPATCH_OFFER_TIMEOUT_SECONDS ?? '20', 10),
+    offerTimeoutSeconds: parseInt(process.env.DISPATCH_OFFER_TIMEOUT_SECONDS ?? '60', 10),
     offerRadiusKm: parseFloat(process.env.DISPATCH_OFFER_RADIUS_KM ?? '8'),
     expiryCheckIntervalMs: parseInt(process.env.DISPATCH_EXPIRY_CHECK_MS ?? '15000', 10),
     scheduledRideLeadMinutes: parseInt(process.env.SCHEDULED_RIDE_LEAD_MINUTES ?? '10', 10),

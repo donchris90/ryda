@@ -1792,71 +1792,113 @@ completed ride correctly produces a 100% acceptance rate and 0%
 cancellation rate, and that non-drivers are rejected from every new
 endpoint. Full regression clean throughout.
 
-## Known gaps / next steps
+## Fleet + Corporate admin visibility
 
-## Known gaps / next steps
+**Fleet** already had one admin endpoint (`GET /fleet/admin/companies`),
+but it was a bare, unenriched list — no owner name, no driver/vehicle
+counts, no way to act on anything. Same "raw list" pattern found
+repeatedly elsewhere. Enriched it and added
+`PATCH /fleet/admin/companies/:id/active/:isActive`.
 
-## Known gaps / next steps
+**Corporate had zero admin endpoints at all** — only self-service ones
+(`accounts/mine/*`), all locked behind a class-level
+`@Roles(UserRole.CORPORATE)` that made adding admin routes to the same
+controller impossible without restructuring. Moved `@Roles` to
+method-level (same fix `VehiclesController` needed earlier) and built
+the admin surface from scratch: enriched list, activate/deactivate.
+Verified the refactor didn't break the existing self-service endpoint
+— not assumed, explicitly re-tested `GET /corporate/accounts/mine`
+after moving the decorator.
 
-## Known gaps / next steps
+Both enrichments reused `UsersService.findByIds()` (built a few rounds
+back for the driver Referral Centre) rather than duplicate a batch-
+fetch — genuinely useful now on its third real use.
 
-## Known gaps / next steps
+Verified end-to-end: a real fleet company and a real corporate account
+created through their actual owner-facing endpoints, confirmed correct
+in the enriched admin list (owner name, not a bare ID), deactivate/
+reactivate both round-tripped correctly, and non-admin access rejected
+from both. Full regression clean throughout.
 
-## Known gaps / next steps
+## Redesigned: passenger picks their driver (real request, real architecture change)
 
-## Known gaps / next steps
+The original dispatch model was automatic — system picks the nearest
+driver, silently retries a different one if they don't respond. A real
+user report was direct about this causing driver-side problems, and
+asked for the Uber/Bolt-style alternative instead: passenger sees a
+list of nearby drivers with distance/ETA, picks one specifically, that
+driver gets a real window to respond, and if they don't, the passenger
+picks again themselves — no silent reassignment.
 
-## Known gaps / next steps
+**A real correctness gap found and closed before building on top of
+it**: `acceptRide()` let *any* online driver claim a searching ride,
+regardless of who was actually offered it. Building passenger choice on
+top of that unfixed would have been broken by construction — a
+different driver could swoop in via broadcast-accept while the chosen
+one was still deciding. Added an exclusivity check: while a specific
+offer is pending, only that driver may accept. Broadcast-accept still
+works exactly as before for rides nobody's selected anyone for yet
+(confirmed via the full existing e2e suite, unchanged, still passing).
 
-## Known gaps / next steps
+What changed:
+- Automatic dispatch removed from ride creation and scheduled-ride
+  activation — a ride now just sits `SEARCHING` until the passenger
+  acts, not auto-matched.
+- The periodic sweep and the driver-decline path both used to
+  auto-reassign to the next-nearest driver; both now just record the
+  outcome (expired/declined) and stop. The old
+  `offerToNearestDriver()` method is kept, not deleted — real, working,
+  tested capability that could be wired back in later as an
+  "auto-assign for me" option, just not the automatic default anymore.
+- Three new endpoints: `GET /rides/:id/selectable-drivers` (name,
+  vehicle, rating, distance-based ETA estimate — no Directions API
+  configured in this environment, so this is a straight-line-distance
+  approximation using an assumed 28 km/h average urban speed, not
+  real traffic-aware routing), `POST /rides/:id/select-driver` (creates
+  a targeted offer, no "nearest" ranking involved — this is the
+  passenger's explicit choice), `GET /rides/:id/current-offer` (lets
+  the app distinguish "waiting on someone" from "show the list again,"
+  since the ride's own status alone doesn't change through this cycle).
+- Offer timeout default changed from 20s to 60s.
 
-## Known gaps / next steps
+Verified end-to-end with two real drivers and a real passenger: no
+auto-offer on creation, the selectable-drivers list showing both with
+correct names/vehicles/ETA, the critical exclusivity check actually
+rejecting the non-selected driver with a clear error, a decline
+correctly *not* triggering silent reassignment, successful reselection
+of a different driver afterward, and broadcast-accept confirmed still
+functional for the no-offer-yet case. A test-script bug surfaced and
+was fixed along the way — a bash function-wrapper pattern I hadn't used
+successfully before in this whole session produced silently wrong
+variable capture; rewritten inline, matching the pattern that's worked
+reliably every other time. Full regression and Jest suite clean
+throughout.
 
-## Known gaps / next steps
+## Document approval now genuinely gates going online
 
-## Known gaps / next steps
+`hasAllRequiredApproved()` (license, insurance, roadworthiness all
+approved) already existed on `DriverDocumentsService` — genuinely never
+called anywhere in the codebase before this. Wired it into
+`DriversService.setAvailability()`: going ONLINE or BREAK now requires
+it, with a clear, specific error message naming what's missing. Going
+OFFLINE is deliberately exempt — a driver should always be able to stop
+working regardless of document status.
 
-## Known gaps / next steps
+**This broke the existing e2e regression test**, and that was the
+correct outcome, not a problem to work around — the test had never
+uploaded or approved any documents before going a driver online, which
+was only possible because the check didn't exist yet. Updated
+`e2e-test.sh` to approve the three required documents via direct SQL
+(same simulated-admin-action pattern the script already uses for the
+driver-profile approval one step earlier) before attempting to go
+online, matching the new real requirement rather than weakening the fix
+to keep old test data working.
 
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
-
-## Known gaps / next steps
+Verified end-to-end: going online with zero documents rejected with the
+specific message, still rejected with only one of three approved,
+succeeds once all three are approved, and going offline confirmed to
+work regardless of document status. Full regression (now with the
+updated setup) and Jest suite clean.
 
 ## Known gaps / next steps
 

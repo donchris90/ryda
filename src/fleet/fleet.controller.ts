@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -110,6 +110,13 @@ export class FleetController {
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   adminListAll() {
-    return this.fleetService.findAll();
+    return this.fleetService.listForAdmin();
+  }
+
+  @Patch('admin/companies/:id/active/:isActive')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  adminSetActive(@Param('id') id: string, @Param('isActive') isActive: string) {
+    return this.fleetService.setActive(id, isActive === 'true');
   }
 }

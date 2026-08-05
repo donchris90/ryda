@@ -141,4 +141,52 @@ export class CorporateService {
       return account;
     });
   }
+
+  /**
+   * Corporate had zero admin-facing endpoints at all before this — only
+   * self-service ones (accounts/mine/*). Same enrichment pattern as
+   * Fleet: owner name, employee count, reused UsersService.findByIds()
+   * rather than a raw join, since it already existed from an earlier
+   * round (built for the driver Referral Centre).
+   */
+  async listForAdmin() {
+    const accounts = await this.accountsRepo.find({ order: { createdAt: 'DESC' } });
+    if (accounts.length === 0) return [];
+
+    const ownerIds = accounts.map((a) => a.ownerUserId);
+    const owners = await this.usersService.findByIds(ownerIds);
+    const ownerById = new Map(owners.map((o) => [o.id, o]));
+
+    const employeeCounts = await this.employeesRepo
+      .createQueryBuilder('e')
+      .select('e.corporateAccountId', 'corporateAccountId')
+      .addSelect('COUNT(*)', 'count')
+      .where('e.corporateAccountId IN (:...ids)', { ids: accounts.map((a) => a.id) })
+      .groupBy('e.corporateAccountId')
+      .getRawMany();
+    const employeeCountByAccount = new Map(employeeCounts.map((r) => [r.corporateAccountId, parseInt(r.count, 10)]));
+
+    return accounts.map((a) => {
+      const owner = ownerById.get(a.ownerUserId);
+      return {
+        id: a.id,
+        companyName: a.companyName,
+        budgetBalance: a.budgetBalance,
+        currency: a.currency,
+        isActive: a.isActive,
+        createdAt: a.createdAt,
+        ownerFirstName: owner?.firstName ?? null,
+        ownerLastName: owner?.lastName ?? null,
+        ownerPhone: owner?.phone ?? null,
+        employeeCount: employeeCountByAccount.get(a.id) ?? 0,
+      };
+    });
+  }
+
+  async setActive(id: string, isActive: boolean): Promise<CorporateAccount> {
+    const account = await this.accountsRepo.findOne({ where: { id } });
+    if (!account) throw new NotFoundException('Corporate account not found');
+    account.isActive = isActive;
+    return this.accountsRepo.save(account);
+  }
 }

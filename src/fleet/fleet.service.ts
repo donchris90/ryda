@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, In } from 'typeorm';
 import { FleetCompany } from './entities/fleet-company.entity';
 import { FleetStaff, FleetStaffRole } from './entities/fleet-staff.entity';
 import { FleetWallet } from './entities/fleet-wallet.entity';
@@ -69,8 +69,71 @@ export class FleetService {
     return company;
   }
 
-  async findAll(): Promise<FleetCompany[]> {
-    return this.companiesRepo.find({ order: { createdAt: 'DESC' } });
+  /**
+   * Same "raw list, no name" gap found repeatedly elsewhere in this
+   * codebase — plus driver/vehicle counts and wallet balance, since
+   * admin can't meaningfully manage a fleet company without knowing
+   * its actual size. ownerUserId is a plain @Column() with no relation
+   * annotation, so it needs the ::text cast like most cases (not the
+   * @JoinColumn exception that DriverProfile.userId turned out to be).
+   */
+  async listForAdmin() {
+    const companies = await this.companiesRepo.find({ order: { createdAt: 'DESC' } });
+    if (companies.length === 0) return [];
+
+    const ids = companies.map((c) => c.id);
+    const ownerIds = companies.map((c) => c.ownerUserId);
+
+    const [owners, driverCounts, vehicleCounts, wallets]: [
+      { id: string; firstName: string; lastName: string; phone: string }[],
+      any[],
+      any[],
+      FleetWallet[],
+    ] = await Promise.all([
+      this.companiesRepo.manager.query(
+        `SELECT id, "firstName", "lastName", phone FROM users WHERE id::text = ANY($1)`,
+        [ownerIds],
+      ),
+      this.companiesRepo.manager.query(
+        `SELECT "fleetCompanyId", COUNT(*)::int as count FROM driver_profiles WHERE "fleetCompanyId" = ANY($1) GROUP BY "fleetCompanyId"`,
+        [ids],
+      ),
+      this.companiesRepo.manager.query(
+        `SELECT "fleetCompanyId", COUNT(*)::int as count FROM vehicles WHERE "fleetCompanyId" = ANY($1) GROUP BY "fleetCompanyId"`,
+        [ids],
+      ),
+      this.walletsRepo.find({ where: { fleetCompanyId: In(ids) } }),
+    ]);
+
+    const ownerById = new Map(owners.map((o: any) => [o.id, o]));
+    const driverCountByCompany = new Map(driverCounts.map((r: any) => [r.fleetCompanyId, r.count]));
+    const vehicleCountByCompany = new Map(vehicleCounts.map((r: any) => [r.fleetCompanyId, r.count]));
+    const walletByCompany = new Map(wallets.map((w) => [w.fleetCompanyId, w]));
+
+    return companies.map((c) => {
+      const owner = ownerById.get(c.ownerUserId);
+      return {
+        id: c.id,
+        name: c.name,
+        registrationNumber: c.registrationNumber,
+        city: c.city,
+        isActive: c.isActive,
+        createdAt: c.createdAt,
+        ownerFirstName: owner?.firstName ?? null,
+        ownerLastName: owner?.lastName ?? null,
+        ownerPhone: owner?.phone ?? null,
+        driverCount: driverCountByCompany.get(c.id) ?? 0,
+        vehicleCount: vehicleCountByCompany.get(c.id) ?? 0,
+        walletBalance: walletByCompany.get(c.id)?.balance ?? '0.00',
+      };
+    });
+  }
+
+  async setActive(id: string, isActive: boolean): Promise<FleetCompany> {
+    const company = await this.companiesRepo.findOne({ where: { id } });
+    if (!company) throw new NotFoundException('Fleet company not found');
+    company.isActive = isActive;
+    return this.companiesRepo.save(company);
   }
 
   /** Resolves the fleet company a staff member (owner or manager) belongs to. */
