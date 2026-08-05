@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, InternalServerErrorException, Param, Patch, Post, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -123,11 +123,22 @@ export class DriversController {
   @Roles(UserRole.DRIVER)
   @UseInterceptors(FileInterceptor('file'))
   async uploadDocumentFile(@UploadedFile() file: Express.Multer.File) {
-    const { url } = await this.storageService.upload(
-      { buffer: file.buffer, originalname: file.originalname, mimetype: file.mimetype },
-      'driver-documents',
-    );
-    return { url };
+    try {
+      const { url } = await this.storageService.upload(
+        { buffer: file.buffer, originalname: file.originalname, mimetype: file.mimetype },
+        'driver-documents',
+      );
+      return { url };
+    } catch (err) {
+      // Without this, any storage failure (wrong bucket, bad
+      // permissions, misconfigured account ID) surfaces as a bare
+      // "Internal server error" with no way to tell what's actually
+      // wrong short of digging through server logs. Surfacing the
+      // real reason here is what makes this diagnosable at all from
+      // the client side.
+      const reason = err instanceof Error ? err.message : 'Unknown storage error';
+      throw new InternalServerErrorException(`Could not upload file: ${reason}`);
+    }
   }
 
   @Post('documents')

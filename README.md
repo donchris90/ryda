@@ -1932,6 +1932,22 @@ even though this sandbox's own network restrictions mean it can't
 exercise the exact 15-second timeout boundary against a genuinely slow
 (rather than blocked) endpoint. Full regression clean throughout.
 
+## Surface the real storage error instead of a generic 500
+
+Once the timeout fix above was deployed and confirmed working (real,
+fast failures instead of hangs), the driver still saw the exact same
+generic "could not upload" text — which turned out to be a second,
+completely separate bug, not evidence the first fix hadn't worked.
+`uploadDocumentFile()` had no error handling of its own — NestJS's
+default handler turns any unhandled exception into a bare "Internal
+server error" with no indication of what actually went wrong. Added a
+try/catch that surfaces the real underlying reason (e.g. an actual AWS
+SDK error message), so a wrong bucket, bad credentials, or a
+misconfigured account ID is now diagnosable from the response itself,
+not just from digging through server logs.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps
