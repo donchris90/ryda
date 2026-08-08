@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, Between } from 'typeorm';
 import { Wallet } from './entities/wallet.entity';
 import { WalletTransaction } from './entities/wallet-transaction.entity';
 import {
@@ -38,10 +38,14 @@ export class WalletsService {
     return wallet;
   }
 
-  async getTransactions(userId: string, limit = 50): Promise<WalletTransaction[]> {
+  async getTransactions(userId: string, limit = 50, from?: Date, to?: Date): Promise<WalletTransaction[]> {
     const wallet = await this.getByUserId(userId);
+    const where: any = { walletId: wallet.id };
+    if (from || to) {
+      where.createdAt = Between(from ?? new Date(0), to ?? new Date());
+    }
     return this.txRepo.find({
-      where: { walletId: wallet.id },
+      where,
       order: { createdAt: 'DESC' },
       take: limit,
     });

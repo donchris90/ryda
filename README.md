@@ -1946,6 +1946,25 @@ SDK error message), so a wrong bucket, bad credentials, or a
 misconfigured account ID is now diagnosable from the response itself,
 not just from digging through server logs.
 
+## Cleaned up five stale "known gaps" and added real wallet date filtering
+
+Before building anything, checked the passenger and driver app READMEs'
+own "known gaps" lists against the actual code, rather than trust them.
+Five entries turned out to be stale — already fully built in earlier
+rounds but never removed from the list: driver trip count/level display,
+document-upload gating on going online, and push notification device
+registration (both apps, fully wired into login/register/session-restore).
+Removed all five rather than rebuild things that already worked.
+
+The one genuinely real, still-open item — no way to see earnings by
+time period — got a real fix: `GET /wallet/transactions` now accepts
+`from`/`to` query params. Verified with a real transaction and both a
+matching and a non-matching date range, not just an empty response
+either way (which would prove nothing) — confirmed the transaction
+appears in a "today" range and correctly disappears in a "2099" range.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

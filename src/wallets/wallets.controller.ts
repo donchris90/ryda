@@ -20,10 +20,14 @@ export class WalletsController {
   async getTransactions(
     @CurrentUser() user: User,
     @Query('limit') limit?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
   ) {
     return this.walletsService.getTransactions(
       user.id,
       limit ? parseInt(limit, 10) : undefined,
+      from ? new Date(from) : undefined,
+      to ? new Date(to) : undefined,
     );
   }
 
