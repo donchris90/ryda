@@ -2092,6 +2092,26 @@ WalletsService resolves correctly at runtime, using the same
 `forwardRef()` pattern already proven for the withdrawal feature. Full
 regression clean throughout.
 
+## Added: an admin escape hatch for a genuinely stuck ride
+
+A live report about a ride stuck showing "in progress" needed manual
+cleanup, and the only options were direct database access (which
+turned into real friction — no `psql`, then pgAdmin hitting SSL
+configuration issues twice). Rather than keep fighting database
+tooling, built the actual tool that was missing: a blunt,
+admin-only `PATCH /rides/admin/:id/force-status/:status`. Deliberately
+does nothing beyond changing the status — no refund logic, no
+notifications — since this is meant for manually recovering broken
+data, not a normal business operation; whoever uses it is expected to
+already understand why the ride is stuck.
+
+Verified live: a regular passenger correctly gets 403, an admin can
+force the status change, and it's genuinely persisted (not just
+echoed back) — confirmed by changing it a second time in the same
+test. Full regression clean.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

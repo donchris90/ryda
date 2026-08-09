@@ -213,6 +213,13 @@ export class RidesService {
     return ride;
   }
 
+  /** See RidesController.forceStatus() for why this exists and its intentional limitations. */
+  async forceStatusForAdmin(id: string, status: RideStatus): Promise<Ride> {
+    const ride = await this.findById(id);
+    ride.status = status;
+    return this.ridesRepo.save(ride);
+  }
+
   /**
    * Real gap found while building the admin dashboard's ride list, not
    * assumed: `GET /rides/:id` had zero ownership check beyond being

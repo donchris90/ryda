@@ -86,6 +86,24 @@ export class RidesController {
     );
   }
 
+  /**
+   * Blunt, admin-only escape hatch for a ride genuinely stuck in an
+   * inconsistent state (e.g. from the completion bug fixed elsewhere in
+   * this file — a ride that should have reverted but didn't, from
+   * before that fix was deployed). Not a normal business operation;
+   * this is specifically for manually recovering broken data, so it
+   * intentionally does nothing beyond changing the status — no refund
+   * logic, no notification, no side effects. Whoever uses this is
+   * expected to already know why the ride is stuck and what (if
+   * anything) needs to happen with any related payment separately.
+   */
+  @Patch('admin/:id/force-status/:status')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  forceStatus(@Param('id') id: string, @Param('status') status: RideStatus) {
+    return this.ridesService.forceStatusForAdmin(id, status);
+  }
+
   @Get(':id/driver-info')
   @UseGuards(JwtAuthGuard)
   getDriverInfo(@Param('id') id: string, @CurrentUser() user: User) {
