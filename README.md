@@ -2015,6 +2015,42 @@ specifically so the fix isn't accidentally too broad — a completely
 unrelated driver who was never offered this ride is still correctly
 rejected with 403.
 
+## Fixed a real, serious bug: a failed payment could leave a ride stuck "completed" with no payment ever processed
+
+A live report described a ride showing as stuck "in progress" in the
+app while actually having been completed — a mismatch worth taking
+seriously, not just working around. Traced it to a genuine data-
+integrity bug: `completeRide()` saved `status = COMPLETED` to the
+database, then ran payment settlement (wallet debit, card charge, etc.)
+completely unprotected afterward. If that settlement step threw for
+any reason — insufficient wallet balance being the most likely real
+case — the ride stayed permanently marked completed in the database
+with no payment ever processed, while the driver's app only received a
+failed request and had no way to know the underlying status had
+already changed underneath it.
+
+A full cross-service transaction wrapping every call this method
+touches (wallets, fleet, corporate, payments, promotions) would be the
+most thorough fix, but it's a genuinely invasive refactor across
+several files — too risky to attempt as an urgent fix. Went with a
+safer, targeted one instead: wrap the whole payment-settlement block in
+a try/catch that reverts the ride back to `IN_PROGRESS` (clearing the
+completion fields that were set) before re-throwing, so a failure
+leaves the ride in a genuinely consistent, retryable state rather than
+a stuck, inconsistent one that previously needed a manual database fix
+to recover from.
+
+Verified live, not just reasoned about: created a real ride with a
+passenger who deliberately had zero wallet balance, confirmed
+completion fails cleanly with a real error rather than a silent
+success or a crash, confirmed the ride correctly reverts to
+`IN_PROGRESS` rather than getting stuck, then funded the wallet and
+confirmed the *exact same* completion request succeeds cleanly on
+retry — proving this isn't just "fails safely" but "is actually
+recoverable, not just consistent." Full regression clean throughout.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

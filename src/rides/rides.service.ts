@@ -746,80 +746,100 @@ export class RidesService {
     ride.driverEarnings = driverEarnings.toFixed(2);
     await this.ridesRepo.save(ride);
 
-    if (ride.paymentMethod === PaymentMethod.WALLET) {
-      const passengerWallet = await this.walletsService.getByUserId(ride.passengerId);
-      await this.walletsService.debit(
-        passengerWallet.id,
-        totalFare,
-        TransactionCategory.RIDE_PAYMENT,
-        ride.id,
-        `Ride payment for trip ${ride.id}`,
-      );
-      await this.creditDriverEarnings(ride, driverProfile, driverEarnings, commissionPercent);
-    } else if (ride.paymentMethod === PaymentMethod.CASH) {
-      // Fleet drivers still collect cash directly, but the commission they
-      // owe comes out of the fleet's wallet, not their personal one — the
-      // fleet is the counterparty the platform actually settles with.
-      // If the wallet can't cover it right now, the ride still completes —
-      // the shortfall becomes a tracked debt (ReconciliationService) that
-      // auto-settles the next time that wallet is credited, rather than
-      // blocking a driver from finishing a trip over an accounting gap.
-      if (driverProfile.fleetCompanyId) {
-        try {
-          await this.fleetService.debitFleetCommission(driverProfile.fleetCompanyId, commissionAmount, ride.id);
-        } catch {
-          await this.reconciliationService.recordDebt(null, driverProfile.fleetCompanyId, ride.id, commissionAmount);
+    try {
+      if (ride.paymentMethod === PaymentMethod.WALLET) {
+        const passengerWallet = await this.walletsService.getByUserId(ride.passengerId);
+        await this.walletsService.debit(
+          passengerWallet.id,
+          totalFare,
+          TransactionCategory.RIDE_PAYMENT,
+          ride.id,
+          `Ride payment for trip ${ride.id}`,
+        );
+        await this.creditDriverEarnings(ride, driverProfile, driverEarnings, commissionPercent);
+      } else if (ride.paymentMethod === PaymentMethod.CASH) {
+        // Fleet drivers still collect cash directly, but the commission they
+        // owe comes out of the fleet's wallet, not their personal one — the
+        // fleet is the counterparty the platform actually settles with.
+        // If the wallet can't cover it right now, the ride still completes —
+        // the shortfall becomes a tracked debt (ReconciliationService) that
+        // auto-settles the next time that wallet is credited, rather than
+        // blocking a driver from finishing a trip over an accounting gap.
+        if (driverProfile.fleetCompanyId) {
+          try {
+            await this.fleetService.debitFleetCommission(driverProfile.fleetCompanyId, commissionAmount, ride.id);
+          } catch {
+            await this.reconciliationService.recordDebt(null, driverProfile.fleetCompanyId, ride.id, commissionAmount);
+          }
+        } else {
+          const driverWallet = await this.walletsService.getByUserId(driverUserId);
+          try {
+            await this.walletsService.debit(
+              driverWallet.id,
+              commissionAmount,
+              TransactionCategory.COMMISSION,
+              ride.id,
+              `Commission owed on cash trip ${ride.id} (${commissionPercent}%)`,
+            );
+          } catch {
+            await this.reconciliationService.recordDebt(driverUserId, null, ride.id, commissionAmount);
+          }
         }
-      } else {
-        const driverWallet = await this.walletsService.getByUserId(driverUserId);
-        try {
-          await this.walletsService.debit(
-            driverWallet.id,
-            commissionAmount,
-            TransactionCategory.COMMISSION,
-            ride.id,
-            `Commission owed on cash trip ${ride.id} (${commissionPercent}%)`,
-          );
-        } catch {
-          await this.reconciliationService.recordDebt(driverUserId, null, ride.id, commissionAmount);
+        ride.earningsSettled = true;
+        await this.ridesRepo.save(ride);
+      } else if (ride.paymentMethod === PaymentMethod.CARD) {
+        const passenger = await this.usersService.findById(ride.passengerId);
+        if (!passenger.email) {
+          throw new BadRequestException('Add an email to your account before paying by card');
         }
+        const payment = await this.paymentsService.chargeSavedCard(
+          ride.id,
+          ride.passengerId,
+          passenger.email,
+          totalFare,
+        );
+        if (payment.status !== PaymentStatus.SUCCESS) {
+          const reason = payment.failureReason ?? 'Card payment failed — trip cannot be completed';
+          this.events.emit('payment.failed', { userId: ride.passengerId, reason });
+          throw new BadRequestException(reason);
+        }
+        // Synchronous charge — settle immediately, same as wallet.
+        await this.creditDriverEarnings(ride, driverProfile, driverEarnings, commissionPercent);
+      } else if (ride.paymentMethod === PaymentMethod.BANK_TRANSFER) {
+        const passenger = await this.usersService.findById(ride.passengerId);
+        if (!passenger.email) {
+          throw new BadRequestException('Add an email to your account before paying by bank transfer');
+        }
+        // Asynchronous — driver earnings are NOT credited yet. See
+        // handlePaymentConfirmed(), triggered by the Paystack webhook once
+        // the transfer actually lands.
+        await this.paymentsService.initBankTransfer(ride.id, ride.passengerId, passenger.email, totalFare);
+      } else if (ride.paymentMethod === PaymentMethod.CORPORATE) {
+        const account = await this.corporateService.getAccountForEmployee(ride.passengerId);
+        if (!account) {
+          throw new BadRequestException('Passenger is not linked to a corporate account');
+        }
+        await this.corporateService.debitForRide(account.id, totalFare, ride.id);
+        await this.creditDriverEarnings(ride, driverProfile, driverEarnings, commissionPercent);
       }
-      ride.earningsSettled = true;
+    } catch (err) {
+      // Real bug found from a live report: without this, a payment
+      // failure here (e.g. insufficient wallet balance) left the ride
+      // permanently stuck marked COMPLETED in the database with no
+      // payment ever processed — the driver's app only saw a failed
+      // request and had no way to know the underlying status had
+      // already changed. Reverting puts the ride back in a genuinely
+      // consistent, retryable state: still IN_PROGRESS, safe to
+      // complete again once whatever failed (e.g. a wallet top-up) is
+      // resolved, rather than silently stuck in an inconsistent state
+      // that needed a manual database fix to recover from.
+      ride.status = RideStatus.IN_PROGRESS;
+      ride.completedAt = null;
+      ride.commissionPercent = null;
+      ride.commissionAmount = null;
+      ride.driverEarnings = null;
       await this.ridesRepo.save(ride);
-    } else if (ride.paymentMethod === PaymentMethod.CARD) {
-      const passenger = await this.usersService.findById(ride.passengerId);
-      if (!passenger.email) {
-        throw new BadRequestException('Add an email to your account before paying by card');
-      }
-      const payment = await this.paymentsService.chargeSavedCard(
-        ride.id,
-        ride.passengerId,
-        passenger.email,
-        totalFare,
-      );
-      if (payment.status !== PaymentStatus.SUCCESS) {
-        const reason = payment.failureReason ?? 'Card payment failed — trip cannot be completed';
-        this.events.emit('payment.failed', { userId: ride.passengerId, reason });
-        throw new BadRequestException(reason);
-      }
-      // Synchronous charge — settle immediately, same as wallet.
-      await this.creditDriverEarnings(ride, driverProfile, driverEarnings, commissionPercent);
-    } else if (ride.paymentMethod === PaymentMethod.BANK_TRANSFER) {
-      const passenger = await this.usersService.findById(ride.passengerId);
-      if (!passenger.email) {
-        throw new BadRequestException('Add an email to your account before paying by bank transfer');
-      }
-      // Asynchronous — driver earnings are NOT credited yet. See
-      // handlePaymentConfirmed(), triggered by the Paystack webhook once
-      // the transfer actually lands.
-      await this.paymentsService.initBankTransfer(ride.id, ride.passengerId, passenger.email, totalFare);
-    } else if (ride.paymentMethod === PaymentMethod.CORPORATE) {
-      const account = await this.corporateService.getAccountForEmployee(ride.passengerId);
-      if (!account) {
-        throw new BadRequestException('Passenger is not linked to a corporate account');
-      }
-      await this.corporateService.debitForRide(account.id, totalFare, ride.id);
-      await this.creditDriverEarnings(ride, driverProfile, driverEarnings, commissionPercent);
+      throw err;
     }
 
     await this.driversService.recordTripOutcome(driverProfile.id, 'completed');
