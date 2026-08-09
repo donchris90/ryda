@@ -2131,6 +2131,34 @@ Verified live: a driver genuinely stuck at `ON_TRIP` (accepted a real
 ride, started it), confirmed force-cancelling the ride correctly
 resets them to `ONLINE`. Full regression clean.
 
+## Cash-debt threshold, admin-adjustable, not a flat wallet-balance requirement
+
+Real design decision, not just a feature request implemented blindly —
+considered and rejected a flat "minimum wallet balance before every
+cash ride" rule first, since it would lock out an otherwise reliable
+driver just for having a run of cash trips in a row, right when
+earning more is exactly what they'd need to do. Went with the actual
+risk instead: once a driver's accumulated *unpaid* commission from cash
+trips (already tracked automatically via `ReconciliationService`, not
+new infrastructure) crosses a threshold, further cash rides are
+blocked until it's paid down or the wallet is topped up. Wallet and
+card rides are unaffected.
+
+Built on the existing generic `SystemSettingsService` (key-value,
+30-second cache, admin-editable via `PUT /admin/settings/:key`) rather
+than an env var — the whole point was adjusting this without a
+redeploy, which an env var wouldn't have given.
+
+Verified live: lowered the threshold via the real admin settings
+endpoint, confirmed a driver's first cash ride succeeds, confirmed
+their accumulated debt is tracked correctly after completion,
+confirmed a second cash ride is genuinely blocked with a clear message
+once over the threshold, confirmed a wallet-payment ride is
+unaffected — proving this is cash-specific, not a blanket restriction.
+Full regression clean.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

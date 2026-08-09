@@ -31,6 +31,7 @@ import { FleetService } from '../fleet/fleet.service';
 import { DispatchService } from '../dispatch/dispatch.service';
 import { PricingService } from '../ai/pricing.service';
 import { ReconciliationService } from '../reconciliation/reconciliation.service';
+import { SystemSettingsService, SETTING_KEYS } from '../settings/settings.service';
 import { MetricsService } from '../observability/metrics.service';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectQueue } from '@nestjs/bullmq';
@@ -85,6 +86,7 @@ export class RidesService {
     private readonly config: ConfigService,
     @InjectQueue('scheduled-rides') private readonly scheduledRidesQueue: Queue,
     private readonly reconciliationService: ReconciliationService,
+    private readonly settingsService: SystemSettingsService,
     private readonly metricsService: MetricsService,
     private readonly googleMaps: GoogleMapsService,
   ) {}
@@ -667,6 +669,24 @@ export class RidesService {
     }
     if (driverProfile.availability !== DriverAvailability.ONLINE) {
       throw new BadRequestException('Driver must be online to accept rides');
+    }
+
+    // Only cash (and bank-transfer-collected, once that exists) rides
+    // accumulate this kind of debt — a driver whose commission couldn't
+    // be deducted from their wallet at completion time. Checking here,
+    // not requiring a flat minimum balance at all times, means a driver
+    // having one cash-heavy day isn't punished; only genuinely
+    // accumulating, unpaid debt restricts them, and only past a
+    // threshold an admin can adjust without a redeploy — see
+    // SETTING_KEYS.MAX_CASH_DEBT_BEFORE_RESTRICTION.
+    if (ride.paymentMethod === PaymentMethod.CASH) {
+      const maxDebt = await this.settingsService.getNumber(SETTING_KEYS.MAX_CASH_DEBT_BEFORE_RESTRICTION, 5000);
+      const { totalOwed } = await this.reconciliationService.getOutstandingBalance(driverUserId);
+      if (parseFloat(totalOwed) >= maxDebt) {
+        throw new BadRequestException(
+          `You have ₦${totalOwed} in unpaid commission from cash trips — pay this down or top up your wallet before accepting another cash ride.`,
+        );
+      }
     }
 
     ride.driverId = driverUserId;

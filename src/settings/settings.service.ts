@@ -11,6 +11,7 @@ export const SETTING_KEYS = {
   REFERRER_BONUS: 'referral.referrerBonus',
   WALLET_MAX_BALANCE: 'wallet.maxBalance',
   MAINTENANCE_MODE: 'system.maintenanceMode',
+  MAX_CASH_DEBT_BEFORE_RESTRICTION: 'wallet.maxCashDebtBeforeRestriction',
 } as const;
 
 interface CacheEntry {
