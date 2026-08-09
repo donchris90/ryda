@@ -96,7 +96,8 @@ export class PaymentsService {
     if (!this.paystack.isConfigured()) {
       throw new BadRequestException('Wallet top-up is not available — PAYSTACK_SECRET_KEY is not configured on this server');
     }
-    if (amount <= 0) throw new BadRequestException('Amount must be positive');
+    const minAmount = this.config.get<number>('wallet.minTopUpAmount')!;
+    if (amount < minAmount) throw new BadRequestException(`Minimum top-up amount is ₦${minAmount}.`);
 
     const reference = `wallet-topup-${randomUUID()}`;
     await this.paymentsRepo.save(
@@ -139,6 +140,7 @@ export class PaymentsService {
       'Wallet top-up',
     );
   }
+
 
   async listSavedCards(userId: string): Promise<SavedCard[]> {
     return this.savedCardsRepo.find({ where: { userId }, order: { createdAt: 'DESC' } });

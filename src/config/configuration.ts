@@ -75,6 +75,7 @@ export default () => ({
   },
   wallet: {
     minWithdrawalAmount: parseFloat(process.env.MIN_WITHDRAWAL_AMOUNT ?? '500'),
+    minTopUpAmount: parseFloat(process.env.MIN_TOPUP_AMOUNT ?? '100'),
   },
   twilio: {
     accountSid: process.env.TWILIO_ACCOUNT_SID ?? '',
