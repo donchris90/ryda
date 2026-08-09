@@ -159,7 +159,7 @@ export class DispatchService {
     }
 
     const timeoutSeconds = this.config.get<number>('dispatch.offerTimeoutSeconds')!;
-    return this.offersRepo.save(
+    const offer = await this.offersRepo.save(
       this.offersRepo.create({
         rideId,
         driverUserId,
@@ -167,6 +167,26 @@ export class DispatchService {
         expiresAt: new Date(Date.now() + timeoutSeconds * 1000),
       }),
     );
+
+    // This was missing entirely — the offer record itself was always
+    // created correctly, which is why getMyPendingOffer() worked fine
+    // in every earlier test, but nothing ever told the driver about
+    // it. offerToNearestDriver() (the older, no-longer-primary path)
+    // emits this same event; this method never did, since it was
+    // built as a separate method rather than a variant of that one.
+    // Whatever listens for 'ride.offered' (push notification dispatch,
+    // in-app notification creation) never fired for a passenger-
+    // selected offer, only for the old auto-assigned kind.
+    this.events.emit('ride.offered', {
+      driverUserId,
+      rideId,
+      pickupAddress: ride?.pickupAddress ?? '',
+      distanceKm,
+      timeoutSeconds,
+    });
+    this.metricsService.dispatchOffersTotal.inc();
+
+    return offer;
   }
 
   async getMyPendingOffer(rideId: string, driverUserId: string): Promise<RideOffer | null> {

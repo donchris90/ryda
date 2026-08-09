@@ -1963,6 +1963,40 @@ matching and a non-matching date range, not just an empty response
 either way (which would prove nothing) — confirmed the transaction
 appears in a "today" range and correctly disappears in a "2099" range.
 
+## Fixed a real bug from a live report: drivers never got notified of a selected offer
+
+A driver reported never seeing the notification for a ride they'd
+genuinely been selected for. Investigated with a real live test rather
+than guessing — created a real offer end-to-end and checked, directly,
+whether a notification record actually got created. It didn't. The
+offer itself was always correct (`getMyPendingOffer()` found it fine,
+which is exactly why every earlier round of testing this feature never
+caught the problem — that check was never what was broken).
+
+Root cause: `offerToSpecificDriver()` (built for the passenger-picks-
+driver redesign) never emitted the `ride.offered` event that
+`NotificationsService.onRideOffered()` listens for. The older
+`offerToNearestDriver()` method still has this emit call — it was
+simply never carried over when the new method was built as a separate
+method rather than a variant of the old one. This was a real gap in my
+own earlier verification of that redesign: every test at the time
+checked the offer mechanic itself (exclusivity, selection, acceptance)
+but never checked whether a notification was created as a side effect
+of it.
+
+Fixed by adding the same `events.emit('ride.offered', ...)` call.
+Verified with the exact test that caught the bug, re-run after the
+fix: real notification created (both `push` and `in_app` channels),
+confirmed present via `notificationsApi.list()`. One thing worth
+noting about the verification itself — the first re-test attempt still
+appeared to fail because the event listener is async and doesn't
+block the response; a 1-second wait was needed before checking, which
+is itself a small useful finding about how quickly a real client
+should expect the notification to actually land after selecting a
+driver. Full regression clean throughout.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps
