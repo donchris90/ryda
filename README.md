@@ -2227,6 +2227,52 @@ has no autocomplete-specific endpoint at all and generally sparser
 Nigerian address coverage than Google's — this fix won't change
 anything the user sees until that key is configured.
 
+## Fixed: Paystack checkout never redirected back into the app
+
+Real bug from a live report — "after payment its not redirecting."
+Neither `initWalletTopUp()` nor `initCardAdd()` passed a `callbackUrl`
+to Paystack at all. Without one, a completed payment leaves the user
+on Paystack's own generic success page in the browser, with no
+automatic way back into the app — the wallet screen's comment even
+revealed the flawed assumption this relied on: "balance refreshes via
+useFocusEffect when the user returns," which only works if the user
+manually switches back, never automatically.
+
+Fixed by passing a real deep-link callback URL
+(`rydapassengerapp://wallet-topup-complete`,
+`rydapassengerapp://card-add-complete`) using the app's existing
+registered scheme. The app side now has real landing screens for both
+that redirect straight back to the relevant screen and trigger a
+proper refresh.
+
+## Committed real-time support ticket messaging — was sitting uncommitted from an earlier session
+
+Found while staging this round's changes: `support.service.ts`,
+`tracking.gateway.ts`, and `tracking.module.ts` had real, complete,
+already-referenced-elsewhere changes that had never actually been
+committed. The app-side support chat screen was already calling
+`subscribe:ticket` and listening for `ticket:message` — meaning the
+app had been waiting on backend code that existed only in this
+sandbox, never shipped.
+
+Mirrors the existing ride-chat real-time pattern exactly: sending a
+ticket message emits `support.message.sent`, which
+`TrackingGateway.broadcastTicketMessage()` picks up and delivers to
+everyone subscribed to that ticket's room, with real authorization
+(only the ticket's owner or support staff can subscribe).
+
+Verified live with a real, pre-existing test script rather than just
+trusting it worked: hit one genuine bug in the test itself (a phone
+number one digit short of Nigeria's required length, unrelated to the
+feature), fixed that, then confirmed a real socket connection receives
+a live broadcast that exactly matches a message sent via REST by a
+completely different user — proving the actual real-time delivery
+works, not just that the code compiles. Full regression clean.
+
+## Known gaps / next steps
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

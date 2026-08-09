@@ -75,6 +75,7 @@ export class PaymentsService {
       reference,
       channels: ['card'],
       metadata: { purpose: 'card_verification', userId },
+      callbackUrl: 'rydapassengerapp://card-add-complete',
     });
 
     return { authorizationUrl: init.authorizationUrl, reference };
@@ -117,6 +118,15 @@ export class PaymentsService {
       reference,
       channels: ['card', 'bank_transfer', 'ussd'],
       metadata: { purpose: 'wallet_topup', userId },
+      // Without this, Paystack shows its own generic success page in
+      // the browser with no automatic way back into the app — the
+      // user has to manually switch back, and the wallet doesn't
+      // visibly update until they do. This deep-links straight back
+      // to the passenger app (see rydapassengerapp:// scheme in
+      // app.config.js), where a Linking listener catches it and
+      // triggers a real balance refresh, not just relying on
+      // useFocusEffect firing whenever the user happens to return.
+      callbackUrl: 'rydapassengerapp://wallet-topup-complete',
     });
 
     return { authorizationUrl: init.authorizationUrl, reference };

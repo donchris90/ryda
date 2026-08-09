@@ -15,9 +15,12 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Ride } from '../rides/entities/ride.entity';
+import { SupportTicket } from '../support/entities/support-ticket.entity';
+import { SUPPORT_STAFF_ROLES } from '../support/support.service';
+import { UserRole } from '../common/enums/user-role.enum';
 
 interface AuthedSocket extends Socket {
-  data: { userId?: string };
+  data: { userId?: string; role?: string };
 }
 
 /**
@@ -39,6 +42,8 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
     private readonly config: ConfigService,
     @InjectRepository(Ride)
     private readonly ridesRepo: Repository<Ride>,
+    @InjectRepository(SupportTicket)
+    private readonly ticketsRepo: Repository<SupportTicket>,
   ) {}
 
   handleConnection(client: AuthedSocket) {
@@ -50,6 +55,7 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
         secret: this.config.get<string>('jwt.accessSecret'),
       });
       client.data.userId = payload.sub;
+      client.data.role = payload.role;
     } catch {
       this.logger.warn(`Tracking socket ${client.id} rejected — invalid/missing token`);
       client.disconnect(true);
@@ -85,6 +91,32 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
     return { unsubscribed: true, rideId: data.rideId };
   }
 
+  @SubscribeMessage('subscribe:ticket')
+  async handleSubscribeTicket(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() data: { ticketId: string },
+  ) {
+    const ticket = await this.ticketsRepo.findOne({ where: { id: data.ticketId } });
+    if (!ticket) return { error: 'Ticket not found' };
+
+    const userId = client.data.userId;
+    const isOwner = ticket.userId === userId;
+    const isStaff = SUPPORT_STAFF_ROLES.includes(client.data.role as UserRole);
+    if (!isOwner && !isStaff) return { error: 'Not authorized for this ticket' };
+
+    await client.join(this.roomForTicket(data.ticketId));
+    return { subscribed: true, ticketId: data.ticketId };
+  }
+
+  @SubscribeMessage('unsubscribe:ticket')
+  async handleUnsubscribeTicket(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() data: { ticketId: string },
+  ) {
+    await client.leave(this.roomForTicket(data.ticketId));
+    return { unsubscribed: true, ticketId: data.ticketId };
+  }
+
   /** Called by LocationService whenever a driver on an active ride reports a new position. */
   broadcastDriverLocation(rideId: string, payload: { lat: number; lng: number; at: Date }): void {
     this.server.to(this.roomFor(rideId)).emit('driver:location', { rideId, ...payload });
@@ -103,5 +135,15 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
 
   private roomFor(rideId: string): string {
     return `ride:${rideId}`;
+  }
+
+  private roomForTicket(ticketId: string): string {
+    return `ticket:${ticketId}`;
+  }
+
+  /** SupportService emits this after saving a message — see addMessage(). */
+  @OnEvent('support.message.sent')
+  broadcastTicketMessage(message: { ticketId: string; id: string; senderId: string; senderRole: string; message: string; createdAt: Date }): void {
+    this.server.to(this.roomForTicket(message.ticketId)).emit('ticket:message', message);
   }
 }

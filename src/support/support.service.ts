@@ -16,7 +16,7 @@ export interface TicketFilters {
   pageSize?: number;
 }
 
-const SUPPORT_STAFF_ROLES = [...ADMIN_LIKE_ROLES, UserRole.SUPPORT_AGENT];
+export const SUPPORT_STAFF_ROLES = [...ADMIN_LIKE_ROLES, UserRole.SUPPORT_AGENT];
 
 @Injectable()
 export class SupportService {
@@ -130,9 +130,20 @@ export class SupportService {
     dto: AddMessageDto,
   ): Promise<TicketMessage> {
     await this.assertCanAccess(ticketId, senderId, senderRole);
-    return this.messagesRepo.save(
+    const saved = await this.messagesRepo.save(
       this.messagesRepo.create({ ticketId, senderId, senderRole, message: dto.message }),
     );
+    // Mirrors ride.message.sent exactly — TrackingGateway.broadcastTicketMessage()
+    // listens for this to deliver live, the same way ride chat already does.
+    this.events.emit('support.message.sent', {
+      ticketId,
+      id: saved.id,
+      senderId: saved.senderId,
+      senderRole: saved.senderRole,
+      message: saved.message,
+      createdAt: saved.createdAt,
+    });
+    return saved;
   }
 
   async listMessages(ticketId: string, requesterId: string, requesterRole: string): Promise<TicketMessage[]> {
