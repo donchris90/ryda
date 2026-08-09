@@ -142,10 +142,14 @@ export class PaymentsController {
         event.data.id?.toString() ?? reference,
       );
 
-      // Card-verification charges (not tied to a ride) tokenize the card
-      // and get silently refunded — the point was only to capture the
-      // reusable authorization_code.
-      if (record && record.rideId === null && event.data.authorization?.authorization_code) {
+      const purpose = event.data.metadata?.purpose;
+
+      if (record && purpose === 'wallet_topup') {
+        await this.paymentsService.creditWalletFromTopUp(record);
+      } else if (record && record.rideId === null && event.data.authorization?.authorization_code) {
+        // Card-verification charges (not tied to a ride) tokenize the card
+        // and get silently refunded — the point was only to capture the
+        // reusable authorization_code.
         await this.paymentsService.saveCardFromVerification(
           record.userId,
           event.data.authorization.authorization_code,

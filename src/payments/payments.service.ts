@@ -1,6 +1,8 @@
 import {
   BadRequestException,
   ConflictException,
+  forwardRef,
+  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -13,6 +15,8 @@ import { PaymentMethod } from '../common/enums/ride.enum';
 import { PaystackService } from './paystack/paystack.service';
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { WalletsService } from '../wallets/wallets.service';
+import { TransactionCategory } from '../common/enums/transaction.enum';
 import { User } from '../users/entities/user.entity';
 
 export interface ChargeResult {
@@ -31,6 +35,8 @@ export class PaymentsService {
     private readonly paystack: PaystackService,
     private readonly config: ConfigService,
     private readonly events: EventEmitter2,
+    @Inject(forwardRef(() => WalletsService))
+    private readonly walletsService: WalletsService,
   ) {}
 
   // ---------------------------------------------------------------------
@@ -72,6 +78,66 @@ export class PaymentsService {
     });
 
     return { authorizationUrl: init.authorizationUrl, reference };
+  }
+
+  /**
+   * Real Paystack hosted checkout for wallet top-ups — replaces a
+   * previous endpoint that took a raw amount from the request body and
+   * credited the wallet directly with zero payment verification at
+   * all. Any authenticated user could call that with any amount and
+   * get free money credited instantly; found from a live report that
+   * it was still doing this even with real Paystack keys configured,
+   * because it never called Paystack in the first place. The wallet
+   * only actually gets credited once the webhook below confirms a real
+   * charge.success — never here, and never based on anything the
+   * client claims.
+   */
+  async initWalletTopUp(userId: string, email: string, amount: number): Promise<{ authorizationUrl: string; reference: string }> {
+    if (!this.paystack.isConfigured()) {
+      throw new BadRequestException('Wallet top-up is not available — PAYSTACK_SECRET_KEY is not configured on this server');
+    }
+    if (amount <= 0) throw new BadRequestException('Amount must be positive');
+
+    const reference = `wallet-topup-${randomUUID()}`;
+    await this.paymentsRepo.save(
+      this.paymentsRepo.create({
+        rideId: null,
+        userId,
+        method: PaymentMethod.CARD,
+        amount: amount.toFixed(2),
+        status: PaymentStatus.PENDING,
+        reference,
+      }),
+    );
+
+    const init = await this.paystack.initializeTransaction({
+      email,
+      amountKobo: Math.round(amount * 100),
+      reference,
+      channels: ['card', 'bank_transfer', 'ussd'],
+      metadata: { purpose: 'wallet_topup', userId },
+    });
+
+    return { authorizationUrl: init.authorizationUrl, reference };
+  }
+
+  /**
+   * Called from the webhook once Paystack confirms a wallet-topup
+   * charge actually succeeded. Uses the amount stored on our own
+   * PaymentRecord (set at init time from the user's request), not
+   * anything in the webhook payload itself — the signature check
+   * already prevents a tampered payload, but crediting from our own
+   * record is the more robust pattern regardless.
+   */
+  async creditWalletFromTopUp(record: PaymentRecord): Promise<void> {
+    const wallet = await this.walletsService.getByUserId(record.userId);
+    await this.walletsService.credit(
+      wallet.id,
+      parseFloat(record.amount),
+      TransactionCategory.TOPUP,
+      record.reference,
+      'Wallet top-up',
+    );
   }
 
   async listSavedCards(userId: string): Promise<SavedCard[]> {

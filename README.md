@@ -2049,6 +2049,51 @@ confirmed the *exact same* completion request succeeds cleanly on
 retry — proving this isn't just "fails safely" but "is actually
 recoverable, not just consistent." Full regression clean throughout.
 
+## Fixed a critical, real security bug: wallet top-up credited money with zero payment verification
+
+A live report described the wallet "still using mock up even after
+adding the Paystack API" — worth taking completely seriously rather
+than assuming it was just a leftover setting. It wasn't a mode; it was
+a real, exploitable endpoint. `POST /wallet/topup` took a raw `amount`
+from the request body and credited the wallet directly — any
+authenticated user could call it with any amount and get free money
+credited instantly, regardless of whether real Paystack keys were
+configured, because this endpoint never called Paystack in the first
+place. The original code's own comment even called this a "known gap,"
+which is exactly why it needed fixing properly before real users could
+reach it, not just documenting further.
+
+Replaced entirely with a real Paystack-backed flow, matching the exact
+pattern `initCardAdd()` already used correctly elsewhere in this same
+file: `initWalletTopUp()` creates a pending payment record and a real
+Paystack transaction, returning a genuine hosted-checkout URL. The
+wallet is never credited at this step — only `creditWalletFromTopUp()`,
+called from the webhook once Paystack actually confirms a real
+`charge.success`, ever adds money, and it credits the exact amount
+stored on our own payment record (set at init time), not anything the
+webhook payload itself claims. The webhook handler now distinguishes a
+wallet top-up from a card-verification charge using the `purpose`
+metadata set at init — both share `rideId === null`, so the existing
+check alone couldn't tell them apart.
+
+The old `POST /wallet/topup` endpoint doesn't just do less now — it's
+gone entirely, confirmed via a real 404 in testing, not merely
+deprecated in a way that could be re-enabled by accident.
+
+Verified live with a real security proof, not just a functional check:
+registered a real user with a starting balance of zero, confirmed the
+old endpoint is genuinely gone (404), confirmed the new endpoint fails
+honestly when Paystack isn't configured (this sandbox can't reach real
+Paystack) rather than silently succeeding, and — the actual point of
+the test — confirmed the wallet balance was still exactly zero after
+every attempt. Also confirmed via a real server boot (not just `tsc`)
+that the new circular dependency between PaymentsService and
+WalletsService resolves correctly at runtime, using the same
+`forwardRef()` pattern already proven for the withdrawal feature. Full
+regression clean throughout.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

@@ -1,15 +1,20 @@
-import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, forwardRef, Get, Inject, Post, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../users/entities/user.entity';
 import { WalletsService } from './wallets.service';
 import { TopUpDto } from './dto/topup.dto';
-import { TransactionCategory } from '../common/enums/transaction.enum';
+import { PaymentsService } from '../payments/payments.service';
+import { BadRequestException } from '@nestjs/common';
 
 @Controller('wallet')
 @UseGuards(JwtAuthGuard)
 export class WalletsController {
-  constructor(private readonly walletsService: WalletsService) {}
+  constructor(
+    private readonly walletsService: WalletsService,
+    @Inject(forwardRef(() => PaymentsService))
+    private readonly paymentsService: PaymentsService,
+  ) {}
 
   @Get()
   async getWallet(@CurrentUser() user: User) {
@@ -32,20 +37,17 @@ export class WalletsController {
   }
 
   /**
-   * NOTE: this credits the wallet directly rather than routing through a
-   * real payment charge (card/bank transfer) first — wiring that in is a
-   * known gap (see README). What IS real here is the configurable max
-   * wallet balance enforcement below.
+   * Real Paystack hosted checkout — replaces a previous endpoint that
+   * credited the wallet directly from a client-supplied amount with no
+   * payment verification at all. See PaymentsService.initWalletTopUp()
+   * for the full reasoning. The wallet is never credited here; only the
+   * webhook, once Paystack actually confirms the charge, does that.
    */
-  @Post('topup')
-  async topUp(@CurrentUser() user: User, @Body() dto: TopUpDto) {
-    const wallet = await this.walletsService.getByUserId(user.id);
-    return this.walletsService.credit(
-      wallet.id,
-      dto.amount,
-      TransactionCategory.TOPUP,
-      undefined,
-      'Wallet top-up',
-    );
+  @Post('topup/init')
+  async initTopUp(@CurrentUser() user: User, @Body() dto: TopUpDto) {
+    if (!user.email) {
+      throw new BadRequestException('Add an email to your account before topping up your wallet');
+    }
+    return this.paymentsService.initWalletTopUp(user.id, user.email, dto.amount);
   }
 }
