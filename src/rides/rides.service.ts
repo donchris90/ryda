@@ -227,7 +227,17 @@ export class RidesService {
    */
   async getForUser(rideId: string, requesterId: string, requesterRole: UserRole): Promise<Ride> {
     const ride = await this.findById(rideId);
-    const isParticipant = ride.passengerId === requesterId || ride.driverId === requesterId;
+    let isParticipant = ride.passengerId === requesterId || ride.driverId === requesterId;
+    if (!isParticipant && requesterRole === UserRole.DRIVER) {
+      // ride.driverId only gets set on acceptance — a driver viewing
+      // their own offer screen (to see pickup/dropoff/fare *before*
+      // deciding whether to accept) isn't covered by the check above at
+      // all. Real bug found from a live report: this produced a 403 on
+      // a completely valid, pending offer, surfacing as "Unable to load
+      // this ride offer" for a driver who had every right to see it.
+      const pendingOffer = await this.dispatchService.getMyPendingOffer(rideId, requesterId);
+      isParticipant = !!pendingOffer;
+    }
     const isStaff = STAFF_ROLES.includes(requesterRole);
     if (!isParticipant && !isStaff) {
       throw new ForbiddenException("You don't have access to this ride");

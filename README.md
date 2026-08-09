@@ -1995,6 +1995,28 @@ is itself a small useful finding about how quickly a real client
 should expect the notification to actually land after selecting a
 driver. Full regression clean throughout.
 
+## Fixed: offered-but-not-accepted drivers couldn't load their own ride
+
+Direct continuation of the notification fix above — once a driver
+actually started receiving offer notifications again, a new error
+surfaced: "Unable to load this ride offer." Real bug, not a repeat of
+the same one. `getForUser()`'s participant check
+(`ride.passengerId === requesterId || ride.driverId === requesterId`)
+only recognizes a driver *after* they've accepted — `ride.driverId`
+stays null until then. A driver viewing their own offer screen, which
+calls `GET /rides/:id` to show pickup/dropoff/fare *before* deciding
+whether to accept, was never covered by that check at all.
+
+Fixed by also checking for a genuinely pending offer
+(`DispatchService.getMyPendingOffer()`) when the requester is a driver
+and isn't already recognized as a participant. Verified live: the
+offered driver now gets a real 200 with full ride data, and — checked
+specifically so the fix isn't accidentally too broad — a completely
+unrelated driver who was never offered this ride is still correctly
+rejected with 403.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps
