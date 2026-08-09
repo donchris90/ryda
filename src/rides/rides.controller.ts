@@ -171,6 +171,12 @@ export class RidesController {
     return this.ridesService.selectDriver(id, user.id, dto.driverUserId);
   }
 
+  @Patch(':id/current-offer/withdraw')
+  @UseGuards(JwtAuthGuard)
+  withdrawCurrentOffer(@CurrentUser() user: User, @Param('id') id: string) {
+    return this.ridesService.withdrawCurrentOffer(id, user.id);
+  }
+
   /**
    * Lets the passenger's app know whether there's currently a live
    * offer out (and to render a waiting/countdown state) or whether it

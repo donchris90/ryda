@@ -646,6 +646,21 @@ export class RidesService {
     await this.dispatchService.offerToSpecificDriver(rideId, driverUserId);
   }
 
+  /**
+   * Called from the passenger's "Choose someone else instead" — a real
+   * backend effect, not just a UI state change. Without this, a driver
+   * the passenger has moved on from still had a genuinely pending
+   * offer and could still accept the ride. Deliberately lenient on
+   * ride ownership/status here: this is meant to be safe to call
+   * defensively, and superseding zero rows (e.g. the offer already
+   * expired) is a harmless no-op, not an error worth surfacing.
+   */
+  async withdrawCurrentOffer(rideId: string, passengerId: string): Promise<void> {
+    const ride = await this.findById(rideId);
+    if (ride.passengerId !== passengerId) throw new ForbiddenException('This is not your ride');
+    await this.dispatchService.withdrawOffer(rideId);
+  }
+
   async acceptRide(rideId: string, driverUserId: string): Promise<Ride> {
     const ride = await this.findById(rideId);
     if (ride.status !== RideStatus.SEARCHING && ride.status !== RideStatus.REQUESTED) {
@@ -659,9 +674,21 @@ export class RidesService {
     // passenger pick. No pending offer at all (nobody's been selected
     // yet) still allows the plain broadcast-accept path below.
     const pendingOffer = await this.dispatchService.getPendingOfferForRide(rideId);
-    if (pendingOffer && pendingOffer.driverUserId !== driverUserId) {
-      throw new ForbiddenException('This ride is currently offered to another driver.');
+    if (pendingOffer) {
+      if (pendingOffer.driverUserId !== driverUserId) {
+        throw new ForbiddenException('This ride is currently offered to another driver.');
+      }
+    } else if (await this.dispatchService.hasEverHadOffer(rideId)) {
+      // An offer existed for this ride but isn't live anymore (expired,
+      // withdrawn, or declined) — block acceptance outright, not just
+      // for other drivers. Falling through to open acceptance here
+      // would let the exact driver whose own offer just expired accept
+      // anyway, which defeats the point of the exclusivity check above.
+      throw new BadRequestException('This offer is no longer available — ask the passenger to select a driver again.');
     }
+    // else: this ride has never been offered to anyone at all — the
+    // open broadcast-accept path (offerToNearestDriver(), kept but
+    // unused by default) remains valid for that case.
 
     const driverProfile = await this.driversService.findByUserId(driverUserId);
     if (driverProfile.approvalStatus !== DriverApprovalStatus.APPROVED) {

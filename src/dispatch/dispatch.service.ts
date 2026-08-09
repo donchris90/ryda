@@ -126,6 +126,22 @@ export class DispatchService {
     );
   }
 
+  /**
+   * The passenger's "Choose someone else instead" needs a real backend
+   * effect, not just a local UI state change — without this, the
+   * driver they'd moved on from still had a genuinely pending offer
+   * and could still accept the ride the passenger thought they'd
+   * abandoned. Idempotent by design (updating zero rows if there's no
+   * pending offer left) so it's safe to call even if the offer already
+   * expired or was accepted moments before this fires.
+   */
+  async withdrawOffer(rideId: string): Promise<void> {
+    await this.offersRepo.update(
+      { rideId, status: RideOfferStatus.PENDING },
+      { status: RideOfferStatus.SUPERSEDED },
+    );
+  }
+
   /** Driver explicitly declines their offer — the passenger picks someone else themselves, no automatic reassignment. */
   async markDeclined(rideId: string, driverUserId: string): Promise<void> {
     await this.offersRepo.update(
@@ -189,17 +205,48 @@ export class DispatchService {
     return offer;
   }
 
+  /**
+   * A time-expired offer can still read status=PENDING for up to 15
+   * seconds, until the periodic sweep catches up (see
+   * expireStaleOffersAndReassign() below) - checking status alone
+   * meant a driver could accept, or block another driver's
+   * acceptance via the exclusivity check, using an offer that had
+   * already genuinely expired. expiresAt is the actual source of
+   * truth; status is just where the sweep's cleanup eventually lands.
+   */
+  private isLive(offer: RideOffer): boolean {
+    return offer.status === RideOfferStatus.PENDING && offer.expiresAt.getTime() > Date.now();
+  }
+
   async getMyPendingOffer(rideId: string, driverUserId: string): Promise<RideOffer | null> {
-    return this.offersRepo.findOne({
+    const offer = await this.offersRepo.findOne({
       where: { rideId, driverUserId, status: RideOfferStatus.PENDING },
     });
+    return offer && this.isLive(offer) ? offer : null;
   }
 
   /** Used by RidesService.acceptRide()'s exclusivity check — is *anyone* currently offered this ride, and who. */
   async getPendingOfferForRide(rideId: string): Promise<RideOffer | null> {
-    return this.offersRepo.findOne({
+    const offer = await this.offersRepo.findOne({
       where: { rideId, status: RideOfferStatus.PENDING },
     });
+    return offer && this.isLive(offer) ? offer : null;
+  }
+
+  /**
+   * Distinguishes "this ride was never offered to anyone" (the old
+   * broadcast-accept path should stay open) from "an offer existed but
+   * is now dead — expired, withdrawn, or declined" (acceptance must be
+   * blocked outright, for anyone, not just the driver whose offer it
+   * was). Without this distinction, getPendingOfferForRide() correctly
+   * returning null for a dead offer was being misread by acceptRide()
+   * as "nobody's been offered this ride," silently falling through to
+   * open acceptance — the exact driver whose own offer just expired
+   * could still accept anyway.
+   */
+  async hasEverHadOffer(rideId: string): Promise<boolean> {
+    const count = await this.offersRepo.count({ where: { rideId } });
+    return count > 0;
   }
 
   /** Exposed for the health check — confirms the scheduler is actually still running, not just registered. */

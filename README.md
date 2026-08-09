@@ -2157,6 +2157,49 @@ once over the threshold, confirmed a wallet-payment ride is
 unaffected — proving this is cash-specific, not a blanket restriction.
 Full regression clean.
 
+## Fixed a real, verified batch of dispatch race conditions
+
+A pasted external analysis proposed several fixes to the offer/dispatch
+system. Verified every "must fix" claim against the actual code before
+touching anything — all of them checked out as genuinely real, not
+just plausible-sounding:
+
+- **`getMyPendingOffer()`/`getPendingOfferForRide()` only checked
+  `status`, never `expiresAt`.** A time-expired offer reads
+  `status=PENDING` for up to 15 seconds until the periodic sweep
+  catches up — meaning a driver could accept, or block another
+  driver's exclusivity check, on an offer that had already genuinely
+  expired. Both methods now also require `expiresAt > now`.
+
+- **No way to withdraw an offer.** The passenger's "Choose someone
+  else instead" only changed local UI state — the previously-selected
+  driver's offer stayed genuinely pending on the backend and could
+  still be accepted. Added `withdrawOffer()` and
+  `PATCH /rides/:id/current-offer/withdraw`, with real ownership
+  checking (a different passenger can't withdraw someone else's ride's
+  offer — verified live, not just assumed).
+
+- **A real logic gap the pasted analysis didn't explicitly name, found
+  while verifying its fixes**: `acceptRide()`'s exclusivity check
+  treated "no *currently live* offer" the same whether one had never
+  existed or had existed and just died. That meant fixing the two
+  points above actually *introduced* a new hole — a driver whose own
+  offer just expired, or was withdrawn, could still accept anyway,
+  since the check silently fell through to the old open-broadcast
+  path. Added `hasEverHadOffer()` to distinguish "never offered to
+  anyone" (broadcast-accept stays valid) from "was offered, now dead"
+  (blocks acceptance outright, for anyone). Caught this via live
+  testing, not code review — the first test run showed both critical
+  cases silently succeeding when they should have failed.
+
+Verified live end-to-end: a driver whose offer was force-expired via
+direct SQL is correctly rejected on accept, a second driver can then
+freely accept the same ride once offered, a withdrawn offer's driver
+is correctly rejected, and cross-passenger withdrawal is correctly
+forbidden. Full regression clean throughout.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps
