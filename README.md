@@ -2198,6 +2198,37 @@ freely accept the same ride once offered, a withdrawn offer's driver
 is correctly rejected, and cross-passenger withdrawal is correctly
 forbidden. Full regression clean throughout.
 
+## Fixed: address autocomplete returning unrelated results
+
+Real bug from a live report — searching "511 rd, festac" returned
+things like "New Festac Bridge Road" and "22 Road," sharing a word
+with the query but not remotely what was being typed. Root cause:
+`suggest()` was calling the same Geocoding API endpoint as `geocode()`
+(`/geocode/json`), just returning multiple results. Geocoding is built
+to resolve a *complete* address into coordinates — fed a partial,
+as-you-type query, it does its best-effort loose token matching,
+which is exactly what produced results that shared "festac" or "road"
+without being genuinely relevant.
+
+Switched to Google's actual purpose-built Places Autocomplete API
+(`/place/autocomplete/json`), the same endpoint every real ride-hailing
+app's address search uses — ranked, relevance-aware suggestions for
+partial input, restricted to Nigeria (`components=country:ng`). Since
+autocomplete predictions don't carry coordinates on their own, fetches
+Place Details for each one server-side, preserving the existing
+`GeocodeResult[]` response shape so nothing on either app needed to
+change to benefit from this.
+
+**Worth being explicit about**: this only takes effect once
+`GOOGLE_MAPS_API_KEY` is actually set on Render — a *different* key
+from the Android SDK key discussed earlier for map rendering. Without
+it, this correctly falls back to Nominatim (free, no key needed), which
+has no autocomplete-specific endpoint at all and generally sparser
+Nigerian address coverage than Google's — this fix won't change
+anything the user sees until that key is configured.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

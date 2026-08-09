@@ -61,20 +61,52 @@ export class GoogleMapsService {
     }
   }
 
-  /** Same endpoint as geocode(), returning every result up to `limit` instead of just the first — see NominatimService.suggest() for the rationale. */
+  /**
+   * Real bug found from a live report: this previously called the same
+   * /geocode/json endpoint as geocode() above, just returning multiple
+   * results. Geocoding is built to resolve a *complete* address into
+   * coordinates — fed a partial, as-you-type query like "511 rd,
+   * festac" it does its best-effort loose matching on individual
+   * tokens ("festac", "road"), returning results like "New Festac
+   * Bridge Road" or "22 Road" that share a word but aren't remotely
+   * what was being typed. Places Autocomplete is Google's actual
+   * purpose-built endpoint for this — ranked, relevance-aware
+   * suggestions for partial input, which is what every real ride-
+   * hailing app's address search actually uses.
+   *
+   * Autocomplete predictions don't include coordinates on their own —
+   * fetching Place Details for each one preserves the existing
+   * GeocodeResult[] contract (lat/lng/formattedAddress per result) so
+   * nothing on the app side needs to change to benefit from this.
+   */
   async suggest(query: string, limit = 5): Promise<GeocodeResult[]> {
     if (!this.isConfigured()) return [];
     try {
-      const url = `${this.baseUrl}/geocode/json?address=${encodeURIComponent(query)}&key=${this.apiKey}`;
-      const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
-      const json = await response.json();
-      if (json.status !== 'OK' || !json.results?.length) return [];
+      const autocompleteUrl = `${this.baseUrl}/place/autocomplete/json?input=${encodeURIComponent(query)}&components=country:ng&key=${this.apiKey}`;
+      const autocompleteRes = await fetch(autocompleteUrl, { signal: AbortSignal.timeout(5000) });
+      const autocompleteJson = await autocompleteRes.json();
+      if (autocompleteJson.status !== 'OK' || !autocompleteJson.predictions?.length) return [];
 
-      return json.results.slice(0, limit).map((result: any) => ({
-        lat: result.geometry.location.lat,
-        lng: result.geometry.location.lng,
-        formattedAddress: result.formatted_address,
-      }));
+      const predictions = autocompleteJson.predictions.slice(0, limit);
+      const details = await Promise.all(
+        predictions.map(async (p: any) => {
+          try {
+            const detailsUrl = `${this.baseUrl}/place/details/json?place_id=${p.place_id}&fields=geometry,formatted_address&key=${this.apiKey}`;
+            const detailsRes = await fetch(detailsUrl, { signal: AbortSignal.timeout(5000) });
+            const detailsJson = await detailsRes.json();
+            if (detailsJson.status !== 'OK' || !detailsJson.result?.geometry) return null;
+            return {
+              lat: detailsJson.result.geometry.location.lat,
+              lng: detailsJson.result.geometry.location.lng,
+              formattedAddress: detailsJson.result.formatted_address ?? p.description,
+            };
+          } catch {
+            return null;
+          }
+        }),
+      );
+
+      return details.filter((d): d is GeocodeResult => d !== null);
     } catch (err) {
       this.logger.error('Suggest request failed', err as Error);
       return [];
