@@ -2110,6 +2110,29 @@ force the status change, and it's genuinely persisted (not just
 echoed back) — confirmed by changing it a second time in the same
 test. Full regression clean.
 
+## Fixed: force-cancelling a stuck ride left the driver permanently stuck too
+
+Direct follow-up from using the force-status admin endpoint on a real
+stuck ride — the ride itself was correctly fixed, but the driver
+stayed stuck showing "on a trip" regardless. The endpoint was built
+deliberately minimal (status change only, no side effects), which
+meant it skipped the driver-availability reset that the normal
+completion/cancellation flow does automatically — leaving no other
+path to ever un-stick that driver once their ride was gone.
+
+Extended `forceStatusForAdmin()` to also reset the driver to `ONLINE`
+when moving a ride to a terminal status (cancelled or completed) — the
+one side effect that genuinely can't be skipped, since nothing else
+would ever fire. Wrapped in a `.catch()` deliberately: a failure
+resetting availability shouldn't block the primary fix (the ride
+status) from succeeding.
+
+Verified live: a driver genuinely stuck at `ON_TRIP` (accepted a real
+ride, started it), confirmed force-cancelling the ride correctly
+resets them to `ONLINE`. Full regression clean.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

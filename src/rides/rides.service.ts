@@ -217,7 +217,21 @@ export class RidesService {
   async forceStatusForAdmin(id: string, status: RideStatus): Promise<Ride> {
     const ride = await this.findById(id);
     ride.status = status;
-    return this.ridesRepo.save(ride);
+    const saved = await this.ridesRepo.save(ride);
+
+    // The normal completion/cancellation flows reset the driver back to
+    // ONLINE as a side effect — this endpoint skipped that entirely by
+    // design (see the controller's docs on why it stays minimal), which
+    // meant a driver whose stuck ride got force-fixed stayed
+    // permanently stuck showing ON_TRIP regardless. Terminal statuses
+    // specifically need this: there's no other path that will ever
+    // un-stick them once the ride itself is no longer active.
+    const terminalStatuses = [RideStatus.CANCELLED, RideStatus.COMPLETED];
+    if (terminalStatuses.includes(status) && ride.driverId) {
+      await this.driversService.setAvailability(ride.driverId, DriverAvailability.ONLINE).catch(() => undefined);
+    }
+
+    return saved;
   }
 
   /**
