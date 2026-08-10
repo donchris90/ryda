@@ -1,8 +1,11 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { DeliveryOrder } from './entities/delivery-order.entity';
+import { DeliveryVehicleTypeConfig } from './entities/delivery-vehicle-type-config.entity';
 import { LogisticsService } from './logistics.service';
 import { LogisticsController } from './logistics.controller';
+import { DeliveryVehicleTypesService } from './delivery-vehicle-types.service';
+import { DeliveryVehicleTypesController, AdminDeliveryVehicleTypesController } from './delivery-vehicle-types.controller';
 import { DriversModule } from '../drivers/drivers.module';
 import { VehiclesModule } from '../vehicles/vehicles.module';
 import { WalletsModule } from '../wallets/wallets.module';
@@ -17,7 +20,7 @@ import { SettingsModule } from '../settings/settings.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([DeliveryOrder]),
+    TypeOrmModule.forFeature([DeliveryOrder, DeliveryVehicleTypeConfig]),
     DriversModule,
     VehiclesModule,
     WalletsModule,
@@ -30,8 +33,8 @@ import { SettingsModule } from '../settings/settings.module';
     ReconciliationModule,
     SettingsModule,
   ],
-  providers: [LogisticsService],
-  controllers: [LogisticsController],
-  exports: [LogisticsService],
+  providers: [LogisticsService, DeliveryVehicleTypesService],
+  controllers: [LogisticsController, DeliveryVehicleTypesController, AdminDeliveryVehicleTypesController],
+  exports: [LogisticsService, DeliveryVehicleTypesService],
 })
 export class LogisticsModule {}

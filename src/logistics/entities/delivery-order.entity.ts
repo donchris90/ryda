@@ -8,6 +8,15 @@ import {
 } from 'typeorm';
 import { PaymentMethod } from '../../common/enums/ride.enum';
 
+export enum DeliveryVehicleType {
+  BIKE = 'bike',
+  KEKE = 'keke',
+  CAR = 'car',
+  VAN = 'van',
+  PICKUP = 'pickup',
+  TRUCK = 'truck',
+}
+
 export enum DeliveryCategory {
   PARCEL = 'parcel',
   FOOD = 'food',
@@ -52,6 +61,12 @@ export class DeliveryOrder {
 
   @Column({ type: 'enum', enum: DeliveryCategory })
   category: DeliveryCategory;
+
+  // Default of CAR protects any existing production rows from a
+  // NOT NULL failure when this column is added via synchronize - new
+  // deliveries always specify one explicitly via the DTO.
+  @Column({ type: 'enum', enum: DeliveryVehicleType, default: DeliveryVehicleType.CAR })
+  vehicleType: DeliveryVehicleType;
 
   @Index()
   @Column({ type: 'enum', enum: DeliveryStatus, default: DeliveryStatus.REQUESTED })

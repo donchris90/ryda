@@ -2661,6 +2661,34 @@ breakdown are exactly correct. Full regression clean, boot verified
 genuinely (not just tsc, given the LogisticsModule lesson from
 earlier).
 
+## #8 Delivery Vehicle Types — mostly-built feature, made actually reachable
+
+Real, significant discovery: DeliveryVehicleType (bike/keke/car/van/
+pickup/truck) already matched the request's exact spec, and a full
+DeliveryVehicleTypeConfig entity/service already existed with
+auto-seeding using the request's own example numbers. None of it was
+reachable - no controller routes at all, not registered in any module
+(so the auto-seed would never even run), and no vehicleType field on
+the request DTO. The entire feature was fully built and completely
+inert.
+
+Fixed: proper module registration, public + admin controllers,
+vehicleType added to EstimateDeliveryDto. Found and fixed a real bug
+while wiring this up - order creation never actually saved the
+selected vehicleType, meaning every delivery would silently default to
+"car" in the database regardless of what was chosen and priced. Added
+genuine max-weight enforcement per type, not just a displayed number -
+the request's own spec implies this should actually be enforced.
+
+Verified live with six real tests: auto-seed correct, bike vs truck
+pricing genuinely differs for the same trip, over-limit weight rejected
+for a bike but accepted for a car, the selected type is genuinely
+persisted (confirmed against the actual created order, not the
+estimate response), and an admin price change immediately reflects in
+a fresh estimate. Full regression clean, genuine boot verification.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

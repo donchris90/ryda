@@ -12,6 +12,7 @@ import {
   DeliveryOrder,
   DeliveryCancelledBy,
   DeliveryStatus,
+  DeliveryVehicleType,
 } from './entities/delivery-order.entity';
 import { EstimateDeliveryDto, RequestDeliveryDto, CancelDeliveryDto } from './dto/logistics.dto';
 import { PaymentMethod } from '../common/enums/ride.enum';
@@ -29,6 +30,7 @@ import { PaymentsService } from '../payments/payments.service';
 import { PaymentStatus } from '../payments/entities/payment-record.entity';
 import { ReconciliationService } from '../reconciliation/reconciliation.service';
 import { SystemSettingsService, SETTING_KEYS } from '../settings/settings.service';
+import { DeliveryVehicleTypesService } from './delivery-vehicle-types.service';
 
 export interface DeliveryFareBreakdown {
   baseFare: number;
@@ -55,30 +57,55 @@ export class LogisticsService {
     private readonly paymentsService: PaymentsService,
     private readonly reconciliationService: ReconciliationService,
     private readonly settingsService: SystemSettingsService,
+    private readonly vehicleTypesService: DeliveryVehicleTypesService,
     private readonly events: EventEmitter2,
   ) {}
 
   async estimateFare(dto: EstimateDeliveryDto): Promise<DeliveryFareBreakdown> {
     const distanceKm = haversineDistanceKm(dto.pickupLat, dto.pickupLng, dto.dropoffLat, dto.dropoffLng);
 
-    const baseFare = await this.settingsService.getNumber(
-      SETTING_KEYS.LOGISTICS_BASE_FARE,
-      this.config.get<number>('logistics.baseFare')!,
-    );
-    const perKm = await this.settingsService.getNumber(
-      SETTING_KEYS.LOGISTICS_PER_KM,
-      this.config.get<number>('logistics.perKm')!,
-    );
-    const perKg = await this.settingsService.getNumber(
-      SETTING_KEYS.LOGISTICS_PER_KG,
-      this.config.get<number>('logistics.perKg')!,
-    );
-    const minimumFare = await this.settingsService.getNumber(
-      SETTING_KEYS.LOGISTICS_MINIMUM_FARE,
-      this.config.get<number>('logistics.minimumFare')!,
-    );
-    const currency = this.config.get<string>('pricing.currency')!;
+    let baseFare: number;
+    let perKm: number;
+    let perKg: number;
+    let minimumFare: number;
 
+    // A vehicle type's own configured pricing takes precedence -
+    // that's the whole point of #8 (bike/keke/car/van/pickup/truck each
+    // pricing differently). Falling back to the flat settings when no
+    // type is given keeps any existing caller that predates this
+    // feature working exactly as before, rather than breaking it.
+    if (dto.vehicleType) {
+      const vehicleConfig = await this.vehicleTypesService.getByType(dto.vehicleType);
+      const maxWeightKg = parseFloat(vehicleConfig.maxWeightKg);
+      if (dto.weightKg && dto.weightKg > maxWeightKg) {
+        throw new BadRequestException(
+          `${dto.weightKg}kg exceeds the ${maxWeightKg}kg limit for this vehicle type. Choose a larger vehicle.`,
+        );
+      }
+      baseFare = parseFloat(vehicleConfig.baseFare);
+      perKm = parseFloat(vehicleConfig.perKm);
+      perKg = parseFloat(vehicleConfig.perKg);
+      minimumFare = parseFloat(vehicleConfig.minimumFare);
+    } else {
+      baseFare = await this.settingsService.getNumber(
+        SETTING_KEYS.LOGISTICS_BASE_FARE,
+        this.config.get<number>('logistics.baseFare')!,
+      );
+      perKm = await this.settingsService.getNumber(
+        SETTING_KEYS.LOGISTICS_PER_KM,
+        this.config.get<number>('logistics.perKm')!,
+      );
+      perKg = await this.settingsService.getNumber(
+        SETTING_KEYS.LOGISTICS_PER_KG,
+        this.config.get<number>('logistics.perKg')!,
+      );
+      minimumFare = await this.settingsService.getNumber(
+        SETTING_KEYS.LOGISTICS_MINIMUM_FARE,
+        this.config.get<number>('logistics.minimumFare')!,
+      );
+    }
+
+    const currency = this.config.get<string>('pricing.currency')!;
     const distanceFare = distanceKm * perKm;
     const weightFare = (dto.weightKg ?? 0) * perKg;
     const totalFare = Math.max(baseFare + distanceFare + weightFare, minimumFare);
@@ -110,6 +137,7 @@ export class LogisticsService {
     const order = this.ordersRepo.create({
       customerId,
       category: dto.category,
+      vehicleType: dto.vehicleType ?? DeliveryVehicleType.CAR,
       status: DeliveryStatus.SEARCHING,
       pickupLat: dto.pickupLat,
       pickupLng: dto.pickupLng,

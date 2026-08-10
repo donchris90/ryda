@@ -6,12 +6,16 @@ import {
   IsString,
   Min,
 } from 'class-validator';
-import { DeliveryCategory } from '../entities/delivery-order.entity';
+import { DeliveryCategory, DeliveryVehicleType } from '../entities/delivery-order.entity';
 import { PaymentMethod } from '../../common/enums/ride.enum';
 
 export class EstimateDeliveryDto {
   @IsEnum(DeliveryCategory)
   category: DeliveryCategory;
+
+  @IsOptional()
+  @IsEnum(DeliveryVehicleType)
+  vehicleType?: DeliveryVehicleType;
 
   @IsNumber()
   pickupLat: number;
