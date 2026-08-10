@@ -2617,6 +2617,30 @@ password change. Also verified profile photo upload end-to-end with a
 real generated PNG, confirming the returned profilePhotoUrl is
 genuinely stored and correct. Full regression clean throughout.
 
+## #4 App Rating — new feature, built from scratch
+
+Nothing existed for this. New AppRating entity, deliberately separate
+from driver ratings (which rate a specific person after a specific
+trip - this rates the platform itself). One rating per user,
+upsertable - re-rating replaces the existing row rather than creating
+a duplicate, matching typical app-store rating UX.
+
+Summary endpoint (average/total/per-star breakdown) is genuinely
+public and reused as-is by the admin dashboard - no separate admin
+route needed, since the aggregate isn't sensitive data. Uses a single
+GROUP BY query rather than fetching every row and reducing in JS,
+built to hold up as ratings grow into the thousands (matching the
+request's own mockup showing "Total ratings: 3,482"), not just work on
+a handful of test rows.
+
+Verified live end-to-end: empty summary before any ratings, submit
+works, re-rating genuinely replaces rather than duplicates (confirmed
+via both the individual record and the summary reflecting exactly one
+rating afterward, not two), and the admin dashboard's own code
+confirmed working against this same endpoint. Full regression clean.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps
