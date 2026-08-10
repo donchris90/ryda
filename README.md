@@ -2383,6 +2383,49 @@ notifications endpoint path, module resolution from outside the
 project directory, mismatched SQL column counts) before trusting any
 result. Full regression clean throughout.
 
+## Ride and delivery pricing now genuinely admin-editable — #17
+
+Checked what "admin should control ride/package pricing" actually
+meant against the real code first, rather than assume nothing existed.
+Commission was already fully admin-manageable (both API and dashboard
+UI, built in an earlier round). Cancellation fee already used
+SystemSettingsService. But the core pricing levers themselves — base
+fare, per-km, per-minute, minimum fare, airport fee, night multiplier
+for rides; base fare, per-km, per-kg, minimum fare for deliveries —
+were all still env-var only, meaning changing them required a Render
+redeploy, not an admin setting. That's the real gap this closes.
+
+Migrated both `FareService.estimate()` and
+`LogisticsService.estimateFare()` to the same
+SystemSettingsService-with-env-fallback pattern already established
+for cancellation fee — the env values become the default shown before
+any admin override, not a second source of truth. `estimateFare()` was
+synchronous before this; made it async (both call sites already
+awaited/returned it fine).
+
+Caught and fixed a real bug before this shipped: `LogisticsModule`
+never imported `SettingsModule` at all, so injecting
+`SystemSettingsService` into `LogisticsService` broke the app at boot
+with a dependency resolution error — invisible to `tsc` since NestJS's
+DI is resolved at runtime, not compile time. Only surfaced by actually
+booting the server, which is exactly why that's part of verification
+here rather than trusting a clean type-check alone.
+
+Also caught real discrepancies in the admin dashboard's own default
+values before they shipped — cross-checked the actual env defaults in
+configuration.ts instead of guessing, and found per-km, per-minute, and
+minimum fare were all wrong from a first draft (120 not 100, 25 not
+20, 700 not 500) — would have shown a misleading "default" in the UI.
+
+Verified fully live: ride estimate correctly starts at the real env
+default (₦500 base fare), admin sets a deliberately distinctive value
+(₦9999), same estimate call immediately reflects it with no redeploy.
+Same test repeated for delivery pricing. Full regression clean,
+including the standard e2e suite which exercises the delivery flow
+end-to-end.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

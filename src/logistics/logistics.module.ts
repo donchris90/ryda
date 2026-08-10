@@ -13,6 +13,7 @@ import { UsersModule } from '../users/users.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { FeatureFlagsModule } from '../feature-flags/feature-flags.module';
 import { ReconciliationModule } from '../reconciliation/reconciliation.module';
+import { SettingsModule } from '../settings/settings.module';
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { ReconciliationModule } from '../reconciliation/reconciliation.module';
     PaymentsModule,
     FeatureFlagsModule,
     ReconciliationModule,
+    SettingsModule,
   ],
   providers: [LogisticsService],
   controllers: [LogisticsController],

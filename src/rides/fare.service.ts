@@ -101,13 +101,31 @@ export class FareService {
     const surgeMultiplier = options.surgeMultiplier ?? 1.0;
     const { distanceKm, durationMin, usedRealRouting } = await this.resolveRoute(pickup, dropoff);
 
-    const baseFare = this.config.get<number>('pricing.baseFare')!;
-    const perKm = this.config.get<number>('pricing.perKm')!;
-    const perMinute = this.config.get<number>('pricing.perMinute')!;
-    const minimumFare = this.config.get<number>('pricing.minimumFare')!;
+    const baseFare = await this.settingsService.getNumber(
+      SETTING_KEYS.PRICING_BASE_FARE,
+      this.config.get<number>('pricing.baseFare')!,
+    );
+    const perKm = await this.settingsService.getNumber(
+      SETTING_KEYS.PRICING_PER_KM,
+      this.config.get<number>('pricing.perKm')!,
+    );
+    const perMinute = await this.settingsService.getNumber(
+      SETTING_KEYS.PRICING_PER_MINUTE,
+      this.config.get<number>('pricing.perMinute')!,
+    );
+    const minimumFare = await this.settingsService.getNumber(
+      SETTING_KEYS.PRICING_MINIMUM_FARE,
+      this.config.get<number>('pricing.minimumFare')!,
+    );
     const currency = this.config.get<string>('pricing.currency')!;
-    const airportFeeConfig = this.config.get<number>('pricingExtra.airportFee')!;
-    const nightMultiplierConfig = this.config.get<number>('pricingExtra.nightMultiplier')!;
+    const airportFeeConfig = await this.settingsService.getNumber(
+      SETTING_KEYS.PRICING_AIRPORT_FEE,
+      this.config.get<number>('pricingExtra.airportFee')!,
+    );
+    const nightMultiplierConfig = await this.settingsService.getNumber(
+      SETTING_KEYS.PRICING_NIGHT_MULTIPLIER,
+      this.config.get<number>('pricingExtra.nightMultiplier')!,
+    );
 
     const multiplier = CATEGORY_MULTIPLIER[category] ?? 1.0;
     const nightMultiplier = this.isNightFare(options.at) ? nightMultiplierConfig : 1.0;

@@ -28,6 +28,7 @@ import { UsersService } from '../users/users.service';
 import { PaymentsService } from '../payments/payments.service';
 import { PaymentStatus } from '../payments/entities/payment-record.entity';
 import { ReconciliationService } from '../reconciliation/reconciliation.service';
+import { SystemSettingsService, SETTING_KEYS } from '../settings/settings.service';
 
 export interface DeliveryFareBreakdown {
   baseFare: number;
@@ -53,16 +54,29 @@ export class LogisticsService {
     private readonly usersService: UsersService,
     private readonly paymentsService: PaymentsService,
     private readonly reconciliationService: ReconciliationService,
+    private readonly settingsService: SystemSettingsService,
     private readonly events: EventEmitter2,
   ) {}
 
-  estimateFare(dto: EstimateDeliveryDto): DeliveryFareBreakdown {
+  async estimateFare(dto: EstimateDeliveryDto): Promise<DeliveryFareBreakdown> {
     const distanceKm = haversineDistanceKm(dto.pickupLat, dto.pickupLng, dto.dropoffLat, dto.dropoffLng);
 
-    const baseFare = this.config.get<number>('logistics.baseFare')!;
-    const perKm = this.config.get<number>('logistics.perKm')!;
-    const perKg = this.config.get<number>('logistics.perKg')!;
-    const minimumFare = this.config.get<number>('logistics.minimumFare')!;
+    const baseFare = await this.settingsService.getNumber(
+      SETTING_KEYS.LOGISTICS_BASE_FARE,
+      this.config.get<number>('logistics.baseFare')!,
+    );
+    const perKm = await this.settingsService.getNumber(
+      SETTING_KEYS.LOGISTICS_PER_KM,
+      this.config.get<number>('logistics.perKm')!,
+    );
+    const perKg = await this.settingsService.getNumber(
+      SETTING_KEYS.LOGISTICS_PER_KG,
+      this.config.get<number>('logistics.perKg')!,
+    );
+    const minimumFare = await this.settingsService.getNumber(
+      SETTING_KEYS.LOGISTICS_MINIMUM_FARE,
+      this.config.get<number>('logistics.minimumFare')!,
+    );
     const currency = this.config.get<string>('pricing.currency')!;
 
     const distanceFare = distanceKm * perKm;
@@ -80,7 +94,7 @@ export class LogisticsService {
   }
 
   async requestDelivery(customerId: string, dto: RequestDeliveryDto): Promise<DeliveryOrder> {
-    const breakdown = this.estimateFare(dto);
+    const breakdown = await this.estimateFare(dto);
     const paymentMethod = dto.paymentMethod ?? PaymentMethod.CASH;
 
     if (paymentMethod === PaymentMethod.CORPORATE) {
