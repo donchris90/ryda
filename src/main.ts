@@ -22,7 +22,14 @@ async function bootstrap() {
   );
 
   app.enableCors();
-  app.setGlobalPrefix('api/v1');
+  app.setGlobalPrefix('api/v1', {
+    // The email-verification and password-reset links sent by
+    // AuthService already point at ${appBaseUrl}/verify-email and
+    // ${appBaseUrl}/reset-password with no /api/v1 prefix — excluding
+    // these here matches what's already being generated, rather than
+    // changing already-tested email-sending code to match a prefix.
+    exclude: ['verify-email', 'reset-password'],
+  });
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,

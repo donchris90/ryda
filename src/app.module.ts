@@ -37,6 +37,7 @@ import { AdvertisingModule } from './advertising/advertising.module';
 import { AiModule } from './ai/ai.module';
 import { FeatureFlagsModule } from './feature-flags/feature-flags.module';
 import { SettingsModule } from './settings/settings.module';
+import { PagesModule } from './pages/pages.module';
 import { TrackingModule } from './tracking/tracking.module';
 import { HealthModule } from './health/health.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
@@ -122,6 +123,7 @@ import { MaintenanceModeGuard } from './admin-tools/maintenance-mode.guard';
     AiModule,
     FeatureFlagsModule,
     SettingsModule,
+    PagesModule,
     TrackingModule,
     HealthModule,
     WebhooksModule,

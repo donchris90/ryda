@@ -2547,6 +2547,32 @@ rejection, not just trusting that revocation happened. Also re-ran the
 full 16-step e2e suite (clean) and re-verified wallet transfer
 end-to-end with the new email-based lookup.
 
+## Web landing pages for email links — the missing piece for a mobile-only app
+
+The email-verification and password-reset links already pointed at
+`${appBaseUrl}/verify-email` and `/reset-password`, but nothing served
+those routes at all - a real gap, since both apps are mobile-only with
+no web frontend, so a tapped email link had nowhere to go.
+
+Added a lightweight `PagesController` serving both as self-contained
+HTML+inline-JS pages (no build step, no framework) - on load, each
+calls the actual API endpoint client-side and shows a clear success or
+error state. Excluded both routes from the `/api/v1` prefix in
+`setGlobalPrefix()` specifically to match the URLs the already-tested
+email-sending code generates, rather than change that code to fit a
+prefix.
+
+Verified live: both pages load correctly with no prefix, normal API
+routes are unaffected, and confirmed the excluded paths correctly
+don't *also* exist under `/api/v1` (would have been a real routing bug
+if both resolved). Full regression clean.
+
+**Still needed**: `APP_BASE_URL` needs to be set as a real environment
+variable on Render for these links to actually work in production —
+currently defaults to empty.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps
