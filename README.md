@@ -2315,6 +2315,29 @@ sensible empty defaults before any admin configuration, set real values
 through the actual admin endpoint, then confirmed the public endpoint —
 called with no token — correctly reflects them. Full regression clean.
 
+## Added: wallet transaction detail lookup, #5's real gap
+
+Checked the entity before assuming what was missing — it already had
+transaction id, direction, category (a genuinely thorough enum:
+ride/delivery payment and earning, topup, withdrawal, refund, bonus,
+cashback, referral, cancellation fee, split fare, tips), amount,
+balanceAfter, referenceId, description, timestamp. The real gap was
+narrower than it looked: no way to fetch a *single* transaction, so
+tapping one in the app had nothing to link to.
+
+Added `getTransactionById()` and `GET /wallet/transactions/:id`, with
+real ownership verification — a different user's transaction id
+returns 404, not someone else's wallet activity. Deliberately didn't
+add a stored `balanceBefore` column; it's fully derivable from
+`balanceAfter`, `direction`, and `amount`, and storing it separately
+would just be redundant data that could drift from the real ledger.
+
+Verified live: real owner gets full detail (200), a different user
+requesting the exact same transaction id correctly gets 404. Full
+regression clean.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

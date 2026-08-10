@@ -1,4 +1,4 @@
-import { Body, Controller, forwardRef, Get, Inject, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, forwardRef, Get, Inject, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../users/entities/user.entity';
@@ -34,6 +34,11 @@ export class WalletsController {
       from ? new Date(from) : undefined,
       to ? new Date(to) : undefined,
     );
+  }
+
+  @Get('transactions/:id')
+  async getTransaction(@CurrentUser() user: User, @Param('id') id: string) {
+    return this.walletsService.getTransactionById(user.id, id);
   }
 
   /**

@@ -52,6 +52,20 @@ export class WalletsService {
   }
 
   /**
+   * A single transaction's full detail — the list endpoint above never
+   * had anything to link a tap-through to. Verifies the transaction
+   * genuinely belongs to this user's own wallet, not just that some
+   * transaction with this id exists — a different user's transaction
+   * id should 404, not leak someone else's wallet activity.
+   */
+  async getTransactionById(userId: string, transactionId: string): Promise<WalletTransaction> {
+    const wallet = await this.getByUserId(userId);
+    const tx = await this.txRepo.findOne({ where: { id: transactionId, walletId: wallet.id } });
+    if (!tx) throw new NotFoundException('Transaction not found');
+    return tx;
+  }
+
+  /**
    * Credits a wallet and writes a ledger entry. Runs inside a DB transaction
    * so balance updates and the transaction log never drift apart.
    */
