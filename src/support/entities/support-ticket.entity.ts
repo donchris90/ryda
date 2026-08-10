@@ -11,6 +11,8 @@ export enum TicketCategory {
   GENERAL = 'general',
   RIDE_ISSUE = 'ride_issue',
   PAYMENT_ISSUE = 'payment_issue',
+  WALLET_ISSUE = 'wallet_issue',
+  PACKAGE_ISSUE = 'package_issue',
   ACCOUNT_ISSUE = 'account_issue',
   LOST_ITEM = 'lost_item',
   SAFETY = 'safety',

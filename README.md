@@ -2708,6 +2708,28 @@ existing driver-analytics endpoint, just never surfaced on the profile
 screen itself) and vehicle registration are now shown - see the driver
 app's README for the actual UI work.
 
+## #15 Help & Support categorization
+
+TicketCategory already existed (general/ride_issue/payment_issue/
+account_issue/lost_item/safety) but was missing wallet_issue and
+package_issue specifically - the two categories the request explicitly
+names. Added both.
+
+Worth noting for production: this is a new value added to an existing
+Postgres enum type, not a fresh table. synchronize handles this fine
+for a freshly-created database (confirmed by every test this round
+running against one), but altering an enum type on an existing
+production database is a genuinely different, sometimes finickier
+operation than adding a column - worth confirming this actually
+applied cleanly on Render after deploy, not just assuming it did.
+
+Verified live end-to-end: created real tickets with both new
+categories, confirmed the admin dashboard's own category filter finds
+exactly the right ticket for each - not just that ticket creation
+accepted the new value. Full regression clean.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps
