@@ -2424,6 +2424,70 @@ Same test repeated for delivery pricing. Full regression clean,
 including the standard e2e suite which exercises the delivery flow
 end-to-end.
 
+## Wallet transfer with 2FA — backend complete and verified live
+
+Real money moving between two people's wallets is the highest-stakes
+thing built in this project so far, so this got more care than usual
+before anything shipped.
+
+**A real architectural problem found before writing any transfer
+code**: 2FA needed to reuse the existing OTP system (phone-based,
+already used for registration verification), but `AuthService`'s
+`verifyOtp()` unconditionally marked the phone verified as a side
+effect, with no way to distinguish "verifying a phone" from
+"confirming a transfer" for the same number. Worse, `AuthModule`
+already imports `WalletsModule`, so wallet code importing `AuthModule`
+back for OTP would create a circular dependency. Extracted an
+independent `OtpModule`/`OtpService` — purely mechanical OTP
+generation/verification, zero side effects, zero dependency on
+`UsersService` — with a new `purpose` field so different OTP use cases
+can never collide. Verified live that the existing phone-verification
+flow still works exactly as before after this refactor, including the
+wrong-code attempt-tracking logic.
+
+**The atomic transfer itself**: found that the existing `credit()`/
+`debit()` each open their own separate database transaction — correct
+for a one-sided operation like a top-up, but calling them sequentially
+for a transfer would leave a real window where a crash between the two
+calls debits the sender with the recipient never credited, exactly the
+failure mode the spec explicitly ruled out. Built a dedicated
+`transfer()` that debits and credits inside one shared transaction,
+locking both wallets in a consistent order (sorted by id, not by
+sender/recipient role) specifically so two transfers between the same
+two people running concurrently in opposite directions can't deadlock
+each other.
+
+**Full flow**: `POST /wallet/transfer/initiate` (looks up recipient by
+phone, validates limits and balance, creates a pending
+`WalletTransferRequest`, sends a 2FA OTP to the sender's own phone) and
+`POST /wallet/transfer/confirm` (verifies the OTP, performs the atomic
+transfer). Admin-configurable min/max-per-transaction/max-daily/fee via
+the same settings infrastructure as ride and delivery pricing.
+Throttled (5/min on initiate) matching the same caution the existing
+OTP-send endpoint already applies — worth knowing this throttle is
+per-IP by default, not per-user, discovered while writing the test
+script.
+
+**Verified live with a real, 10-part test**: happy path with correct
+balance changes on both sides; wrong OTP rejected; a different user
+cannot confirm someone else's pending transfer (403, not a silent
+success); confirming an already-completed request rejected; self-
+transfer rejected; over-limit and insufficient-balance rejected at
+initiate, before an OTP is even spent; daily limit genuinely enforced
+by summing today's actual sent transfers; unknown recipient phone
+rejected clearly; and — the one that mattered most — two real,
+concurrent, opposite-direction transfers between the same two wallets
+fired in parallel, with a real timeout bound (not just hoping),
+confirmed to complete cleanly with correct final balances and no
+deadlock. Full regression clean throughout, including the existing
+e2e suite.
+
+**Not done yet**: no app-side UI at all (initiate screen, confirmation
+screen, OTP entry) — deliberately left for a following, focused round
+given how much went into getting the backend right.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

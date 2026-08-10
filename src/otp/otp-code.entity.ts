@@ -1,5 +1,10 @@
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
 
+export enum OtpPurpose {
+  PHONE_VERIFICATION = 'phone_verification',
+  WALLET_TRANSFER = 'wallet_transfer',
+}
+
 @Entity('otp_codes')
 export class OtpCode {
   @PrimaryGeneratedColumn('uuid')
@@ -8,6 +13,13 @@ export class OtpCode {
   @Index()
   @Column()
   destination: string; // phone number or email
+
+  // Defaults to the original, only-ever use case so every existing row
+  // and every existing caller stays exactly correct with no migration
+  // needed beyond the column itself - new purposes are additive, not a
+  // breaking change to what already works.
+  @Column({ type: 'enum', enum: OtpPurpose, default: OtpPurpose.PHONE_VERIFICATION })
+  purpose: OtpPurpose;
 
   @Column()
   code: string;

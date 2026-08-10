@@ -166,4 +166,99 @@ export class WalletsService {
       return w;
     });
   }
+
+  /**
+   * Debits the sender and credits the recipient inside ONE shared
+   * transaction — credit() and debit() above each open their own
+   * separate transaction, which is fine for a single-sided operation
+   * like a top-up, but calling them sequentially for a transfer would
+   * leave a real window where a crash between the two calls debits the
+   * sender with the recipient never credited. That's exactly the
+   * failure mode the transfer requirement explicitly rules out.
+   *
+   * Locks both wallets in a consistent order (sorted by id, not by
+   * sender/recipient role) so two transfers running concurrently
+   * between the same two wallets in opposite directions can't deadlock
+   * each other by acquiring locks in reversed order.
+   */
+  async transfer(
+    senderWalletId: string,
+    recipientWalletId: string,
+    amount: number,
+    fee: number,
+    referenceId: string,
+    description: string,
+  ): Promise<{ senderWallet: Wallet; recipientWallet: Wallet }> {
+    if (amount <= 0) throw new BadRequestException('Amount must be positive');
+    if (senderWalletId === recipientWalletId) {
+      throw new BadRequestException('Cannot transfer to your own wallet');
+    }
+
+    const [firstId, secondId] = [senderWalletId, recipientWalletId].sort();
+
+    const result = await this.walletsRepo.manager.transaction(async (manager) => {
+      const first = await manager.findOne(Wallet, { where: { id: firstId }, lock: { mode: 'pessimistic_write' } });
+      const second = await manager.findOne(Wallet, { where: { id: secondId }, lock: { mode: 'pessimistic_write' } });
+      if (!first || !second) throw new NotFoundException('Wallet not found');
+
+      const senderWallet = first.id === senderWalletId ? first : second;
+      const recipientWallet = first.id === senderWalletId ? second : first;
+
+      if (senderWallet.isFrozen) throw new BadRequestException('Your wallet is frozen');
+      if (recipientWallet.isFrozen) throw new BadRequestException('The recipient\'s wallet is frozen');
+
+      const totalDebit = amount + fee;
+      const senderBalance = parseFloat(senderWallet.balance);
+      if (senderBalance < totalDebit) {
+        throw new BadRequestException('Insufficient wallet balance');
+      }
+
+      const newSenderBalance = senderBalance - totalDebit;
+      senderWallet.balance = newSenderBalance.toFixed(2);
+      await manager.save(senderWallet);
+      await manager.save(WalletTransaction, {
+        walletId: senderWallet.id,
+        direction: TransactionDirection.DEBIT,
+        category: TransactionCategory.TRANSFER_SENT,
+        amount: totalDebit.toFixed(2),
+        balanceAfter: senderWallet.balance,
+        referenceId,
+        description,
+      });
+
+      const newRecipientBalance = parseFloat(recipientWallet.balance) + amount;
+      recipientWallet.balance = newRecipientBalance.toFixed(2);
+      await manager.save(recipientWallet);
+      await manager.save(WalletTransaction, {
+        walletId: recipientWallet.id,
+        direction: TransactionDirection.CREDIT,
+        category: TransactionCategory.TRANSFER_RECEIVED,
+        amount: amount.toFixed(2),
+        balanceAfter: recipientWallet.balance,
+        referenceId,
+        description,
+      });
+
+      return { senderWallet, recipientWallet };
+    });
+
+    this.events.emit('wallet.updated', {
+      walletId: result.senderWallet.id,
+      userId: result.senderWallet.userId,
+      direction: 'debit',
+      amount: amount + fee,
+      category: TransactionCategory.TRANSFER_SENT,
+    });
+    this.events.emit('wallet.updated', {
+      walletId: result.recipientWallet.id,
+      userId: result.recipientWallet.userId,
+      direction: 'credit',
+      amount,
+      category: TransactionCategory.TRANSFER_RECEIVED,
+    });
+    this.metricsService.walletTransactionsTotal.inc({ direction: 'debit', category: TransactionCategory.TRANSFER_SENT });
+    this.metricsService.walletTransactionsTotal.inc({ direction: 'credit', category: TransactionCategory.TRANSFER_RECEIVED });
+
+    return result;
+  }
 }

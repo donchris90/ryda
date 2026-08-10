@@ -19,5 +19,7 @@ export enum TransactionCategory {
   SPLIT_FARE_PAYMENT = 'split_fare_payment', // a participant paying their share
   SPLIT_FARE_RECEIVED = 'split_fare_received', // the initiator receiving a participant's share
   TIP_PAYMENT = 'tip_payment', // passenger tipping their driver
-  TIP_RECEIVED = 'tip_received', // driver receiving a tip
+  TIP_RECEIVED = 'tip_received',
+  TRANSFER_SENT = 'transfer_sent',
+  TRANSFER_RECEIVED = 'transfer_received', // driver receiving a tip
 }

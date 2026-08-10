@@ -10,7 +10,8 @@ import * as bcrypt from 'bcrypt';
 import { createHash, randomUUID } from 'crypto';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { OtpCode } from './entities/otp-code.entity';
+import { OtpPurpose } from '../otp/otp-code.entity';
+import { OtpService } from '../otp/otp.service';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { User } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -24,8 +25,6 @@ import { FraudService } from '../fraud/fraud.service';
 @Injectable()
 export class AuthService {
   constructor(
-    @InjectRepository(OtpCode)
-    private readonly otpRepo: Repository<OtpCode>,
     @InjectRepository(RefreshToken)
     private readonly refreshTokenRepo: Repository<RefreshToken>,
     private readonly usersService: UsersService,
@@ -34,6 +33,7 @@ export class AuthService {
     private readonly config: ConfigService,
     private readonly auditService: AuditService,
     private readonly fraudService: FraudService,
+    private readonly otpService: OtpService,
   ) {}
 
   async register(dto: RegisterDto) {
@@ -68,55 +68,23 @@ export class AuthService {
     return { user: this.sanitizeUser(user), ...tokens };
   }
 
-  async sendOtp(dto: SendOtpDto) {
-    const length = this.config.get<number>('otp.length')!;
-    const ttlSeconds = this.config.get<number>('otp.ttlSeconds')!;
-    const code = this.generateCode(length);
-
-    await this.otpRepo.save(
-      this.otpRepo.create({
-        destination: dto.phone,
-        code,
-        expiresAt: new Date(Date.now() + ttlSeconds * 1000),
-      }),
-    );
-
-    // TODO: wire to an SMS provider (Twilio, Termii, etc). For now the code
-    // is returned directly so the flow is testable end-to-end without one.
-    return { message: 'OTP sent', devOnlyCode: code, expiresInSeconds: ttlSeconds };
+  async sendOtp(dto: SendOtpDto, purpose: OtpPurpose = OtpPurpose.PHONE_VERIFICATION) {
+    const { devOnlyCode, expiresInSeconds } = await this.otpService.send(dto.phone, purpose);
+    return { message: 'OTP sent', devOnlyCode, expiresInSeconds };
   }
 
-  async verifyOtp(dto: VerifyOtpDto) {
-    const MAX_ATTEMPTS = 5;
+  async verifyOtp(dto: VerifyOtpDto, purpose: OtpPurpose = OtpPurpose.PHONE_VERIFICATION) {
+    await this.otpService.verify(dto.phone, dto.code, purpose);
 
-    // Look up the latest unused OTP for this destination regardless of
-    // whether the submitted code matches — we need it either way, to
-    // check/increment the attempt count.
-    const latest = await this.otpRepo.findOne({
-      where: { destination: dto.phone, isUsed: false },
-      order: { createdAt: 'DESC' },
-    });
-
-    if (!latest || latest.expiresAt < new Date()) {
-      throw new BadRequestException('Invalid or expired OTP');
-    }
-
-    if (latest.attemptCount >= MAX_ATTEMPTS) {
-      throw new BadRequestException('Too many incorrect attempts — request a new code');
-    }
-
-    if (latest.code !== dto.code) {
-      latest.attemptCount += 1;
-      await this.otpRepo.save(latest);
-      throw new BadRequestException('Invalid or expired OTP');
-    }
-
-    latest.isUsed = true;
-    await this.otpRepo.save(latest);
-
-    const user = await this.usersService.findByPhone(dto.phone);
-    if (user) {
-      await this.usersService.markPhoneVerified(user.id);
+    // Only a genuine phone-verification OTP should ever mark the phone
+    // verified - a wallet-transfer confirmation succeeding says nothing
+    // about phone ownership being newly proven, it was already required
+    // to be verified before a transfer OTP could even be requested.
+    if (purpose === OtpPurpose.PHONE_VERIFICATION) {
+      const user = await this.usersService.findByPhone(dto.phone);
+      if (user) {
+        await this.usersService.markPhoneVerified(user.id);
+      }
     }
 
     return { verified: true };
@@ -254,14 +222,5 @@ export class AuthService {
     const value = parseInt(match[1], 10);
     const unitMs = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[match[2]]!;
     return new Date(Date.now() + value * unitMs);
-  }
-
-  private generateCode(length: number): string {
-    const digits = '0123456789';
-    let code = '';
-    for (let i = 0; i < length; i++) {
-      code += digits[Math.floor(Math.random() * digits.length)];
-    }
-    return code;
   }
 }
