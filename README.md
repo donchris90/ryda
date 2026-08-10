@@ -2687,6 +2687,29 @@ persisted (confirmed against the actual created order, not the
 estimate response), and an admin price change immediately reflects in
 a fresh estimate. Full regression clean, genuine boot verification.
 
+## #12 Driver profile — real gap found and fixed: reviewedBy exposure
+
+listForDriver() (the driver's own "documents/mine" endpoint) was
+returning the full raw entity, including reviewedBy - an internal
+admin user id with no reason to ever reach a driver's own app.
+Genuinely matches the request's explicit concern: "don't expose
+sensitive documents to the driver unnecessarily." Fixed by stripping
+it at the service boundary, not just relying on the frontend not to
+render it - the raw value would otherwise still sit in the network
+response and app state regardless of what the UI shows.
+
+Verified live: inserted a document with a real reviewedBy value
+directly, confirmed the driver-facing endpoint genuinely doesn't
+contain the string anywhere in its response, not just that the app
+happens not to display a field it received. Full regression clean.
+
+Acceptance rate and cancellation rate (already computed by the
+existing driver-analytics endpoint, just never surfaced on the profile
+screen itself) and vehicle registration are now shown - see the driver
+app's README for the actual UI work.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

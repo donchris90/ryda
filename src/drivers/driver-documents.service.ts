@@ -43,8 +43,14 @@ export class DriverDocumentsService {
     return this.docsRepo.save(doc);
   }
 
-  async listForDriver(driverProfileId: string): Promise<DriverDocument[]> {
-    return this.docsRepo.find({ where: { driverProfileId }, order: { type: 'ASC' } });
+  async listForDriver(driverProfileId: string): Promise<Omit<DriverDocument, 'reviewedBy'>[]> {
+    const docs = await this.docsRepo.find({ where: { driverProfileId }, order: { type: 'ASC' } });
+    // reviewedBy is an internal admin user id - no reason for it to
+    // ever reach the driver's own app. Stripped here at the service
+    // boundary, not left to the frontend to simply not render, since
+    // the raw value would otherwise still be sitting in the network
+    // response and app state regardless of what the UI shows.
+    return docs.map(({ reviewedBy, ...rest }) => rest);
   }
 
   async findById(id: string): Promise<DriverDocument> {
