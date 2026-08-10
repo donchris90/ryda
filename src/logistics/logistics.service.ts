@@ -122,7 +122,26 @@ export class LogisticsService {
       paymentMethod,
     });
 
-    return this.ordersRepo.save(order);
+    const saved = await this.ordersRepo.save(order);
+
+    // Real gap found while checking notification coverage against the
+    // full requested trigger list — deliveries use an open,
+    // any-driver-can-accept model (no targeted offer like rides have),
+    // which meant nobody was ever told a new delivery even existed. A
+    // driver would only discover one by manually checking the list.
+    const nearbyDrivers = await this.driversService.findNearby(
+      { lat: dto.pickupLat, lng: dto.pickupLng },
+      { limit: 10 },
+    );
+    if (nearbyDrivers.length > 0) {
+      this.events.emit('delivery.requested', {
+        driverUserIds: nearbyDrivers.map((d) => d.userId),
+        deliveryId: saved.id,
+        pickupAddress: dto.pickupAddress,
+      });
+    }
+
+    return saved;
   }
 
   async findById(id: string): Promise<DeliveryOrder> {

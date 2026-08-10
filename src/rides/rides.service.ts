@@ -746,7 +746,14 @@ export class RidesService {
     }
     ride.status = RideStatus.ARRIVED;
     ride.arrivedAt = new Date();
-    return this.ridesRepo.save(ride);
+    const saved = await this.ridesRepo.save(ride);
+    // Real gap found while checking notification coverage against the
+    // full requested trigger list — this never emitted anything at
+    // all. The passenger's own 5s status poll would eventually show
+    // this, but a push notification matters specifically for a
+    // backgrounded app.
+    this.events.emit('ride.arrived', { passengerId: ride.passengerId });
+    return saved;
   }
 
   async startRide(rideId: string, driverUserId: string): Promise<Ride> {
@@ -766,7 +773,7 @@ export class RidesService {
     }
 
     const saved = await this.ridesRepo.save(ride);
-    this.events.emit('ride.started', { rideId: saved.id, driverId: driverUserId });
+    this.events.emit('ride.started', { rideId: saved.id, driverId: driverUserId, passengerId: ride.passengerId });
     return saved;
   }
 

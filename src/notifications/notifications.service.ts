@@ -214,6 +214,30 @@ export class NotificationsService {
     );
   }
 
+  @OnEvent('ride.arrived')
+  async onRideArrived(payload: { passengerId: string }) {
+    await this.safeNotify(
+      payload.passengerId,
+      [NotificationChannel.IN_APP, NotificationChannel.PUSH],
+      'Your driver has arrived',
+      "Your driver is waiting at the pickup point.",
+      undefined,
+      NotificationCategory.RIDE,
+    );
+  }
+
+  @OnEvent('ride.started')
+  async onRideStarted(payload: { passengerId: string }) {
+    await this.safeNotify(
+      payload.passengerId,
+      [NotificationChannel.IN_APP, NotificationChannel.PUSH],
+      'Trip started',
+      "You're on your way — have a safe trip.",
+      undefined,
+      NotificationCategory.RIDE,
+    );
+  }
+
   @OnEvent('ride.offered')
   async onRideOffered(payload: {
     driverUserId: string;
@@ -280,6 +304,19 @@ export class NotificationsService {
     );
   }
 
+  @OnEvent('driver.document.expiring')
+  async onDriverDocumentExpiring(payload: { userId: string; documentType: string; daysLeft: number }) {
+    const label = payload.documentType.replace(/_/g, ' ');
+    await this.safeNotify(
+      payload.userId,
+      [NotificationChannel.IN_APP, NotificationChannel.PUSH],
+      'Document expiring soon',
+      `Your ${label} expires in ${payload.daysLeft} day${payload.daysLeft === 1 ? '' : 's'} — renew it to keep driving without interruption.`,
+      undefined,
+      NotificationCategory.SECURITY,
+    );
+  }
+
   @OnEvent('referral.bonus_granted')
   async onReferralBonusGranted(payload: { userId: string; amount: string }) {
     await this.safeNotify(
@@ -301,6 +338,22 @@ export class NotificationsService {
       `We couldn't process your payment: ${payload.reason}`,
       undefined,
       NotificationCategory.WALLET,
+    );
+  }
+
+  @OnEvent('delivery.requested')
+  async onDeliveryRequested(payload: { driverUserIds: string[]; deliveryId: string; pickupAddress: string }) {
+    await Promise.all(
+      payload.driverUserIds.map((driverUserId) =>
+        this.safeNotify(
+          driverUserId,
+          [NotificationChannel.PUSH, NotificationChannel.IN_APP],
+          'New delivery nearby!',
+          `Pickup at ${payload.pickupAddress}.`,
+          { deliveryId: payload.deliveryId, type: 'delivery_request' },
+          NotificationCategory.RIDE,
+        ),
+      ),
     );
   }
 

@@ -2336,6 +2336,55 @@ Verified live: real owner gets full detail (200), a different user
 requesting the exact same transaction id correctly gets 404. Full
 regression clean.
 
+## Notifications — #14, checked against the full requested trigger list
+
+Systematically checked every requested notification trigger against
+the actual event handlers, rather than assume coverage. Three real
+gaps found and fixed:
+
+- **Driver arrived / trip started** — `markArrived()` and `startRide()`
+  never emitted anything at all (the latter's `ride.started` event
+  existed, but only the webhooks service ever listened to it — nothing
+  passenger-facing). Added `ride.arrived`, added `passengerId` to the
+  existing `ride.started` payload (safe, additive), added both
+  notification handlers.
+- **New delivery / "package request"** — a genuinely significant gap:
+  deliveries use an open, any-driver-can-accept model with no targeted
+  offer like rides have, and `LogisticsService` never emitted anything
+  when a delivery was created. A driver would only ever discover one by
+  manually checking the list. Now notifies every nearby online driver
+  (reusing `DriversService.findNearby()`), not just one.
+- **Document expiry** — the `expiryDate` field existed on
+  `DriverDocument` the whole time, only ever set on upload and read for
+  the admin list view, never actually checked against the current date.
+  Added a daily cron (`@Cron(EVERY_DAY_AT_9AM)`) checking documents
+  expiring within 7 days, with a new `expiryWarningSent` flag so it
+  fires once per document, not every single day it remains unrenewed.
+
+**A real, pre-existing thing found and deliberately not touched**:
+every notification in this system creates one database row per
+delivery channel (`notify()` loops channels, each with its own
+`send*()` call) — meaning a notification sent to both `IN_APP` and
+`PUSH` genuinely produces two list entries, confirmed for
+`ride.accepted` (which predates this session) as much as for the new
+handlers here. This is a real UX issue worth fixing, but it's a
+system-wide behavior affecting every existing notification type, not
+something to fold into a trigger-coverage pass — flagged clearly
+rather than fixed as a side effect.
+
+Verified live, not just type-checked: real ride reaching arrived/
+started, confirmed the passenger's notification list picks up both;
+real delivery request, confirmed multiple nearby online drivers are
+notified and a driver mid-trip (`ON_TRIP`, not `ONLINE`) is correctly
+excluded; cron run twice against a real expiring document, confirmed
+it fires once and the flag correctly prevents a second notification.
+Caught and fixed three of my own test-script bugs along the way (wrong
+notifications endpoint path, module resolution from outside the
+project directory, mismatched SQL column counts) before trusting any
+result. Full regression clean throughout.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

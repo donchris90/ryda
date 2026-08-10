@@ -49,6 +49,14 @@ export class DriverDocument {
   @Column({ type: 'timestamp', nullable: true })
   expiryDate: Date | null;
 
+  // Set true once an expiry-warning notification has genuinely been
+  // sent for this document, so the daily check doesn't re-notify the
+  // driver every single day their document remains unrenewed — one
+  // warning, then it stays quiet until either renewed (a new document
+  // record entirely, per how uploads work here) or actually expired.
+  @Column({ default: false })
+  expiryWarningSent: boolean;
+
   @CreateDateColumn()
   createdAt: Date;
 
