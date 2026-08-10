@@ -2639,6 +2639,30 @@ via both the individual record and the summary reflecting exactly one
 rating afterward, not two), and the admin dashboard's own code
 confirmed working against this same endpoint. Full regression clean.
 
+## #4 App rating — new feature, backend built from scratch
+
+Genuinely new — checked first, nothing existed for this. New AppRating
+entity, deliberately separate from driver ratings (a different
+concept: rating the platform itself, not a person after a trip).
+Upsert-by-userId rather than one-time submission, matching typical
+app-store rating UX. Summary uses a single GROUP BY query rather than
+fetching every row and reducing in JS, meant to hold up as ratings
+grow into the thousands, not just work on a handful of test rows.
+Summary endpoint is public — the profile screen's rating display needs
+it regardless of whether the person has rated, and the admin dashboard
+reuses this same endpoint directly rather than needing a separate
+admin-only route, since the aggregate isn't sensitive data.
+
+Verified live end-to-end: empty summary before any ratings, submit
+works, re-rating genuinely replaces rather than duplicates (confirmed
+via the summary staying at total=1 after a second submission), and a
+3-user varied-rating test confirming the weighted average and full
+breakdown are exactly correct. Full regression clean, boot verified
+genuinely (not just tsc, given the LogisticsModule lesson from
+earlier).
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps
