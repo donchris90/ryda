@@ -2292,6 +2292,31 @@ controller path (`/logistics` instead of the actual `/deliveries`) —
 both fixed before concluding anything about the feature itself. Full
 regression clean throughout.
 
+## Added: admin-configurable contact info, genuinely public
+
+Real request — contact details (support email, phone, WhatsApp,
+website, address, business hours, social links) were never meant to be
+hardcoded into either app, and needed to be admin-editable without a
+redeploy every time they change.
+
+Added the contact fields to the existing `SystemSettingsService`
+rather than build a separate mechanism — reused, not duplicated,
+infrastructure. The genuinely new piece: a narrow, explicitly-
+whitelisted public endpoint (`GET /app-config/contact`), deliberately
+a *separate* controller from the admin-only `SettingsController`
+rather than an exception carved into it — that one's guarded at the
+class level, and mixing an unguarded route in would be an easy spot
+for a future edit to accidentally lose the admin restriction on
+everything else in that table (the cash-debt threshold, referral
+bonus amounts, etc., which should never be publicly readable).
+
+Verified live, genuinely without an Authorization header at all: confirmed
+sensible empty defaults before any admin configuration, set real values
+through the actual admin endpoint, then confirmed the public endpoint —
+called with no token — correctly reflects them. Full regression clean.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

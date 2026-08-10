@@ -12,6 +12,17 @@ export const SETTING_KEYS = {
   WALLET_MAX_BALANCE: 'wallet.maxBalance',
   MAINTENANCE_MODE: 'system.maintenanceMode',
   MAX_CASH_DEBT_BEFORE_RESTRICTION: 'wallet.maxCashDebtBeforeRestriction',
+  CONTACT_COMPANY_NAME: 'contact.companyName',
+  CONTACT_SUPPORT_EMAIL: 'contact.supportEmail',
+  CONTACT_SUPPORT_PHONE: 'contact.supportPhone',
+  CONTACT_WHATSAPP: 'contact.whatsapp',
+  CONTACT_WEBSITE: 'contact.website',
+  CONTACT_ADDRESS: 'contact.address',
+  CONTACT_BUSINESS_HOURS: 'contact.businessHours',
+  CONTACT_FACEBOOK: 'contact.facebook',
+  CONTACT_INSTAGRAM: 'contact.instagram',
+  CONTACT_TWITTER: 'contact.twitter',
+  CONTACT_TIKTOK: 'contact.tiktok',
 } as const;
 
 interface CacheEntry {
@@ -68,6 +79,31 @@ export class SystemSettingsService {
   async getString(key: string, fallback: string): Promise<string> {
     const raw = await this.getRaw(key);
     return raw ?? fallback;
+  }
+
+  /**
+   * A narrow, explicitly-whitelisted public read — not a general
+   * "expose settings publicly" endpoint. Only these specific fields,
+   * never the full table, so something like the cash-debt threshold or
+   * referral bonus amounts never accidentally becomes publicly
+   * readable just because a new setting was added later.
+   */
+  async getContactInfo() {
+    const [companyName, supportEmail, supportPhone, whatsapp, website, address, businessHours, facebook, instagram, twitter, tiktok] =
+      await Promise.all([
+        this.getString(SETTING_KEYS.CONTACT_COMPANY_NAME, 'Ryda'),
+        this.getString(SETTING_KEYS.CONTACT_SUPPORT_EMAIL, ''),
+        this.getString(SETTING_KEYS.CONTACT_SUPPORT_PHONE, ''),
+        this.getString(SETTING_KEYS.CONTACT_WHATSAPP, ''),
+        this.getString(SETTING_KEYS.CONTACT_WEBSITE, ''),
+        this.getString(SETTING_KEYS.CONTACT_ADDRESS, ''),
+        this.getString(SETTING_KEYS.CONTACT_BUSINESS_HOURS, ''),
+        this.getString(SETTING_KEYS.CONTACT_FACEBOOK, ''),
+        this.getString(SETTING_KEYS.CONTACT_INSTAGRAM, ''),
+        this.getString(SETTING_KEYS.CONTACT_TWITTER, ''),
+        this.getString(SETTING_KEYS.CONTACT_TIKTOK, ''),
+      ]);
+    return { companyName, supportEmail, supportPhone, whatsapp, website, address, businessHours, facebook, instagram, twitter, tiktok };
   }
 
   async listAll(): Promise<SystemSetting[]> {
