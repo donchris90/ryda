@@ -15,6 +15,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Ride } from '../rides/entities/ride.entity';
+import { DeliveryOrder } from '../logistics/entities/delivery-order.entity';
 import { SupportTicket } from '../support/entities/support-ticket.entity';
 import { SUPPORT_STAFF_ROLES } from '../support/support.service';
 import { UserRole } from '../common/enums/user-role.enum';
@@ -42,6 +43,8 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
     private readonly config: ConfigService,
     @InjectRepository(Ride)
     private readonly ridesRepo: Repository<Ride>,
+    @InjectRepository(DeliveryOrder)
+    private readonly deliveryOrdersRepo: Repository<DeliveryOrder>,
     @InjectRepository(SupportTicket)
     private readonly ticketsRepo: Repository<SupportTicket>,
   ) {}
@@ -91,6 +94,39 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
     return { unsubscribed: true, rideId: data.rideId };
   }
 
+  /**
+   * Deliveries never had this at all — only rides did, meaning the
+   * delivery tracking screen could only poll for status, with no live
+   * driver location the way ride tracking has had all along. Mirrors
+   * subscribe:ride exactly, including real ownership verification
+   * (the delivery's own customer or driver, not just any authenticated
+   * user), rather than assume parity without checking.
+   */
+  @SubscribeMessage('subscribe:delivery')
+  async handleSubscribeDelivery(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() data: { deliveryId: string },
+  ) {
+    const delivery = await this.deliveryOrdersRepo.findOne({ where: { id: data.deliveryId } });
+    if (!delivery) return { error: 'Delivery not found' };
+
+    const userId = client.data.userId;
+    const isParticipant = delivery.customerId === userId || delivery.driverId === userId;
+    if (!isParticipant) return { error: 'Not a participant in this delivery' };
+
+    await client.join(this.roomForDelivery(data.deliveryId));
+    return { subscribed: true, deliveryId: data.deliveryId };
+  }
+
+  @SubscribeMessage('unsubscribe:delivery')
+  async handleUnsubscribeDelivery(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() data: { deliveryId: string },
+  ) {
+    await client.leave(this.roomForDelivery(data.deliveryId));
+    return { unsubscribed: true, deliveryId: data.deliveryId };
+  }
+
   @SubscribeMessage('subscribe:ticket')
   async handleSubscribeTicket(
     @ConnectedSocket() client: AuthedSocket,
@@ -122,6 +158,11 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
     this.server.to(this.roomFor(rideId)).emit('driver:location', { rideId, ...payload });
   }
 
+  /** Same as broadcastDriverLocation, for a driver currently handling an active delivery. */
+  broadcastDeliveryLocation(deliveryId: string, payload: { lat: number; lng: number; at: Date }): void {
+    this.server.to(this.roomForDelivery(deliveryId)).emit('driver:location', { deliveryId, ...payload });
+  }
+
   /**
    * ChatService emits this after saving a message — broadcast to the same
    * `ride:${rideId}` room location updates already use, so a chat client
@@ -135,6 +176,10 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
 
   private roomFor(rideId: string): string {
     return `ride:${rideId}`;
+  }
+
+  private roomForDelivery(deliveryId: string): string {
+    return `delivery:${deliveryId}`;
   }
 
   private roomForTicket(ticketId: string): string {

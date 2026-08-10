@@ -2269,6 +2269,31 @@ a live broadcast that exactly matches a message sent via REST by a
 completely different user — proving the actual real-time delivery
 works, not just that the code compiles. Full regression clean.
 
+## Added: real live tracking for deliveries, matching what rides already had
+
+Real gap, flagged earlier as "delivery tracking polls status only, no
+live driver location" — rides had this via WebSocket all along,
+deliveries never did. Added `subscribe:delivery`/`unsubscribe:delivery`
+to `TrackingGateway`, with the same real ownership verification
+`subscribe:ride` already has (the delivery's own customer or driver,
+not just any authenticated user), and extended `LocationService` to
+also check for an active delivery alongside the existing active-ride
+check whenever a driver reports their position — both checked
+independently, not else-if, since a driver being on exactly one or the
+other isn't assumed to always hold.
+
+Verified genuinely end-to-end, not just type-checked: a real WebSocket
+client connected, subscribed to a real delivery, a driver reported a
+real location update, and the client genuinely received the correct
+`driver:location` broadcast with the right `deliveryId`. Caught two
+real bugs in my own test script along the way before it could run
+cleanly — a missing required `itemDescription` field, and a wrong
+controller path (`/logistics` instead of the actual `/deliveries`) —
+both fixed before concluding anything about the feature itself. Full
+regression clean throughout.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps
