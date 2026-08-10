@@ -2728,6 +2728,24 @@ categories, confirmed the admin dashboard's own category filter finds
 exactly the right ticket for each - not just that ticket creation
 accepted the new value. Full regression clean.
 
+## #15 Help & Support categorization — already substantially built, verified
+
+Found this mostly already done from earlier work: TicketCategory
+already had WALLET_ISSUE/PACKAGE_ISSUE (found staged but uncommitted -
+committed separately this round), matching the request's exact
+"Ride issue / Payment issue / Wallet issue / Package issue" wording.
+Genuinely wired into both apps' new help-support.tsx screens and the
+admin dashboard's ticket filter, not just present in the type
+definitions.
+
+Verified live with the real end-to-end flow: a passenger submits a
+wallet_issue ticket through the exact call sequence the app makes,
+then the admin dashboard's own category filter correctly retrieves it
+- confirming the whole chain (app -> API -> admin) actually works, not
+just that each piece compiles. Full regression clean.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps
