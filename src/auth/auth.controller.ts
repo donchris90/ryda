@@ -6,7 +6,7 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { SendOtpDto, VerifyOtpDto } from './dto/otp.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
-import { VerifyEmailDto, ResendVerificationDto, ForgotPasswordDto, ResetPasswordDto } from './dto/password-reset.dto';
+import { VerifyEmailDto, ResendVerificationDto, ForgotPasswordDto, ResetPasswordDto, ChangePasswordDto, DeleteAccountDto } from './dto/password-reset.dto';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../users/entities/user.entity';
@@ -64,6 +64,24 @@ export class AuthController {
   @Post('reset-password')
   resetPassword(@Body() dto: ResetPasswordDto) {
     return this.authService.resetPassword(dto.token, dto.newPassword);
+  }
+
+  @ApiOperation({ summary: 'Change password while logged in', description: 'Requires the current password. Revokes every session (including this one) on success, so a fresh login is required afterward.' })
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @Post('change-password')
+  changePassword(@CurrentUser() user: User, @Body() dto: ChangePasswordDto) {
+    return this.authService.changePassword(user.id, dto.currentPassword, dto.newPassword);
+  }
+
+  @ApiOperation({ summary: 'Deactivate my own account', description: 'Requires the current password. Soft-deactivates the account (not a row delete) and revokes every session — see AuthService.deleteAccount() for why.' })
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  @Throttle({ default: { limit: 3, ttl: 60000 } })
+  @Post('delete-account')
+  deleteAccount(@CurrentUser() user: User, @Body() dto: DeleteAccountDto) {
+    return this.authService.deleteAccount(user.id, dto.password);
   }
 
   @ApiOperation({ summary: 'Send an OTP', description: 'Used for phone verification of the optional phone field, not for account login. Dev mode returns the code directly in the response (no SMS provider wired — see README).' })

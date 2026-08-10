@@ -2571,6 +2571,37 @@ if both resolved). Full regression clean.
 variable on Render for these links to actually work in production —
 currently defaults to empty.
 
+## Change password + delete account — #2's backend half
+
+Added both, neither existed before. changePassword() (while logged
+in, distinct from the token-based reset flow) and deleteAccount() both
+require the current password before doing anything, matching the same
+security bar. Both revoke every session afterward, including the
+current one — a deliberate choice for changePassword() too, not just
+delete: if a leaked old password gave someone access on another
+device, changing it should cut that off, and requiring a fresh login
+is a small, reasonable cost for that guarantee.
+
+deleteAccount() soft-deactivates (isActive=false) rather than deleting
+the row, exactly matching the spec's explicit warning against an
+immediate hard delete. Reasoned through why: a hard delete would
+either cascade-fail against every ride/wallet-transaction/document row
+referencing this user, or silently corrupt another passenger's or
+driver's own ride history and financial records — none of which is
+this account's data to take down with it. login() already rejected a
+disabled account before this (found, not built new) — deactivation
+alone is sufficient to make the account genuinely unusable while
+leaving every historical record intact for whoever legitimately still
+needs it.
+
+Verified live with a 7-part test: wrong current password rejected for
+change-password, correct one succeeds and old password stops working
+while new one works; wrong password rejected for delete-account,
+correct one deactivates, and login is then genuinely blocked with the
+existing "Account is disabled" message. Full regression clean.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

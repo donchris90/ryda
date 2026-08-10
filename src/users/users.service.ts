@@ -51,6 +51,14 @@ export class UsersService {
       .getOne();
   }
 
+  async findByIdWithPassword(id: string): Promise<User | null> {
+    return this.usersRepo
+      .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
+      .where('user.id = :id', { id })
+      .getOne();
+  }
+
   async findByReferralCode(referralCode: string): Promise<User | null> {
     return this.usersRepo.findOne({ where: { referralCode } });
   }
@@ -76,6 +84,10 @@ export class UsersService {
 
   async markEmailVerified(userId: string): Promise<void> {
     await this.usersRepo.update(userId, { isEmailVerified: true });
+  }
+
+  async deactivate(userId: string): Promise<void> {
+    await this.usersRepo.update(userId, { isActive: false });
   }
 
   async updatePasswordHash(userId: string, passwordHash: string): Promise<void> {

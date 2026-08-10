@@ -148,6 +148,45 @@ export class AuthService {
     return { message: 'Password reset successfully — please log in with your new password.' };
   }
 
+  async changePassword(userId: string, currentPassword: string, newPassword: string): Promise<{ message: string }> {
+    const user = await this.usersService.findByIdWithPassword(userId);
+    if (!user?.passwordHash || !(await bcrypt.compare(currentPassword, user.passwordHash))) {
+      throw new UnauthorizedException('Current password is incorrect');
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await this.usersService.updatePasswordHash(userId, passwordHash);
+    // Same reasoning as resetPassword() — revoking every session,
+    // including this one, means a leaked old password on another
+    // device loses access too, not just newly-issued tokens. The
+    // person just re-proved they know the (old) password, so a fresh
+    // login here is a small, reasonable cost for that guarantee.
+    await this.logoutAll(userId);
+    return { message: 'Password changed — please log in again with your new password.' };
+  }
+
+  async deleteAccount(userId: string, password: string): Promise<{ message: string }> {
+    const user = await this.usersService.findByIdWithPassword(userId);
+    if (!user?.passwordHash || !(await bcrypt.compare(password, user.passwordHash))) {
+      throw new UnauthorizedException('Password is incorrect');
+    }
+
+    // Soft deactivation, not a row delete — the spec is explicit that
+    // this shouldn't just delete the database row immediately, and for
+    // good reason: a hard delete would either cascade-fail against
+    // every ride/wallet-transaction/document row referencing this
+    // user, or silently orphan/corrupt another passenger's or driver's
+    // own ride history, financial records, and audit trail, none of
+    // which is this account's data to take down with it. isActive=false
+    // plus a full session revocation is sufficient to make the account
+    // genuinely unusable — login() already rejects a disabled account
+    // (see the isActive check there) — while leaving every historical
+    // record intact for the people who legitimately still need it.
+    await this.usersService.deactivate(userId);
+    await this.logoutAll(userId);
+    return { message: 'Your account has been deactivated.' };
+  }
+
   async sendOtp(dto: SendOtpDto, purpose: OtpPurpose = OtpPurpose.PHONE_VERIFICATION) {
     const { devOnlyCode, expiresInSeconds } = await this.otpService.send(dto.phone, purpose);
     return { message: 'OTP sent', devOnlyCode, expiresInSeconds };

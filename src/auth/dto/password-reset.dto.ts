@@ -29,3 +29,20 @@ export class ResetPasswordDto {
   @MinLength(8)
   newPassword: string;
 }
+
+export class ChangePasswordDto {
+  @ApiProperty()
+  @IsString()
+  currentPassword: string;
+
+  @ApiProperty({ example: 'NewPassw0rd!', minLength: 8 })
+  @IsString()
+  @MinLength(8)
+  newPassword: string;
+}
+
+export class DeleteAccountDto {
+  @ApiProperty()
+  @IsString()
+  password: string;
+}
