@@ -1,8 +1,8 @@
-import { IsNumber, IsOptional, IsPhoneNumber, IsString, IsUUID, Length, Min } from 'class-validator';
+import { IsEmail, IsNumber, IsOptional, IsString, IsUUID, Length, Min } from 'class-validator';
 
 export class InitiateTransferDto {
-  @IsPhoneNumber()
-  recipientPhone: string;
+  @IsEmail()
+  recipientEmail: string;
 
   @IsNumber()
   @Min(1)

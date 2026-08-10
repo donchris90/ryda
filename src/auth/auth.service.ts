@@ -12,6 +12,9 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { OtpPurpose } from '../otp/otp-code.entity';
 import { OtpService } from '../otp/otp.service';
+import { AuthTokensService } from './auth-tokens.service';
+import { AuthTokenPurpose } from './entities/auth-token.entity';
+import { MailerService } from '../mailer/mailer.service';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { User } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
@@ -34,22 +37,24 @@ export class AuthService {
     private readonly auditService: AuditService,
     private readonly fraudService: FraudService,
     private readonly otpService: OtpService,
+    private readonly authTokensService: AuthTokensService,
+    private readonly mailerService: MailerService,
   ) {}
 
   async register(dto: RegisterDto) {
-    const existingByPhone = await this.usersService.findByPhone(dto.phone);
-    if (existingByPhone) throw new ConflictException('Phone number already registered');
+    const existingByEmail = await this.usersService.findByEmail(dto.email);
+    if (existingByEmail) throw new ConflictException('Email already registered');
 
-    if (dto.email) {
-      const existingByEmail = await this.usersService.findByEmail(dto.email);
-      if (existingByEmail) throw new ConflictException('Email already registered');
+    if (dto.phone) {
+      const existingByPhone = await this.usersService.findByPhone(dto.phone);
+      if (existingByPhone) throw new ConflictException('Phone number already registered');
     }
 
     const passwordHash = await bcrypt.hash(dto.password, 10);
 
     const user = await this.usersService.create({
-      phone: dto.phone,
-      email: dto.email ?? null,
+      email: dto.email,
+      phone: dto.phone ?? null,
       passwordHash,
       firstName: dto.firstName,
       lastName: dto.lastName,
@@ -58,14 +63,89 @@ export class AuthService {
     });
 
     await this.walletsService.createForUser(user.id);
-    await this.sendOtp({ phone: user.phone });
 
     if (dto.deviceFingerprint) {
       await this.fraudService.recordDeviceFingerprint(user.id, dto.deviceFingerprint);
     }
 
-    const tokens = await this.issueTokens(user.id, user.role);
-    return { user: this.sanitizeUser(user), ...tokens };
+    await this.sendVerificationEmail(user.id, user.email, user.firstName);
+
+    // Deliberately no tokens issued here - matches the requested flow
+    // (register -> verify -> login), not an auto-logged-in state for
+    // an account that hasn't proven its email yet.
+    return {
+      message: 'Registration successful — check your email to verify your account before logging in.',
+      userId: user.id,
+    };
+  }
+
+  async sendVerificationEmail(userId: string, email: string, firstName: string): Promise<void> {
+    const token = await this.authTokensService.issue(userId, AuthTokenPurpose.EMAIL_VERIFICATION);
+    const appBaseUrl = this.config.get<string>('mail.appBaseUrl')!;
+    const verifyUrl = `${appBaseUrl}/verify-email?token=${token}`;
+
+    await this.mailerService.send(
+      email,
+      'Verify your Ryda account',
+      `<p>Hi ${firstName},</p>
+       <p>Welcome to Ryda. Click the link below to verify your email and activate your account:</p>
+       <p><a href="${verifyUrl}">Verify my email</a></p>
+       <p>This link expires in ${this.config.get<number>('mail.verificationTtlHours')} hours. If you didn't create this account, you can ignore this email.</p>`,
+    );
+  }
+
+  async resendVerificationEmail(email: string): Promise<{ message: string }> {
+    const user = await this.usersService.findByEmail(email);
+    // Same message whether or not the account exists — confirming or
+    // denying an email's registration status to an unauthenticated
+    // caller is its own minor information leak, not worth it here.
+    if (!user || user.isEmailVerified) {
+      return { message: 'If that email is registered and unverified, a new verification link has been sent.' };
+    }
+
+    await this.sendVerificationEmail(user.id, user.email, user.firstName);
+    return { message: 'If that email is registered and unverified, a new verification link has been sent.' };
+  }
+
+  async verifyEmail(token: string): Promise<{ verified: true }> {
+    const userId = await this.authTokensService.consume(token, AuthTokenPurpose.EMAIL_VERIFICATION);
+    await this.usersService.markEmailVerified(userId);
+    return { verified: true };
+  }
+
+  async forgotPassword(email: string): Promise<{ message: string }> {
+    const user = await this.usersService.findByEmail(email);
+    // Same response whether or not the account exists — same reasoning
+    // as resendVerificationEmail above.
+    if (!user) {
+      return { message: 'If that email is registered, a password reset link has been sent.' };
+    }
+
+    const token = await this.authTokensService.issue(user.id, AuthTokenPurpose.PASSWORD_RESET);
+    const appBaseUrl = this.config.get<string>('mail.appBaseUrl')!;
+    const resetUrl = `${appBaseUrl}/reset-password?token=${token}`;
+
+    await this.mailerService.send(
+      user.email,
+      'Reset your Ryda password',
+      `<p>Hi ${user.firstName},</p>
+       <p>Click the link below to reset your password:</p>
+       <p><a href="${resetUrl}">Reset my password</a></p>
+       <p>This link expires in ${this.config.get<number>('mail.passwordResetTtlMinutes')} minutes. If you didn't request this, you can ignore this email — your password will not be changed.</p>`,
+    );
+
+    return { message: 'If that email is registered, a password reset link has been sent.' };
+  }
+
+  async resetPassword(token: string, newPassword: string): Promise<{ message: string }> {
+    const userId = await this.authTokensService.consume(token, AuthTokenPurpose.PASSWORD_RESET);
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await this.usersService.updatePasswordHash(userId, passwordHash);
+    // Revoking every existing refresh token means a stolen device or
+    // leaked session can't keep riding on the old password after a
+    // reset - the whole point of a reset is to cut off prior access.
+    await this.logoutAll(userId);
+    return { message: 'Password reset successfully — please log in with your new password.' };
   }
 
   async sendOtp(dto: SendOtpDto, purpose: OtpPurpose = OtpPurpose.PHONE_VERIFICATION) {
@@ -91,15 +171,13 @@ export class AuthService {
   }
 
   async login(dto: LoginDto) {
-    const user = dto.email
-      ? await this.usersService.findByEmailWithPassword(dto.email)
-      : await this.usersService.findByPhoneWithPassword(dto.phone!);
+    const user = await this.usersService.findByEmailWithPassword(dto.email);
     if (!user || !user.passwordHash) {
       await this.auditService.log({
         actorUserId: null,
         actorRole: null,
         action: 'auth.login.failed',
-        metadata: { identifier: dto.email ?? dto.phone, reason: 'unknown_account' },
+        metadata: { identifier: dto.email, reason: 'unknown_account' },
       });
       throw new UnauthorizedException('Invalid credentials');
     }
@@ -110,12 +188,20 @@ export class AuthService {
         actorUserId: user.id,
         actorRole: user.role,
         action: 'auth.login.failed',
-        metadata: { identifier: dto.email ?? dto.phone, reason: 'bad_password' },
+        metadata: { identifier: dto.email, reason: 'bad_password' },
       });
       throw new UnauthorizedException('Invalid credentials');
     }
     if (!user.isActive) {
       throw new UnauthorizedException('Account is disabled');
+    }
+
+    // Matches the requested flow directly: verify before login, not
+    // verify-or-be-silently-limited-once-in. A correct password for an
+    // unverified account gets a specific, actionable error rather than
+    // a generic failure or a silent partial login.
+    if (!user.isEmailVerified) {
+      throw new UnauthorizedException('Please verify your email before logging in — check your inbox for the verification link.');
     }
 
     await this.auditService.log({

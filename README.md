@@ -2486,6 +2486,69 @@ e2e suite.
 screen, OTP entry) — deliberately left for a following, focused round
 given how much went into getting the backend right.
 
+## Email-primary authentication — #1, a major discovery mid-build
+
+Before writing anything, checked what already existed. Found the
+entire backend for this was already substantially built in an earlier
+session — RegisterDto (required email, optional phone, matching the
+exact reasoning the request specified), LoginDto (email-only),
+AuthTokensService with real single-use expiring tokens, forgot/reset
+password logic with full session revocation, and a genuinely working
+Gmail SMTP integration via nodemailer with a sensible dev-log fallback.
+Well-designed throughout — no user-enumeration leaks on
+resend-verification or forgot-password, single-use tokens, purpose-
+scoped so a verification token can't be replayed as a password reset.
+
+**What was actually broken, found and fixed:**
+
+1. **Missing routes.** verify-email, resend-verification,
+   forgot-password, reset-password all had complete service logic but
+   were never wired to the controller — genuinely unreachable. Added
+   all four, and corrected the controller's Swagger docs, which were
+   still describing the old phone-based login/register flow.
+
+2. **The app could never have booted.** AuthModule never registered
+   AuthTokensService, the AuthToken entity, or MailerModule — a real
+   dependency resolution error at boot, invisible to `tsc` since
+   NestJS resolves dependencies at runtime, not compile time. This
+   "already built" code had never actually been successfully started.
+   Fixed, confirmed a clean boot with a genuine health check (not just
+   an unconditional "server up" echo — a lesson from a mistake earlier
+   this session).
+
+3. **A real conflict with the wallet transfer feature from last
+   round.** Its 2FA design assumed every user has a phone number -
+   true when it was built, false now that phone is genuinely optional.
+   Switched recipient lookup, masking, and OTP delivery from phone to
+   email throughout WalletTransfersService, and wired it to actually
+   send a real email via MailerService rather than leave the code as a
+   silent, undelivered stub.
+
+4. **The standing e2e-test.sh regression script was stale** - still
+   registered users with the old phone-only, no-email, no-termsAccepted
+   format, which the DTO now rejects. Updated both registration blocks
+   to the real contract: register (no tokens issued), mark
+   isEmailVerified via SQL (same "simulated admin action" pattern
+   already used for driver approval in this same script), then a
+   genuinely separate login call for real tokens - since registration
+   now deliberately withholds them until verified.
+
+**Verified live with a real 12-part test covering the complete
+lifecycle**: registration issues no tokens; login blocked before
+verification with a specific, actionable message; wrong token
+rejected; correct token verifies once and a second use of the same
+token is rejected (single-use enforced, not just assumed); login
+succeeds after verification; resend-verification is silent and
+doesn't create a new token for an already-verified account; forgot/
+reset password works; and — the check that mattered most - the refresh
+token issued *before* a password reset is genuinely revoked, confirmed
+by attempting to use it afterward and getting a reuse-detected
+rejection, not just trusting that revocation happened. Also re-ran the
+full 16-step e2e suite (clean) and re-verified wallet transfer
+end-to-end with the new email-based lookup.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

@@ -15,6 +15,7 @@ import { ObservabilityModule } from '../observability/observability.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { UsersModule } from '../users/users.module';
 import { OtpModule } from '../otp/otp.module';
+import { MailerModule } from '../mailer/mailer.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { OtpModule } from '../otp/otp.module';
     forwardRef(() => PaymentsModule),
     UsersModule,
     OtpModule,
+    MailerModule,
   ],
   providers: [WalletsService, WalletTransfersService, WithdrawalsService],
   controllers: [WalletsController, WithdrawalsController],

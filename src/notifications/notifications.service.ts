@@ -130,9 +130,9 @@ export class NotificationsService {
           case NotificationChannel.IN_APP:
             return this.sendInApp(userId, title, body, metadata, category);
           case NotificationChannel.SMS:
-            return this.sendSms(userId, user.phone, title, body, category);
+            return user.phone ? this.sendSms(userId, user.phone, title, body, category) : undefined;
           case NotificationChannel.WHATSAPP:
-            return this.sendWhatsapp(userId, user.phone, title, body, category);
+            return user.phone ? this.sendWhatsapp(userId, user.phone, title, body, category) : undefined;
           case NotificationChannel.EMAIL:
             return user.email ? this.sendEmail(userId, user.email, title, body, category) : undefined;
           case NotificationChannel.PUSH:

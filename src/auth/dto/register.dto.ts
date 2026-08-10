@@ -1,4 +1,6 @@
 import {
+  Equals,
+  IsBoolean,
   IsEmail,
   IsEnum,
   IsOptional,
@@ -10,14 +12,14 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { UserRole } from '../../common/enums/user-role.enum';
 
 export class RegisterDto {
-  @ApiProperty({ example: '+2348011112222' })
-  @IsPhoneNumber()
-  phone: string;
-
-  @ApiPropertyOptional({ example: 'ada@example.com' })
-  @IsOptional()
+  @ApiProperty({ example: 'ada@example.com' })
   @IsEmail()
-  email?: string;
+  email: string;
+
+  @ApiPropertyOptional({ example: '+2348011112222', description: 'Optional — used for ride communication and emergency contact, not for account verification.' })
+  @IsOptional()
+  @IsPhoneNumber()
+  phone?: string;
 
   @ApiProperty({ example: 'Passw0rd!', minLength: 8 })
   @IsString()
@@ -31,6 +33,14 @@ export class RegisterDto {
   @ApiProperty({ example: 'Obi' })
   @IsString()
   lastName: string;
+
+  // Confirm-password matching is a form-level UX check on the client,
+  // not something meaningfully re-validated server-side once we
+  // already have the single, final password value here.
+  @ApiProperty({ example: true, description: 'Must be true — registration requires accepting the Terms & Conditions.' })
+  @IsBoolean()
+  @Equals(true, { message: 'You must accept the Terms & Conditions to register' })
+  termsAccepted: boolean;
 
   @ApiPropertyOptional({ enum: UserRole, default: UserRole.PASSENGER })
   @IsOptional()

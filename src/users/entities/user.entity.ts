@@ -14,12 +14,12 @@ export class User {
   id: string;
 
   @Index({ unique: true })
-  @Column({ unique: true })
-  phone: string;
+  @Column({ type: 'varchar', unique: true, nullable: true })
+  phone: string | null;
 
   @Index({ unique: true })
-  @Column({ type: 'varchar', unique: true, nullable: true })
-  email: string | null;
+  @Column({ unique: true })
+  email: string;
 
   @Column({ type: 'varchar', nullable: true, select: false })
   passwordHash: string | null;

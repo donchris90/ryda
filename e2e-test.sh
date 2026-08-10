@@ -5,21 +5,25 @@ jget() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{try{co
 
 echo "== 1. Register passenger =="
 PASSENGER=$(curl -s -X POST $BASE/auth/register -H "Content-Type: application/json" -d '{
-  "phone": "+2348011112222", "password": "Passw0rd!", "firstName": "Ada", "lastName": "Obi", "role": "passenger"
+  "email": "ada.obi@example.com", "phone": "+2348011112222", "password": "Passw0rd!", "firstName": "Ada", "lastName": "Obi", "termsAccepted": true, "role": "passenger"
 }')
 echo "$PASSENGER"
-PASSENGER_TOKEN=$(echo "$PASSENGER" | jget accessToken)
-PASSENGER_ID=$(echo "$PASSENGER" | jget user.id)
+PASSENGER_ID=$(echo "$PASSENGER" | jget userId)
+su postgres -c "psql -d ryda -c \"UPDATE users SET \\\"isEmailVerified\\\"=true WHERE id='$PASSENGER_ID';\""
+PASSENGER_LOGIN=$(curl -s -X POST $BASE/auth/login -H "Content-Type: application/json" -d '{"email":"ada.obi@example.com","password":"Passw0rd!"}')
+PASSENGER_TOKEN=$(echo "$PASSENGER_LOGIN" | jget accessToken)
 echo "passenger id: $PASSENGER_ID"
 
 echo
 echo "== 2. Register driver =="
 DRIVER=$(curl -s -X POST $BASE/auth/register -H "Content-Type: application/json" -d '{
-  "phone": "+2348022223333", "password": "Passw0rd!", "firstName": "Musa", "lastName": "Bello", "role": "driver"
+  "email": "musa.bello@example.com", "phone": "+2348022223333", "password": "Passw0rd!", "firstName": "Musa", "lastName": "Bello", "termsAccepted": true, "role": "driver"
 }')
 echo "$DRIVER"
-DRIVER_TOKEN=$(echo "$DRIVER" | jget accessToken)
-DRIVER_ID=$(echo "$DRIVER" | jget user.id)
+DRIVER_ID=$(echo "$DRIVER" | jget userId)
+su postgres -c "psql -d ryda -c \"UPDATE users SET \\\"isEmailVerified\\\"=true WHERE id='$DRIVER_ID';\""
+DRIVER_LOGIN=$(curl -s -X POST $BASE/auth/login -H "Content-Type: application/json" -d '{"email":"musa.bello@example.com","password":"Passw0rd!"}')
+DRIVER_TOKEN=$(echo "$DRIVER_LOGIN" | jget accessToken)
 echo "driver id: $DRIVER_ID"
 
 echo

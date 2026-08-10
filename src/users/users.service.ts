@@ -6,8 +6,8 @@ import { User } from './entities/user.entity';
 import { UserRole } from '../common/enums/user-role.enum';
 
 export interface CreateUserInput {
-  phone: string;
-  email?: string | null;
+  email: string;
+  phone?: string | null;
   passwordHash?: string | null;
   firstName: string;
   lastName: string;
@@ -72,6 +72,14 @@ export class UsersService {
 
   async markPhoneVerified(userId: string): Promise<void> {
     await this.usersRepo.update(userId, { isPhoneVerified: true });
+  }
+
+  async markEmailVerified(userId: string): Promise<void> {
+    await this.usersRepo.update(userId, { isEmailVerified: true });
+  }
+
+  async updatePasswordHash(userId: string, passwordHash: string): Promise<void> {
+    await this.usersRepo.update(userId, { passwordHash });
   }
 
   async save(user: User): Promise<User> {

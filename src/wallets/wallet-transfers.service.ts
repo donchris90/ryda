@@ -10,6 +10,7 @@ import { OtpPurpose } from '../otp/otp-code.entity';
 import { SystemSettingsService, SETTING_KEYS } from '../settings/settings.service';
 import { TransactionCategory } from '../common/enums/transaction.enum';
 import { InitiateTransferDto, ConfirmTransferDto } from './dto/transfer.dto';
+import { MailerService } from '../mailer/mailer.service';
 
 const TRANSFER_REQUEST_TTL_MINUTES = 10;
 
@@ -17,11 +18,12 @@ function maskName(firstName: string, lastName: string): string {
   return `${firstName} ${lastName.charAt(0)}.`;
 }
 
-function maskPhone(phone: string): string {
-  // +234701234567 -> +2347***4567 - enough to recognise, not enough to
-  // fully identify from the confirmation screen alone.
-  if (phone.length < 7) return phone;
-  return `${phone.slice(0, 5)}***${phone.slice(-4)}`;
+function maskEmail(email: string): string {
+  // ada@example.com -> ad***@example.com - enough to recognise, not
+  // enough to fully identify from the confirmation screen alone.
+  const [local, domain] = email.split('@');
+  if (!domain || local.length <= 2) return email;
+  return `${local.slice(0, 2)}***@${domain}`;
 }
 
 @Injectable()
@@ -35,13 +37,14 @@ export class WalletTransfersService {
     private readonly usersService: UsersService,
     private readonly otpService: OtpService,
     private readonly settingsService: SystemSettingsService,
+    private readonly mailerService: MailerService,
   ) {}
 
   async initiate(senderId: string, dto: InitiateTransferDto) {
     const sender = await this.usersService.findById(senderId);
-    const recipient = await this.usersService.findByPhone(dto.recipientPhone);
+    const recipient = await this.usersService.findByEmail(dto.recipientEmail);
     if (!recipient) {
-      throw new BadRequestException('No Ryda account found with that phone number');
+      throw new BadRequestException('No Ryda account found with that email address');
     }
     if (recipient.id === senderId) {
       throw new BadRequestException('You cannot transfer money to yourself');
@@ -91,12 +94,20 @@ export class WalletTransfersService {
       }),
     );
 
-    const { expiresInSeconds } = await this.otpService.send(sender.phone, OtpPurpose.WALLET_TRANSFER);
+    const { devOnlyCode, expiresInSeconds } = await this.otpService.send(sender.email, OtpPurpose.WALLET_TRANSFER);
+    await this.mailerService.send(
+      sender.email,
+      'Confirm your Ryda transfer',
+      `<p>Hi ${sender.firstName},</p>
+       <p>Enter this code in the app to confirm sending ₦${dto.amount.toLocaleString()} to ${maskName(recipient.firstName, recipient.lastName)}:</p>
+       <p style="font-size: 24px; font-weight: bold; letter-spacing: 4px;">${devOnlyCode}</p>
+       <p>This code expires in ${Math.round(expiresInSeconds / 60)} minutes. If you didn't request this transfer, you can ignore this email — no money will move without the code.</p>`,
+    );
 
     return {
       transferRequestId: request.id,
       recipientName: maskName(recipient.firstName, recipient.lastName),
-      recipientPhone: maskPhone(recipient.phone),
+      recipientEmail: maskEmail(recipient.email),
       amount: dto.amount,
       fee,
       total,
@@ -126,7 +137,7 @@ export class WalletTransfersService {
     }
 
     const sender = await this.usersService.findById(senderId);
-    await this.otpService.verify(sender.phone, dto.otpCode, OtpPurpose.WALLET_TRANSFER);
+    await this.otpService.verify(sender.email, dto.otpCode, OtpPurpose.WALLET_TRANSFER);
 
     const senderWallet = await this.walletsService.getByUserId(request.senderId);
     const recipientWallet = await this.walletsService.getByUserId(request.recipientId);

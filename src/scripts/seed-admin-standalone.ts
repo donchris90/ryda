@@ -8,12 +8,13 @@
  * instance just to seed one admin user.
  *
  *   DATABASE_URL=... DB_SSL=true \
- *   ADMIN_PHONE=+2348000000000 ADMIN_PASSWORD='ChangeMe123!' \
+ *   ADMIN_EMAIL=admin@ryda.ng ADMIN_PASSWORD='ChangeMe123!' \
  *   ADMIN_FIRST_NAME=Ryda ADMIN_LAST_NAME=Admin \
  *   npm run seed:admin:standalone
  *
- * Safe to re-run — it's a no-op if a user with that phone number already
- * exists (and prints their id/role instead of erroring).
+ * Safe to re-run — it's a no-op if a user with that email already
+ * exists (and prints their id/role instead of erroring). Seeded admins
+ * are created pre-verified.
  */
 import { NestFactory } from '@nestjs/core';
 import * as bcrypt from 'bcrypt';
@@ -23,13 +24,14 @@ import { WalletsService } from '../wallets/wallets.service';
 import { UserRole } from '../common/enums/user-role.enum';
 
 async function run() {
-  const phone = process.env.ADMIN_PHONE;
+  const email = process.env.ADMIN_EMAIL;
+  const phone = process.env.ADMIN_PHONE; // optional
   const password = process.env.ADMIN_PASSWORD;
   const firstName = process.env.ADMIN_FIRST_NAME ?? 'Ryda';
   const lastName = process.env.ADMIN_LAST_NAME ?? 'Admin';
 
-  if (!phone || !password) {
-    console.error('ADMIN_PHONE and ADMIN_PASSWORD environment variables are required.');
+  if (!email || !password) {
+    console.error('ADMIN_EMAIL and ADMIN_PASSWORD environment variables are required.');
     process.exit(1);
   }
   if (password.length < 8) {
@@ -41,9 +43,9 @@ async function run() {
   const usersService = app.get(UsersService);
   const walletsService = app.get(WalletsService);
 
-  const existing = await usersService.findByPhone(phone);
+  const existing = await usersService.findByEmail(email);
   if (existing) {
-    console.log(`User with phone ${phone} already exists (id: ${existing.id}, role: ${existing.role}).`);
+    console.log(`User with email ${email} already exists (id: ${existing.id}, role: ${existing.role}).`);
     if (existing.role !== UserRole.ADMIN) {
       console.log('That user is not an admin. Promote manually if needed.');
     }
@@ -53,7 +55,8 @@ async function run() {
 
   const passwordHash = await bcrypt.hash(password, 10);
   const user = await usersService.create({
-    phone,
+    email,
+    phone: phone ?? null,
     firstName,
     lastName,
     passwordHash,

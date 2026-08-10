@@ -53,6 +53,25 @@ export default () => ({
     ttlSeconds: parseInt(process.env.OTP_TTL_SECONDS ?? '300', 10),
     length: parseInt(process.env.OTP_LENGTH ?? '6', 10),
   },
+  mail: {
+    // Gmail SMTP, per the request's stated setup. GMAIL_APP_PASSWORD
+    // must be a Google App Password (not the account password) —
+    // Gmail requires this for SMTP auth when 2FA is on, which it
+    // should be for any account sending real user-facing mail.
+    host: process.env.SMTP_HOST ?? 'smtp.gmail.com',
+    port: parseInt(process.env.SMTP_PORT ?? '465', 10),
+    secure: (process.env.SMTP_SECURE ?? 'true') === 'true',
+    user: process.env.GMAIL_USER ?? '',
+    appPassword: process.env.GMAIL_APP_PASSWORD ?? '',
+    fromName: process.env.MAIL_FROM_NAME ?? 'Ryda',
+    verificationTtlHours: parseInt(process.env.EMAIL_VERIFICATION_TTL_HOURS ?? '24', 10),
+    passwordResetTtlMinutes: parseInt(process.env.PASSWORD_RESET_TTL_MINUTES ?? '30', 10),
+    // The app deep link / web URL the verification and reset emails
+    // point to - e.g. https://app.ryda.ng or a custom scheme like
+    // ryda://verify-email. Left blank fails loudly rather than silently
+    // sending broken links in production.
+    appBaseUrl: process.env.APP_BASE_URL ?? '',
+  },
   pricing: {
     currency: process.env.DEFAULT_CURRENCY ?? 'NGN',
     baseFare: parseFloat(process.env.BASE_FARE ?? '500'),
