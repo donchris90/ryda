@@ -2600,6 +2600,25 @@ while new one works; wrong password rejected for delete-account,
 correct one deactivates, and login is then genuinely blocked with the
 existing "Account is disabled" message. Full regression clean.
 
+## #2 Profile — backend already existed, verified thoroughly
+
+changePassword() and deleteAccount() were already fully built in an
+earlier session (well-reasoned: soft-deactivation not a row delete,
+full session revocation on both). No backend code changes needed —
+this was purely about verifying it actually works and building the
+missing app-side UI (see both app READMEs).
+
+Verified live: wrong-password rejection on both endpoints, correct
+password succeeds, and — after catching my own testing mistake first
+(checked whether the short-lived, stateless access token gets revoked,
+which it correctly doesn't by design) — properly re-verified using the
+refresh token instead, confirming genuine reuse detection after a
+password change. Also verified profile photo upload end-to-end with a
+real generated PNG, confirming the returned profilePhotoUrl is
+genuinely stored and correct. Full regression clean throughout.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps
