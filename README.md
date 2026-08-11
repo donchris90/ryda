@@ -2776,6 +2776,45 @@ Also confirmed a full, genuine app boot with the new MailerModule
 initializing cleanly and the dev-log fallback firing correctly during
 a real registration call.
 
+## Admin wallet credit - new feature, real financial data integrity issue avoided
+
+User asked to credit a specific account's wallet directly. Genuinely
+important decision made here: did NOT do this via a raw SQL UPDATE,
+even though that would have been faster - a wallet's balance column
+and its transaction ledger have to stay in sync for this app's
+double-entry accounting to mean anything, and a direct balance edit
+would silently break that.
+
+New admin-only endpoint (GET /admin/wallets/lookup, POST /admin/
+wallets/credit) that reuses the existing atomic, row-locked
+WalletsService.credit() - the same path every other credit in this app
+already goes through. Added a new ADMIN_ADJUSTMENT transaction
+category specifically so a manual admin credit is honestly
+distinguishable from a bonus/topup/refund in transaction history, not
+miscategorized as one of those. The credit's description records which
+admin did it and why, for a real audit trail.
+
+Lookup is a deliberately separate step from credit - returns the real
+account holder's name/email/current balance so an admin can confirm
+it's genuinely the right person before real money moves, matching a
+direct request for this.
+
+Verified live: 404 for a non-existent email, correct lookup for a real
+account, non-admin token correctly rejected (403), credit succeeds,
+and the final check confirms both the new balance AND the transaction
+record - correct category, correct amount, and a description showing
+which admin credited it and why. Full regression clean.
+
+## Also fixed: admin dashboard login was still phone/email toggle
+
+Real gap found while investigating the wallet transfer error report -
+the admin dashboard's login screen still had a phone-vs-email toggle,
+even though the backend's login() has been email-only since #1. The
+phone option would have always failed. Fixed to match the already-
+corrected passenger/driver app login screens - email only, no toggle.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

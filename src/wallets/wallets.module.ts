@@ -8,6 +8,7 @@ import { WalletTransferRequest } from './entities/wallet-transfer-request.entity
 import { WalletsService } from './wallets.service';
 import { WalletTransfersService } from './wallet-transfers.service';
 import { WalletsController } from './wallets.controller';
+import { AdminWalletsController } from './admin-wallets.controller';
 import { WithdrawalsService } from './withdrawals.service';
 import { WithdrawalsController } from './withdrawals.controller';
 import { SettingsModule } from '../settings/settings.module';
@@ -28,7 +29,7 @@ import { MailerModule } from '../mailer/mailer.module';
     MailerModule,
   ],
   providers: [WalletsService, WalletTransfersService, WithdrawalsService],
-  controllers: [WalletsController, WithdrawalsController],
+  controllers: [WalletsController, AdminWalletsController, WithdrawalsController],
   exports: [WalletsService, WalletTransfersService, WithdrawalsService],
 })
 export class WalletsModule {}

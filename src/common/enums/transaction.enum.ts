@@ -22,4 +22,5 @@ export enum TransactionCategory {
   TIP_RECEIVED = 'tip_received',
   TRANSFER_SENT = 'transfer_sent',
   TRANSFER_RECEIVED = 'transfer_received', // driver receiving a tip
+  ADMIN_ADJUSTMENT = 'admin_adjustment', // manual credit/debit by an admin, not a system-driven transaction
 }
