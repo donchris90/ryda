@@ -31,6 +31,7 @@ import { PaymentStatus } from '../payments/entities/payment-record.entity';
 import { ReconciliationService } from '../reconciliation/reconciliation.service';
 import { SystemSettingsService, SETTING_KEYS } from '../settings/settings.service';
 import { DeliveryVehicleTypesService } from './delivery-vehicle-types.service';
+import { canVehicleCoverDelivery } from '../common/vehicle-capacity-match.util';
 
 export interface DeliveryFareBreakdown {
   baseFare: number;
@@ -175,9 +176,34 @@ export class LogisticsService {
       { lat: dto.pickupLat, lng: dto.pickupLng },
       { limit: 10 },
     );
-    if (nearbyDrivers.length > 0) {
+
+    // Second real gap, found separately: vehicleType only ever affected
+    // pricing/weight limits, never who actually got notified - a car
+    // driver could be offered a "bike" delivery. Filter to drivers whose
+    // registered vehicle can genuinely cover the requested type,
+    // permissively (a bigger vehicle can cover a smaller request, not
+    // the reverse). Drivers with no active vehicle on file are skipped
+    // rather than assumed compatible - notifying someone about a
+    // delivery they structurally can't fulfil isn't better than not
+    // notifying them at all.
+    const requestedType = saved.vehicleType;
+    const capableDrivers = (
+      await Promise.all(
+        nearbyDrivers.map(async (d) => {
+          if (!d.vehicleId) return null;
+          try {
+            const vehicle = await this.vehiclesService.findById(d.vehicleId);
+            return canVehicleCoverDelivery(vehicle.category, requestedType) ? d : null;
+          } catch {
+            return null;
+          }
+        }),
+      )
+    ).filter((d): d is NonNullable<typeof d> => d !== null);
+
+    if (capableDrivers.length > 0) {
       this.events.emit('delivery.requested', {
-        driverUserIds: nearbyDrivers.map((d) => d.userId),
+        driverUserIds: capableDrivers.map((d) => d.userId),
         deliveryId: saved.id,
         pickupAddress: dto.pickupAddress,
       });
@@ -212,6 +238,20 @@ export class LogisticsService {
     }
     if (driverProfile.availability !== DriverAvailability.ONLINE) {
       throw new BadRequestException('Driver must be online to accept deliveries');
+    }
+
+    // Defense in depth, not just filtered notifications - a driver
+    // could still discover a delivery outside the notification (e.g. a
+    // general "available deliveries" list), so this needs to be
+    // enforced here too, not only at the notify step.
+    if (!driverProfile.activeVehicleId) {
+      throw new BadRequestException('You need an active vehicle on file to accept deliveries');
+    }
+    const vehicle = await this.vehiclesService.findById(driverProfile.activeVehicleId);
+    if (!canVehicleCoverDelivery(vehicle.category, order.vehicleType)) {
+      throw new BadRequestException(
+        `Your registered vehicle can't cover a ${order.vehicleType} delivery. A larger vehicle is required.`,
+      );
     }
 
     order.driverId = driverUserId;

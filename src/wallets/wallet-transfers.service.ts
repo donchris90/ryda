@@ -42,9 +42,12 @@ export class WalletTransfersService {
 
   async initiate(senderId: string, dto: InitiateTransferDto) {
     const sender = await this.usersService.findById(senderId);
-    const recipient = await this.usersService.findByEmail(dto.recipientEmail);
+    const recipient = dto.recipientEmail
+      ? await this.usersService.findByEmail(dto.recipientEmail)
+      : await this.usersService.findByPhone(dto.recipientPhone!);
     if (!recipient) {
-      throw new BadRequestException('No Ryda account found with that email address');
+      const identifierLabel = dto.recipientEmail ? 'email address' : 'phone number';
+      throw new BadRequestException(`No Ryda account found with that ${identifierLabel}`);
     }
     if (recipient.id === senderId) {
       throw new BadRequestException('You cannot transfer money to yourself');

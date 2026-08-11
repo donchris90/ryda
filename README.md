@@ -2813,6 +2813,59 @@ even though the backend's login() has been email-only since #1. The
 phone option would have always failed. Fixed to match the already-
 corrected passenger/driver app login screens - email only, no toggle.
 
+## Wallet transfer - backward compatible with the old installed app
+
+Real production issue: a passenger using an already-installed old app
+build (still phone-based transfer form, from before the email-primary
+switch) got a hard validation error, since the backend had moved to
+email-only. Rather than force everyone to wait on a fresh app build/
+install before transfers work again, InitiateTransferDto now accepts
+EITHER recipientPhone or recipientEmail - the old app keeps working
+exactly as before, the current app's email-based flow also works,
+whichever is present is used for lookup (email preferred if somehow
+both are sent).
+
+Verified live: phone-based transfer succeeds, email-based transfer
+succeeds, providing neither is cleanly rejected with a clear
+validation error rather than a confusing one. Full regression clean.
+
+## Delivery vehicle matching - real gap found from a live user report
+
+User reported ordering a bike delivery with an online, approved
+motorcycle driver available, and nothing happening. Root cause: two
+separate, never-reconciled vehicle categorization systems exist in
+this codebase - DeliveryVehicleType (bike/keke/car/van/pickup/truck,
+built for #8's pricing) and VehicleCategory (car/suv/taxi/luxury/ev/
+motorcycle/tricycle/van/bus/truck, what drivers actually register
+under for rides). vehicleType had only ever affected delivery pricing
+and weight limits - it was never wired into who actually got notified
+about a new delivery, or who was allowed to accept one. Any online,
+approved, nearby driver was notified and could accept regardless of
+vehicle type entirely.
+
+New src/common/vehicle-capacity-match.util.ts maps both enums onto a
+shared capacity rank (mirroring the exact bike < keke < car < van <
+pickup < truck ordering from #8's own spec) and matches permissively -
+a driver's vehicle just needs to be able to cover the requested
+delivery, not match it exactly, so a car can cover a bike-sized
+request but not vice versa. Applied in two places, not one:
+notification filtering in requestDelivery() (drivers with no active
+vehicle on file are skipped, not assumed compatible), AND a genuine
+server-side safeguard in acceptDelivery() itself - a driver could
+still discover a delivery outside the notification flow, so this
+needed enforcing at accept time too, not just at notify time.
+
+Verified live with the user's exact scenario: registered a motorcycle
+driver and a car driver, both online and nearby. Motorcycle driver
+accepting a bike delivery succeeds (same rank). A second motorcycle
+driver accepting a truck delivery is correctly rejected with a clear
+message. Car driver accepting a bike-sized delivery succeeds
+(permissive - bigger covers smaller). Full regression clean, including
+confirming the existing e2e suite's own delivery-accept step (which
+depends on a driver having an active vehicle) still passes.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps
