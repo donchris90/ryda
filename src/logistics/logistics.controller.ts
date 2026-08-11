@@ -7,6 +7,7 @@ import { UserRole } from '../common/enums/user-role.enum';
 import { User } from '../users/entities/user.entity';
 import { LogisticsService } from './logistics.service';
 import { CancelDeliveryDto, EstimateDeliveryDto, RequestDeliveryDto } from './dto/logistics.dto';
+import { RateDeliveryDto } from './dto/rate-delivery.dto';
 import { DeliveryCancelledBy } from './entities/delivery-order.entity';
 import { RequireFeature } from '../feature-flags/require-feature.decorator';
 import { FeatureFlagGuard } from '../feature-flags/feature-flag.guard';
@@ -47,6 +48,13 @@ export class LogisticsController {
   @UseGuards(JwtAuthGuard)
   get(@Param('id') id: string) {
     return this.logisticsService.findById(id);
+  }
+
+  @Post(':id/rate/driver')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.PASSENGER)
+  rateDriver(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: RateDeliveryDto) {
+    return this.logisticsService.rateDriver(id, user.id, dto);
   }
 
   @Patch(':id/accept')

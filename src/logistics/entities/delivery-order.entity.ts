@@ -181,6 +181,12 @@ export class DeliveryOrder {
   @Column({ type: 'timestamp', nullable: true })
   cancelledAt: Date | null;
 
+  @Column({ type: 'int', nullable: true })
+  driverRating: number | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  driverRatingComment: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 

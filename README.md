@@ -2887,6 +2887,32 @@ afterward (confirmed via a follow-up 404), and a completed ride is
 correctly refused with a clear explanation rather than silently
 succeeding or failing. Full regression clean.
 
+## Delivery driver rating - new feature, real gap found
+
+User reported no way to review a driver after a package delivery, even
+from history. Checked the actual database structure rather than
+assume it was a navigation issue - confirmed deliveries had ZERO
+rating capability, no columns, no endpoint, nothing. Rides have had
+this from the start (passengerRating/driverRating columns); deliveries
+never got it.
+
+Added driverRating/driverRatingComment to DeliveryOrder, matching the
+exact pattern already used on Ride. New POST /deliveries/:id/rate/
+driver, matching RidesService.rateDriver() field for field - customer-
+only, completed-only, rate-once. Deliberately calls the SAME
+driversService.applyRating() that ride ratings already use, so a
+driver has one overall rating across both rides and deliveries, not
+two separate scores - matches the explicit request that this reflect
+in the same rating others see when choosing a driver.
+
+Verified live: full status walkthrough to delivered, rating succeeds
+and driver's overall rating/count genuinely update, rating the same
+delivery twice is rejected, a different customer rating someone else's
+delivery is rejected, rating an incomplete delivery is rejected. Full
+regression clean.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

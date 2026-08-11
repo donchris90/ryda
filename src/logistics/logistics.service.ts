@@ -15,6 +15,7 @@ import {
   DeliveryVehicleType,
 } from './entities/delivery-order.entity';
 import { EstimateDeliveryDto, RequestDeliveryDto, CancelDeliveryDto } from './dto/logistics.dto';
+import { RateDeliveryDto } from './dto/rate-delivery.dto';
 import { PaymentMethod } from '../common/enums/ride.enum';
 import { TransactionCategory } from '../common/enums/transaction.enum';
 import { DriverApprovalStatus, DriverAvailability } from '../common/enums/driver-status.enum';
@@ -224,6 +225,35 @@ export class LogisticsService {
 
   async findForDriver(driverId: string): Promise<DeliveryOrder[]> {
     return this.ordersRepo.find({ where: { driverId }, order: { createdAt: 'DESC' } });
+  }
+
+  /**
+   * Customer rates the driver after a completed delivery. Same
+   * customer-only, completed-only, rate-once rules as
+   * RidesService.rateDriver(), and feeds the same
+   * driversService.applyRating() - a driver has one overall rating
+   * across both rides and deliveries, not two separate scores, since
+   * both reflect the same person's actual service quality.
+   */
+  async rateDriver(orderId: string, customerId: string, dto: RateDeliveryDto): Promise<DeliveryOrder> {
+    const order = await this.findById(orderId);
+    if (order.customerId !== customerId) throw new ForbiddenException('Not your delivery');
+    if (order.status !== DeliveryStatus.DELIVERED) {
+      throw new BadRequestException('Can only rate a completed delivery');
+    }
+    if (order.driverRating != null) {
+      throw new BadRequestException('This delivery has already been rated');
+    }
+    if (!order.driverId) throw new BadRequestException('This delivery has no driver to rate');
+
+    order.driverRating = dto.rating;
+    order.driverRatingComment = dto.comment ?? null;
+    await this.ordersRepo.save(order);
+
+    const driverProfile = await this.driversService.findByUserId(order.driverId);
+    await this.driversService.applyRating(driverProfile.id, dto.rating);
+
+    return order;
   }
 
   async acceptDelivery(orderId: string, driverUserId: string): Promise<DeliveryOrder> {
