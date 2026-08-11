@@ -54,15 +54,13 @@ export default () => ({
     length: parseInt(process.env.OTP_LENGTH ?? '6', 10),
   },
   mail: {
-    // Gmail SMTP, per the request's stated setup. GMAIL_APP_PASSWORD
-    // must be a Google App Password (not the account password) —
-    // Gmail requires this for SMTP auth when 2FA is on, which it
-    // should be for any account sending real user-facing mail.
-    host: process.env.SMTP_HOST ?? 'smtp.gmail.com',
-    port: parseInt(process.env.SMTP_PORT ?? '465', 10),
-    secure: (process.env.SMTP_SECURE ?? 'true') === 'true',
+    // Brevo's transactional email API, not Gmail SMTP - see
+    // mailer.service.ts for why. `user` here is really "the verified
+    // sender address", kept under this name since it was already set
+    // as GMAIL_USER on Render and there's no reason to make anyone
+    // rename an env var that already works.
     user: process.env.GMAIL_USER ?? '',
-    appPassword: process.env.GMAIL_APP_PASSWORD ?? '',
+    brevoApiKey: process.env.BREVO_API_KEY ?? '',
     fromName: process.env.MAIL_FROM_NAME ?? 'Ryda',
     verificationTtlHours: parseInt(process.env.EMAIL_VERIFICATION_TTL_HOURS ?? '24', 10),
     passwordResetTtlMinutes: parseInt(process.env.PASSWORD_RESET_TTL_MINUTES ?? '30', 10),

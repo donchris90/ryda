@@ -2744,6 +2744,40 @@ then the admin dashboard's own category filter correctly retrieves it
 - confirming the whole chain (app -> API -> admin) actually works, not
 just that each piece compiles. Full regression clean.
 
+## Email delivery — switched from Gmail SMTP to Brevo's HTTP API
+
+Real production issue: registration/password-reset emails were
+silently failing with "Connection timeout" for every single user.
+Root cause confirmed via Render's own changelog - free-tier Render web
+services block ALL outbound traffic on SMTP ports (25, 465, 587),
+which is exactly what the original nodemailer/Gmail-SMTP setup needed.
+Not an auth problem - the connection never even reached Gmail.
+
+Replaced SMTP entirely with Brevo's transactional email API
+(api.brevo.com/v3/smtp/email) - a normal HTTPS POST over port 443,
+which free Render doesn't block, same reasoning already used for every
+other outbound call in this codebase (Google Maps, Paystack). Not kept
+as a fallback alongside SMTP - SMTP is guaranteed to fail on this
+platform, so keeping dead code around for it added no value. Removed
+the nodemailer dependency entirely.
+
+New env vars: BREVO_API_KEY replaces GMAIL_APP_PASSWORD. GMAIL_USER is
+kept as the variable name for the sender address (semantically it's
+just "the verified sender" now, not a Gmail SMTP login) specifically
+so nothing needs renaming on Render - it already works as-is.
+
+Verified directly: mocked the outgoing fetch call and confirmed the
+exact URL, headers, and body shape match Brevo's documented API
+precisely (all 9 individual field checks passed); confirmed the
+unconfigured dev-log fallback never calls fetch at all; confirmed a
+non-2xx response from Brevo is logged, not thrown, preserving the
+"never fail the calling operation" guarantee the original mailer had.
+Also confirmed a full, genuine app boot with the new MailerModule
+initializing cleanly and the dev-log fallback firing correctly during
+a real registration call.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps
