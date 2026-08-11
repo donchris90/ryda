@@ -49,7 +49,7 @@ services:
       # workflow (see package.json's migration:* scripts) before this
       # holds real user data you can't afford to lose to an auto-sync.
       - key: DB_SYNCHRONIZE
-        value: "true"
+        value: "false"
 
       - key: REDIS_URL
         fromService:
