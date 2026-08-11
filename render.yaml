@@ -28,7 +28,7 @@ services:
     # Without this flag, `npm run build` fails because `nest` doesn't
     # exist yet. Found by tracing a real failed deploy, not assumed.
     buildCommand: npm install --include=dev && npm run build
-    startCommand: npm run start:prod
+    startCommand: node scripts/fix-null-emails.js && npm run start:prod
     healthCheckPath: /api/v1/health
     envVars:
       - key: NODE_ENV
