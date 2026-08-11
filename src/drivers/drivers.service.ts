@@ -266,12 +266,23 @@ export class DriversService {
     const radiusKm = options.radiusKm ?? 8;
     const limit = options.limit ?? 10;
 
+    const STALE_LOCATION_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes - generous relative to the driver app's 15s reporting interval, tolerates a few missed pings without letting a genuinely offline driver linger indefinitely
+
     const qb = this.driversRepo
       .createQueryBuilder('driver')
       .where('driver.availability = :availability', { availability: DriverAvailability.ONLINE })
       .andWhere('driver.approvalStatus = :status', { status: DriverApprovalStatus.APPROVED })
       .andWhere('driver.currentLat IS NOT NULL')
-      .andWhere('driver.currentLng IS NOT NULL');
+      .andWhere('driver.currentLng IS NOT NULL')
+      // Real bug this fixes: locationUpdatedAt was already being set
+      // correctly on every ping, but nothing ever checked it here - a
+      // driver whose app crashed or lost connectivity while still
+      // marked online in the database stayed "visible" to passengers
+      // indefinitely, with no way for the app to know they'd actually
+      // gone unreachable.
+      .andWhere('driver.locationUpdatedAt > :staleThreshold', {
+        staleThreshold: new Date(Date.now() - STALE_LOCATION_THRESHOLD_MS),
+      });
 
     if (options.city) {
       qb.andWhere('driver.city = :city', { city: options.city });

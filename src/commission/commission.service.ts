@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CommissionRule } from './entities/commission-rule.entity';
@@ -7,12 +7,25 @@ import { VehicleCategory } from '../common/enums/vehicle.enum';
 import { Ride } from '../rides/entities/ride.entity';
 import { RideStatus } from '../common/enums/ride.enum';
 import { User } from '../users/entities/user.entity';
+import { SystemSettingsService, SETTING_KEYS } from '../settings/settings.service';
 
 interface ResolveInput {
   driverLevel: DriverLevel;
   vehicleCategory?: VehicleCategory;
   city?: string;
 }
+
+// Maps each level to its setting key, so the admin-configurable value
+// can be looked up without a big switch statement at every call site.
+const COMMISSION_SETTING_KEY_BY_LEVEL: Record<DriverLevel, string> = {
+  [DriverLevel.ROOKIE]: SETTING_KEYS.COMMISSION_DEFAULT_ROOKIE,
+  [DriverLevel.STANDARD]: SETTING_KEYS.COMMISSION_DEFAULT_STANDARD,
+  [DriverLevel.SILVER]: SETTING_KEYS.COMMISSION_DEFAULT_SILVER,
+  [DriverLevel.GOLD]: SETTING_KEYS.COMMISSION_DEFAULT_GOLD,
+  [DriverLevel.PLATINUM]: SETTING_KEYS.COMMISSION_DEFAULT_PLATINUM,
+  [DriverLevel.DIAMOND]: SETTING_KEYS.COMMISSION_DEFAULT_DIAMOND,
+  [DriverLevel.ELITE]: SETTING_KEYS.COMMISSION_DEFAULT_ELITE,
+};
 
 @Injectable()
 export class CommissionService {
@@ -21,12 +34,17 @@ export class CommissionService {
     private readonly rulesRepo: Repository<CommissionRule>,
     @InjectRepository(Ride)
     private readonly ridesRepo: Repository<Ride>,
+    private readonly settingsService: SystemSettingsService,
   ) {}
 
   /**
    * Picks the most specific active rule matching (city + vehicleCategory + driverLevel),
    * falling back to progressively less specific rules, and finally to the
-   * platform default commission for the driver's level.
+   * platform default commission for the driver's level - which used to
+   * be a hardcoded constant with no admin-editable path at all. Now
+   * reads from settings, with the original hardcoded value as the
+   * fallback if nothing's been configured yet, so nothing changes for
+   * an admin who's never touched this.
    */
   async resolveCommissionPercent(input: ResolveInput): Promise<number> {
     const candidates = await this.rulesRepo.find({ where: { isActive: true } });
@@ -40,7 +58,26 @@ export class CommissionService {
       return parseFloat(scored[0].rule.commissionPercent);
     }
 
-    return DEFAULT_COMMISSION_BY_LEVEL[input.driverLevel];
+    return this.settingsService.getNumber(
+      COMMISSION_SETTING_KEY_BY_LEVEL[input.driverLevel],
+      DEFAULT_COMMISSION_BY_LEVEL[input.driverLevel],
+    );
+  }
+
+  /** Admin-facing: the currently configured (or default) commission for every level, for display/editing. */
+  async getDefaultsByLevel(): Promise<Record<DriverLevel, number>> {
+    const entries = await Promise.all(
+      Object.values(DriverLevel).map(async (level) => [
+        level,
+        await this.settingsService.getNumber(COMMISSION_SETTING_KEY_BY_LEVEL[level], DEFAULT_COMMISSION_BY_LEVEL[level]),
+      ]),
+    );
+    return Object.fromEntries(entries);
+  }
+
+  /** Admin-facing: set the platform default commission for one driver level. */
+  async setDefaultForLevel(level: DriverLevel, percent: number, updatedBy: string): Promise<void> {
+    await this.settingsService.set(COMMISSION_SETTING_KEY_BY_LEVEL[level], updatedBy, { value: percent.toString() });
   }
 
   private matches(rule: CommissionRule, input: ResolveInput): boolean {
@@ -66,6 +103,18 @@ export class CommissionService {
   async createRule(data: Partial<CommissionRule>): Promise<CommissionRule> {
     const rule = this.rulesRepo.create(data);
     return this.rulesRepo.save(rule);
+  }
+
+  async updateRule(id: string, data: Partial<CommissionRule>): Promise<CommissionRule> {
+    const rule = await this.rulesRepo.findOne({ where: { id } });
+    if (!rule) throw new NotFoundException('Commission rule not found');
+    Object.assign(rule, data);
+    return this.rulesRepo.save(rule);
+  }
+
+  async deleteRule(id: string): Promise<void> {
+    const result = await this.rulesRepo.delete(id);
+    if (result.affected === 0) throw new NotFoundException('Commission rule not found');
   }
 
   /**

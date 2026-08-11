@@ -37,6 +37,13 @@ export const SETTING_KEYS = {
   CONTACT_INSTAGRAM: 'contact.instagram',
   CONTACT_TWITTER: 'contact.twitter',
   CONTACT_TIKTOK: 'contact.tiktok',
+  COMMISSION_DEFAULT_ROOKIE: 'commission.default.rookie',
+  COMMISSION_DEFAULT_STANDARD: 'commission.default.standard',
+  COMMISSION_DEFAULT_SILVER: 'commission.default.silver',
+  COMMISSION_DEFAULT_GOLD: 'commission.default.gold',
+  COMMISSION_DEFAULT_PLATINUM: 'commission.default.platinum',
+  COMMISSION_DEFAULT_DIAMOND: 'commission.default.diamond',
+  COMMISSION_DEFAULT_ELITE: 'commission.default.elite',
 } as const;
 
 interface CacheEntry {

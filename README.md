@@ -2911,6 +2911,34 @@ delivery twice is rejected, a different customer rating someone else's
 delivery is rejected, rating an incomplete delivery is rejected. Full
 regression clean.
 
+## Dispatch showing offline "ghost" drivers - real gap found from a live report
+
+User reported two genuinely online drivers not showing up while a
+driver who wasn't actually online did. Root cause: locationUpdatedAt
+already existed on DriverProfile and was already being correctly set
+on every location ping - findNearby() just never checked it. A driver
+whose app crashed, lost connectivity, or was force-closed while still
+marked online in the database stayed "visible" to every passenger
+indefinitely, with no expiry mechanism at all - going offline was only
+ever an explicit action, never inferred from silence.
+
+Fixed by filtering out any driver whose last location ping is older
+than 2 minutes (generous relative to the driver app's 15-second
+reporting interval - tolerates a few missed pings from a transient
+network hiccup without letting a genuinely gone driver linger). This
+is the same findNearby() used by both ride selection and delivery
+dispatch, so the fix covers both.
+
+Verified live: registered a driver, then directly backdated their
+locationUpdatedAt to 5 minutes ago while leaving availability=online
+untouched (confirmed still 'online' in the DB) - correctly excluded
+from a real ride's selectable-drivers result. A second, genuinely
+fresh driver in the same test correctly appears. Full regression
+clean, including confirming the standard e2e suite's own driver (who
+reports location within the threshold) still gets found normally.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

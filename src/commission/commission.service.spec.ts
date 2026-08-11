@@ -25,9 +25,14 @@ function makeRepo(rules: CommissionRule[]) {
 // just needed to satisfy the constructor's second parameter.
 const mockRidesRepo = {} as any;
 
+// Simulates "nothing configured yet" - returns the fallback unchanged,
+// matching what these tests already assume (the hardcoded
+// DEFAULT_COMMISSION_BY_LEVEL values, unaffected by settings).
+const mockSettingsService = { getNumber: jest.fn((_key: string, fallback: number) => Promise.resolve(fallback)) } as any;
+
 describe('CommissionService', () => {
   it('falls back to the platform default for the driver level when no rules exist at all', async () => {
-    const service = new CommissionService(makeRepo([]), mockRidesRepo);
+    const service = new CommissionService(makeRepo([]), mockRidesRepo, mockSettingsService);
 
     const percent = await service.resolveCommissionPercent({ driverLevel: DriverLevel.ROOKIE });
 
@@ -36,7 +41,7 @@ describe('CommissionService', () => {
 
   it('uses a level-only rule when nothing more specific matches', async () => {
     const rules = [rule({ driverLevel: DriverLevel.GOLD, commissionPercent: '15.00' })];
-    const service = new CommissionService(makeRepo(rules), mockRidesRepo);
+    const service = new CommissionService(makeRepo(rules), mockRidesRepo, mockSettingsService);
 
     const percent = await service.resolveCommissionPercent({ driverLevel: DriverLevel.GOLD });
 
@@ -48,7 +53,7 @@ describe('CommissionService', () => {
       rule({ driverLevel: DriverLevel.GOLD, commissionPercent: '15.00' }),
       rule({ driverLevel: DriverLevel.GOLD, city: 'Lagos', commissionPercent: '12.00' }),
     ];
-    const service = new CommissionService(makeRepo(rules), mockRidesRepo);
+    const service = new CommissionService(makeRepo(rules), mockRidesRepo, mockSettingsService);
 
     const percent = await service.resolveCommissionPercent({ driverLevel: DriverLevel.GOLD, city: 'Lagos' });
 
@@ -66,7 +71,7 @@ describe('CommissionService', () => {
         commissionPercent: '8.00',
       }),
     ];
-    const service = new CommissionService(makeRepo(rules), mockRidesRepo);
+    const service = new CommissionService(makeRepo(rules), mockRidesRepo, mockSettingsService);
 
     const percent = await service.resolveCommissionPercent({
       driverLevel: DriverLevel.GOLD,
@@ -79,7 +84,7 @@ describe('CommissionService', () => {
 
   it('does not apply a city-specific rule to a ride in a different city', async () => {
     const rules = [rule({ driverLevel: DriverLevel.GOLD, city: 'Abuja', commissionPercent: '5.00' })];
-    const service = new CommissionService(makeRepo(rules), mockRidesRepo);
+    const service = new CommissionService(makeRepo(rules), mockRidesRepo, mockSettingsService);
 
     const percent = await service.resolveCommissionPercent({ driverLevel: DriverLevel.GOLD, city: 'Lagos' });
 
@@ -99,7 +104,7 @@ describe('CommissionService', () => {
     ];
     // The repo mock only returns active rules (matching the real query's WHERE isActive = true),
     // so the inactive one should never even be considered.
-    const service = new CommissionService(makeRepo([rules[0]]), mockRidesRepo);
+    const service = new CommissionService(makeRepo([rules[0]]), mockRidesRepo, mockSettingsService);
 
     const percent = await service.resolveCommissionPercent({ driverLevel: DriverLevel.GOLD, city: 'Lagos' });
 
