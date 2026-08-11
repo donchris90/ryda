@@ -2864,6 +2864,31 @@ message. Car driver accepting a bike-sized delivery succeeds
 confirming the existing e2e suite's own delivery-accept step (which
 depends on a driver having an active vehicle) still passes.
 
+## Admin delete-ride - built because local DB tools kept failing
+
+User needed to delete a test ride, but local DB connections had been
+unreliable across every tool tried this session (Node's pg, psql,
+TablePlus, pgAdmin) - a genuine, never-resolved local network/SSL
+issue. Rather than keep troubleshooting that, built a proper delete
+feature into the admin dashboard itself, since the browser-based
+dashboard has connected reliably over HTTPS the whole session.
+
+New DELETE /rides/admin/:id, matching the existing forceStatusForAdmin
+"blunt escape hatch" pattern and its same admin-only restriction.
+Deliberately refuses to delete a COMPLETED ride - that status means
+driver earnings and platform commission already settled into real
+wallet transactions, and a hard delete would leave those transactions
+pointing at a ride that no longer exists with no way to explain where
+the money came from. Every other status is fair game.
+
+Verified live: non-admin token correctly rejected (403), a junk
+(searching-status) ride deletes successfully and is genuinely gone
+afterward (confirmed via a follow-up 404), and a completed ride is
+correctly refused with a clear explanation rather than silently
+succeeding or failing. Full regression clean.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

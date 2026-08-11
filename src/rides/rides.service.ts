@@ -237,6 +237,28 @@ export class RidesService {
   }
 
   /**
+   * Admin cleanup for a genuinely junk/test ride - a hard delete, not a
+   * status change. Deliberately refuses to delete a COMPLETED ride:
+   * that status means driver earnings and platform commission already
+   * settled into real wallet transactions, and this endpoint has no
+   * way to unwind those - deleting the ride row itself would just
+   * leave those wallet transactions pointing at a ride that no longer
+   * exists, with no way to explain where the money came from. Every
+   * other status (searching, cancelled, no_driver_found, etc.) has no
+   * settled money attached and is safe to remove outright.
+   */
+  async deleteForAdmin(id: string): Promise<{ deleted: true }> {
+    const ride = await this.findById(id);
+    if (ride.status === RideStatus.COMPLETED) {
+      throw new BadRequestException(
+        'Cannot delete a completed ride - it has real wallet transactions tied to it. Use force-status to change it instead if it needs correcting.',
+      );
+    }
+    await this.ridesRepo.delete(id);
+    return { deleted: true };
+  }
+
+  /**
    * Real gap found while building the admin dashboard's ride list, not
    * assumed: `GET /rides/:id` had zero ownership check beyond being
    * logged in — any authenticated passenger could view any other ride's

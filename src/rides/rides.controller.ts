@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -102,6 +102,13 @@ export class RidesController {
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   forceStatus(@Param('id') id: string, @Param('status') status: RideStatus) {
     return this.ridesService.forceStatusForAdmin(id, status);
+  }
+
+  @Delete('admin/:id')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  deleteRide(@Param('id') id: string) {
+    return this.ridesService.deleteForAdmin(id);
   }
 
   @Get(':id/driver-info')
