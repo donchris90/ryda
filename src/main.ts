@@ -7,29 +7,31 @@ import { AppModule } from './app.module';
 import { assertProductionSecretsAreSet } from './config/env.validation';
 
 async function bootstrap() {
-  // bufferLogs holds Nest's own bootstrap logs until the real pino logger
-  // (registered via LoggerModule, DI-resolved below) takes over — without
-  // this, Nest's default console logger prints the first few lines before
-  // structured logging kicks in.
-  const app = await NestFactory.create(AppModule, { rawBody: true, bufferLogs: true });
+  // Buffer Nest's bootstrap logs until the real pino logger
+  // registered via LoggerModule takes over.
+  const app = await NestFactory.create(AppModule, {
+    rawBody: true,
+    bufferLogs: true,
+  });
+
   app.useLogger(app.get(Logger));
 
   const config = app.get(ConfigService);
+
   assertProductionSecretsAreSet(
-    config.get<string>('nodeEnv')!,
-    config.get<string>('jwt.accessSecret')!,
-    config.get<string>('jwt.refreshSecret')!,
+    config.get('nodeEnv')!,
+    config.get('jwt.accessSecret')!,
+    config.get('jwt.refreshSecret')!,
   );
 
   app.enableCors();
+
   app.setGlobalPrefix('api/v1', {
-    // The email-verification and password-reset links sent by
-    // AuthService already point at ${appBaseUrl}/verify-email and
-    // ${appBaseUrl}/reset-password with no /api/v1 prefix — excluding
-    // these here matches what's already being generated, rather than
-    // changing already-tested email-sending code to match a prefix.
+    // Email verification and password reset links are generated
+    // without the /api/v1 prefix.
     exclude: ['verify-email', 'reset-password'],
   });
+
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -37,9 +39,6 @@ async function bootstrap() {
       forbidNonWhitelisted: true,
     }),
   );
-  // HttpExceptionFilter is registered via APP_FILTER in ObservabilityModule
-  // now (it needs SentryService injected via DI, which a manually
-  // constructed `new HttpExceptionFilter()` here couldn't provide).
 
   const swaggerConfig = new DocumentBuilder()
     .setTitle('Ryda API')
@@ -49,19 +48,41 @@ async function bootstrap() {
         '/api/v1/auth, then use the returned accessToken.',
     )
     .setVersion('1.0')
-    .addBearerAuth({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' }, 'access-token')
-    .addApiKey({ type: 'apiKey', name: 'x-api-key', in: 'header' }, 'partner-api-key')
+    .addBearerAuth(
+      {
+        type: 'http',
+        scheme: 'bearer',
+        bearerFormat: 'JWT',
+      },
+      'access-token',
+    )
+    .addApiKey(
+      {
+        type: 'apiKey',
+        name: 'x-api-key',
+        in: 'header',
+      },
+      'partner-api-key',
+    )
     .addTag('auth', 'Registration, login, OTP, refresh tokens')
     .addTag('rides', 'Fare estimation and the full ride lifecycle')
     .addTag('payments', 'Card-on-file, bank transfer, refunds, webhooks')
     .build();
+
   const document = SwaggerModule.createDocument(app, swaggerConfig);
+
   SwaggerModule.setup('api/docs', app, document);
 
-  const port = process.env.PORT ?? 3000;
-  await app.listen(port);
-  console.log(`Ryda backend running on http://localhost:${port}/api/v1`);
-  console.log(`API docs at http://localhost:${port}/api/docs`);
-  console.log(`Metrics at http://localhost:${port}/api/v1/metrics`);
+  // Render provides the PORT environment variable.
+  // Bind to 0.0.0.0 so Render's external proxy can reach NestJS.
+  const port = Number(process.env.PORT) || 3000;
+
+  await app.listen(port, '0.0.0.0');
+
+  console.log(`Ryda backend listening on 0.0.0.0:${port}`);
+  console.log(`API: http://0.0.0.0:${port}/api/v1`);
+  console.log(`API docs: http://0.0.0.0:${port}/api/docs`);
+  console.log(`Metrics: http://0.0.0.0:${port}/api/v1/metrics`);
 }
+
 bootstrap();
