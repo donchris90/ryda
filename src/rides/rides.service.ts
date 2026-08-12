@@ -49,6 +49,7 @@ const STAFF_ROLES = [
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { TransactionCategory } from '../common/enums/transaction.enum';
 import { DriverAvailability, DriverApprovalStatus } from '../common/enums/driver-status.enum';
+import { doesVehicleMatchRideCategory } from '../common/ride-vehicle-match.util';
 
 export interface SelectableDriverResult {
   driverUserId: string;
@@ -623,23 +624,34 @@ export class RidesService {
     const userById = new Map(users.map((u) => [u.id, u]));
     const vehicleById = new Map(vehicles.filter((v): v is NonNullable<typeof v> => !!v).map((v) => [v.id, v]));
 
-    return candidates.map((c) => {
-      const user = userById.get(c.userId);
-      const vehicle = c.vehicleId ? vehicleById.get(c.vehicleId) : undefined;
-      return {
-        driverUserId: c.userId,
-        firstName: user?.firstName ?? 'Driver',
-        lastName: user?.lastName ?? '',
-        rating: c.rating,
-        level: c.level,
-        distanceKm: c.distanceKm,
-        etaMinutes: Math.max(1, Math.round((c.distanceKm / ASSUMED_AVG_SPEED_KMH) * 60)),
-        vehicleMake: vehicle?.make ?? null,
-        vehicleModel: vehicle?.model ?? null,
-        vehicleColor: vehicle?.color ?? null,
-        vehiclePlateNumber: vehicle?.plateNumber ?? null,
-      };
-    });
+    return candidates
+      .filter((c) => {
+        const vehicle = c.vehicleId ? vehicleById.get(c.vehicleId) : undefined;
+        // Real gap found from a live user report: a motorcycle-
+        // registered driver was showing up for every ride category,
+        // since category was only ever used for pricing, never to
+        // decide who gets shown to the passenger. A driver with no
+        // active vehicle on file is excluded, not assumed to match -
+        // same reasoning as the delivery vehicle matching fix.
+        return vehicle ? doesVehicleMatchRideCategory(vehicle.category, ride.category) : false;
+      })
+      .map((c) => {
+        const user = userById.get(c.userId);
+        const vehicle = c.vehicleId ? vehicleById.get(c.vehicleId) : undefined;
+        return {
+          driverUserId: c.userId,
+          firstName: user?.firstName ?? 'Driver',
+          lastName: user?.lastName ?? '',
+          rating: c.rating,
+          level: c.level,
+          distanceKm: c.distanceKm,
+          etaMinutes: Math.max(1, Math.round((c.distanceKm / ASSUMED_AVG_SPEED_KMH) * 60)),
+          vehicleMake: vehicle?.make ?? null,
+          vehicleModel: vehicle?.model ?? null,
+          vehicleColor: vehicle?.color ?? null,
+          vehiclePlateNumber: vehicle?.plateNumber ?? null,
+        };
+      });
   }
 
   /**
@@ -718,6 +730,20 @@ export class RidesService {
     }
     if (driverProfile.availability !== DriverAvailability.ONLINE) {
       throw new BadRequestException('Driver must be online to accept rides');
+    }
+
+    // Defense in depth, not just the filtered selectable-drivers list -
+    // a driver could still reach this via the open broadcast-accept
+    // path without ever appearing in a filtered list, so this needs
+    // enforcing here too, not only at selection time.
+    if (!driverProfile.activeVehicleId) {
+      throw new BadRequestException('You need an active vehicle on file to accept rides');
+    }
+    const acceptingVehicle = await this.vehiclesService.findById(driverProfile.activeVehicleId);
+    if (!doesVehicleMatchRideCategory(acceptingVehicle.category, ride.category)) {
+      throw new BadRequestException(
+        `Your registered vehicle doesn't match this ride's ${ride.category} category.`,
+      );
     }
 
     // Only cash (and bank-transfer-collected, once that exists) rides

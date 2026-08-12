@@ -2952,6 +2952,41 @@ real location ping, confirmed all three fields come back with genuine
 values in the actual API response, not just present-but-null. Full
 regression clean.
 
+## Ride vehicle matching - same gap as deliveries, found from a direct question
+
+User asked directly why a motorcycle-registered driver was showing up
+for ride bookings regardless of category. Checked rather than assumed
+- confirmed findSelectableDrivers() never filtered by vehicle category
+at all, same class of gap already found and fixed for deliveries.
+RideCategory was only ever used for pricing, never to decide who gets
+shown to the passenger.
+
+Deliberately strict, not permissive like delivery matching - a
+passenger choosing "Executive" is choosing a specific experience, not
+just asking for capacity, so a random car showing up would defeat the
+point of the category existing at all. New ride-vehicle-match.util.ts
+maps each RideCategory to the one VehicleCategory a driver must be
+registered under. Economy and Comfort both map to plain "car" - there's
+no dedicated vehicle tier distinguishing them in what a driver actually
+registers, a real limitation of the data model worth knowing about, not
+an oversight in this fix specifically.
+
+Applied in both places, matching the delivery fix's pattern: filtering
+at findSelectableDrivers() (drivers with no active vehicle are
+excluded, not assumed to match), AND a genuine server-side safeguard in
+acceptRide() itself, since a driver could still reach acceptance via
+the open broadcast-accept path without ever appearing in a filtered
+list.
+
+Verified live with the exact reported scenario: a motorcycle driver is
+correctly excluded from an economy ride's selectable-drivers list, a
+car driver correctly appears, the motorcycle driver is correctly
+rejected if they try to accept the economy ride directly, and correctly
+succeeds accepting a genuine motorcycle-category ride. Full regression
+clean.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps
