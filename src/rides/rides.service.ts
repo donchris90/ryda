@@ -633,7 +633,7 @@ export class RidesService {
         // decide who gets shown to the passenger. A driver with no
         // active vehicle on file is excluded, not assumed to match -
         // same reasoning as the delivery vehicle matching fix.
-        return vehicle ? doesVehicleMatchRideCategory(vehicle.category, ride.category) : false;
+        return vehicle ? doesVehicleMatchRideCategory(vehicle, ride.category) : false;
       })
       .map((c) => {
         const user = userById.get(c.userId);
@@ -740,7 +740,7 @@ export class RidesService {
       throw new BadRequestException('You need an active vehicle on file to accept rides');
     }
     const acceptingVehicle = await this.vehiclesService.findById(driverProfile.activeVehicleId);
-    if (!doesVehicleMatchRideCategory(acceptingVehicle.category, ride.category)) {
+    if (!doesVehicleMatchRideCategory(acceptingVehicle, ride.category)) {
       throw new BadRequestException(
         `Your registered vehicle doesn't match this ride's ${ride.category} category.`,
       );

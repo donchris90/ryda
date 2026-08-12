@@ -2985,6 +2985,38 @@ rejected if they try to accept the economy ride directly, and correctly
 succeeds accepting a genuine motorcycle-category ride. Full regression
 clean.
 
+## Admin-approvable extra ride categories for a vehicle
+
+Direct follow-up request after the strict ride-vehicle matching fix:
+let an admin manually approve a specific vehicle for ride categories
+beyond its strict default mapping - e.g. a genuinely nice car
+registered as plain "car" being vouched for on Comfort, XL, and Luxury,
+without needing a separate VehicleCategory to exist for every possible
+tier. That real-world judgment call belongs with a human reviewing the
+vehicle, not a rigid enum.
+
+New approvedRideCategories column on Vehicle (simple-array). doesVehicleMatchRideCategory()
+now checks BOTH the strict default mapping AND this admin-approved
+list - either one is sufficient. New admin-only endpoint (PATCH
+/vehicles/admin/:id/approved-ride-categories).
+
+Real bug caught and fixed while building this: the admin vehicle
+listing endpoint uses getRawMany(), which bypasses TypeORM's normal
+simple-array transformation - it was returning "comfort,xl,luxury" as
+a raw string instead of a real array, inconsistent with what the
+entity-based endpoints return for the exact same field. Fixed by
+converting it back to an array before returning, so the API contract
+is consistent regardless of which endpoint a caller uses.
+
+Verified live: confirmed a "car" driver does NOT appear for a luxury
+ride before approval, then genuinely does appear on the exact same
+ride after an admin approves that specific vehicle for luxury - not
+just checking the approval saved, but confirming it actually changes
+real dispatch behavior. Also confirmed the array-vs-string fix
+directly. Full regression clean.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps

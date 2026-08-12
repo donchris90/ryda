@@ -24,7 +24,20 @@ const RIDE_CATEGORY_TO_VEHICLE_CATEGORY: Record<RideCategory, VehicleCategory> =
   [RideCategory.LUXURY]: VehicleCategory.LUXURY,
 };
 
-/** True if a driver's registered vehicle category matches what a given ride category requires. */
-export function doesVehicleMatchRideCategory(driverCategory: VehicleCategory, rideCategory: RideCategory): boolean {
-  return RIDE_CATEGORY_TO_VEHICLE_CATEGORY[rideCategory] === driverCategory;
+/**
+ * True if a vehicle can serve a given ride category - either through
+ * the strict default mapping (its registered category matches
+ * exactly), OR because an admin has explicitly approved this specific
+ * vehicle for that category (approvedRideCategories). The second path
+ * exists specifically so "is this car nice enough for Comfort/XL/
+ * Luxury" can be a human judgment call per vehicle, not something a
+ * rigid enum can express - two identical VehicleCategory.CAR
+ * registrations can be genuinely different in real quality.
+ */
+export function doesVehicleMatchRideCategory(
+  vehicle: { category: VehicleCategory; approvedRideCategories?: string[] | null },
+  rideCategory: RideCategory,
+): boolean {
+  if (RIDE_CATEGORY_TO_VEHICLE_CATEGORY[rideCategory] === vehicle.category) return true;
+  return !!vehicle.approvedRideCategories?.includes(rideCategory);
 }

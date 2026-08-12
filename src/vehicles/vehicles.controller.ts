@@ -8,6 +8,7 @@ import { VehicleStatus } from '../common/enums/vehicle.enum';
 import { User } from '../users/entities/user.entity';
 import { VehiclesService } from './vehicles.service';
 import { CreateVehicleDto } from './dto/create-vehicle.dto';
+import { SetApprovedRideCategoriesDto } from './dto/set-approved-ride-categories.dto';
 import { DriversService } from '../drivers/drivers.service';
 
 @Controller('vehicles')
@@ -51,5 +52,16 @@ export class VehiclesController {
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.COUNTRY_ADMIN, UserRole.CITY_MANAGER)
   setStatus(@Param('id') id: string, @Param('status') status: VehicleStatus) {
     return this.vehiclesService.setStatus(id, status);
+  }
+
+  // Lets an admin manually approve a specific vehicle for ride
+  // categories beyond its strict default mapping - e.g. a genuinely
+  // nice registered-as-"car" vehicle covering Comfort, XL, or Luxury.
+  // See ride-vehicle-match.util.ts for why this exists as a per-vehicle
+  // human judgment call rather than a rigid enum expansion.
+  @Patch('admin/:id/approved-ride-categories')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.COUNTRY_ADMIN)
+  setApprovedRideCategories(@Param('id') id: string, @Body() dto: SetApprovedRideCategoriesDto) {
+    return this.vehiclesService.setApprovedRideCategories(id, dto.categories);
   }
 }

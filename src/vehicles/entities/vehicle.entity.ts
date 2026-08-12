@@ -56,6 +56,17 @@ export class Vehicle {
   @Column({ type: 'enum', enum: VehicleStatus, default: VehicleStatus.PENDING_INSPECTION })
   status: VehicleStatus;
 
+  // Admin-only, additive to the default strict category mapping (see
+  // ride-vehicle-match.util.ts) - lets an admin manually vouch for a
+  // specific vehicle covering ride categories beyond what its raw
+  // `category` alone would strictly allow. E.g. a genuinely nice car
+  // can be approved for Comfort, XL, or Luxury without needing a
+  // separate vehicle category to exist for every possible tier - the
+  // real-world judgment of "is this car nice enough" belongs with a
+  // human reviewing it, not a rigid enum.
+  @Column({ type: 'simple-array', nullable: true })
+  approvedRideCategories: string[] | null;
+
   @CreateDateColumn()
   createdAt: Date;
 

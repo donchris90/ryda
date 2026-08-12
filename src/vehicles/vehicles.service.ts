@@ -40,6 +40,16 @@ export class VehiclesService {
     return this.vehiclesRepo.save(vehicle);
   }
 
+  // Admin override for ride category matching - see doesVehicleMatchRideCategory()
+  // in ride-vehicle-match.util.ts for the full reasoning. Passing an
+  // empty array clears any previously-approved extra categories,
+  // rather than leaving them stuck once granted.
+  async setApprovedRideCategories(vehicleId: string, categories: string[]): Promise<Vehicle> {
+    const vehicle = await this.findById(vehicleId);
+    vehicle.approvedRideCategories = categories.length > 0 ? categories : null;
+    return this.vehiclesRepo.save(vehicle);
+  }
+
   async listByFleet(fleetCompanyId: string): Promise<Vehicle[]> {
     return this.vehiclesRepo.find({ where: { fleetCompanyId } });
   }
@@ -65,6 +75,7 @@ export class VehiclesService {
       .addSelect('vehicle.insuranceExpiry', 'insuranceExpiry')
       .addSelect('vehicle.roadWorthinessExpiry', 'roadWorthinessExpiry')
       .addSelect('vehicle.status', 'status')
+      .addSelect('vehicle.approvedRideCategories', 'approvedRideCategories')
       .addSelect('vehicle.createdAt', 'createdAt')
       .addSelect('driver.firstName', 'driverFirstName')
       .addSelect('driver.lastName', 'driverLastName')
@@ -74,10 +85,23 @@ export class VehiclesService {
     if (filter?.status) qb.andWhere('vehicle.status = :status', { status: filter.status });
 
     const total = await qb.getCount();
-    const items = await qb
+    const rawItems = await qb
       .offset((page - 1) * limit)
       .limit(limit)
       .getRawMany();
+
+    // getRawMany() bypasses TypeORM's normal simple-array
+    // transformation, so approvedRideCategories comes back as a raw
+    // "a,b,c" string here even though the entity-based endpoints return
+    // a genuine array for the same column - converting it back keeps
+    // the API contract consistent regardless of which endpoint a
+    // caller used.
+    const items = rawItems.map((item) => ({
+      ...item,
+      approvedRideCategories: item.approvedRideCategories
+        ? String(item.approvedRideCategories).split(',')
+        : null,
+    }));
 
     return { items, total, page, limit };
   }
