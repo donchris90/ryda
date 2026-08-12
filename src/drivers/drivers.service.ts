@@ -118,6 +118,9 @@ export class DriversService {
       .addSelect('driver.rating', 'rating')
       .addSelect('driver.completedTrips', 'completedTrips')
       .addSelect('driver.licenseNumber', 'licenseNumber')
+      .addSelect('driver.currentLat', 'currentLat')
+      .addSelect('driver.currentLng', 'currentLng')
+      .addSelect('driver.locationUpdatedAt', 'locationUpdatedAt')
       .addSelect('driver.createdAt', 'createdAt')
       .orderBy('driver.createdAt', 'DESC');
 

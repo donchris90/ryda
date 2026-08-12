@@ -2937,6 +2937,23 @@ fresh driver in the same test correctly appears. Full regression
 clean, including confirming the standard e2e suite's own driver (who
 reports location within the threshold) still gets found normally.
 
+## Admin dispatch diagnostic - built to solve a real, recurring problem
+
+User reported drivers online but not being matched, and had no way to
+check the actual location/staleness data behind it, since direct
+database access has been unreliable for them all session (SSL
+connection issues). Rather than keep working around that per-incident,
+added the real fields (currentLat, currentLng, locationUpdatedAt) to
+the existing admin/list endpoint - they were already being computed
+correctly on the backend, just never selected into this query.
+
+Verified live: registered and fully onboarded a real driver with a
+real location ping, confirmed all three fields come back with genuine
+values in the actual API response, not just present-but-null. Full
+regression clean.
+
+## Known gaps / next steps
+
 ## Known gaps / next steps
 
 ## Known gaps / next steps
