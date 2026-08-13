@@ -7,6 +7,7 @@ import { Ride } from '../rides/entities/ride.entity';
 import { SupportTicket } from '../support/entities/support-ticket.entity';
 import { DeliveryOrder } from '../logistics/entities/delivery-order.entity';
 import { DriverProfile } from '../drivers/entities/driver-profile.entity';
+import { User } from '../users/entities/user.entity';
 import { TrackingGateway } from './tracking.gateway';
 import { LocationService } from './location.service';
 import { HistoryService } from './history.service';
@@ -21,6 +22,7 @@ import { TrackingController } from './tracking.controller';
       SupportTicket,
       DeliveryOrder,
       DriverProfile,
+      User,
     ]),
     JwtModule.registerAsync({
       inject: [ConfigService],
