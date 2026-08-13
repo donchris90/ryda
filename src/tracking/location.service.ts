@@ -5,10 +5,18 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { LocationHistory } from './entities/location-history.entity';
 import { Ride } from '../rides/entities/ride.entity';
 import { RideStatus } from '../common/enums/ride.enum';
-import { DeliveryOrder, DeliveryStatus } from '../logistics/entities/delivery-order.entity';
+import {
+  DeliveryOrder,
+  DeliveryStatus,
+} from '../logistics/entities/delivery-order.entity';
 import { TrackingGateway } from './tracking.gateway';
 
-const ACTIVE_STATUSES = [RideStatus.ACCEPTED, RideStatus.ARRIVING, RideStatus.ARRIVED, RideStatus.IN_PROGRESS];
+const ACTIVE_STATUSES = [
+  RideStatus.ACCEPTED,
+  RideStatus.ARRIVING,
+  RideStatus.ARRIVED,
+  RideStatus.IN_PROGRESS,
+];
 const ACTIVE_DELIVERY_STATUSES = [
   DeliveryStatus.ACCEPTED,
   DeliveryStatus.PICKUP_ARRIVED,
@@ -40,9 +48,14 @@ export class LocationService {
     // (not else-if) costs nothing and doesn't assume that won't ever
     // change.
     const [activeRide, activeDelivery] = await Promise.all([
-      this.ridesRepo.findOne({ where: { driverId: payload.driverUserId, status: In(ACTIVE_STATUSES) } }),
+      this.ridesRepo.findOne({
+        where: { driverId: payload.driverUserId, status: In(ACTIVE_STATUSES) },
+      }),
       this.deliveryOrdersRepo.findOne({
-        where: { driverId: payload.driverUserId, status: In(ACTIVE_DELIVERY_STATUSES) },
+        where: {
+          driverId: payload.driverUserId,
+          status: In(ACTIVE_DELIVERY_STATUSES),
+        },
       }),
     ]);
 
@@ -70,5 +83,16 @@ export class LocationService {
         at: payload.at,
       });
     }
+
+    // Every update goes to the admin live-map room, ride or no ride, so
+    // idle-but-online drivers still move on the admin map, not just ones
+    // currently on a trip.
+    this.trackingGateway.broadcastAdminDriverLocation({
+      driverId: payload.driverUserId,
+      lat: payload.lat,
+      lng: payload.lng,
+      at: payload.at,
+      rideId: activeRide?.id ?? null,
+    });
   }
 }

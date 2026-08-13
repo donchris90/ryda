@@ -19,6 +19,9 @@ import { DeliveryOrder } from '../logistics/entities/delivery-order.entity';
 import { SupportTicket } from '../support/entities/support-ticket.entity';
 import { SUPPORT_STAFF_ROLES } from '../support/support.service';
 import { UserRole } from '../common/enums/user-role.enum';
+import { ADMIN_LIKE_ROLES } from '../common/enums/user-role.enum';
+
+const ADMIN_LIKE_SOCKET_ROLES = [...ADMIN_LIKE_ROLES, UserRole.DISPATCHER];
 
 interface AuthedSocket extends Socket {
   data: { userId?: string; role?: string };
@@ -32,7 +35,9 @@ interface AuthedSocket extends Socket {
  */
 @Injectable()
 @WebSocketGateway({ cors: { origin: '*' }, namespace: '/tracking' })
-export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class TrackingGateway
+  implements OnGatewayConnection, OnGatewayDisconnect
+{
   private readonly logger = new Logger(TrackingGateway.name);
 
   @WebSocketServer()
@@ -60,7 +65,9 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
       client.data.userId = payload.sub;
       client.data.role = payload.role;
     } catch {
-      this.logger.warn(`Tracking socket ${client.id} rejected — invalid/missing token`);
+      this.logger.warn(
+        `Tracking socket ${client.id} rejected — invalid/missing token`,
+      );
       client.disconnect(true);
     }
   }
@@ -78,7 +85,8 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
     if (!ride) return { error: 'Ride not found' };
 
     const userId = client.data.userId;
-    const isParticipant = ride.passengerId === userId || ride.driverId === userId;
+    const isParticipant =
+      ride.passengerId === userId || ride.driverId === userId;
     if (!isParticipant) return { error: 'Not a participant in this ride' };
 
     await client.join(this.roomFor(data.rideId));
@@ -107,11 +115,14 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
     @ConnectedSocket() client: AuthedSocket,
     @MessageBody() data: { deliveryId: string },
   ) {
-    const delivery = await this.deliveryOrdersRepo.findOne({ where: { id: data.deliveryId } });
+    const delivery = await this.deliveryOrdersRepo.findOne({
+      where: { id: data.deliveryId },
+    });
     if (!delivery) return { error: 'Delivery not found' };
 
     const userId = client.data.userId;
-    const isParticipant = delivery.customerId === userId || delivery.driverId === userId;
+    const isParticipant =
+      delivery.customerId === userId || delivery.driverId === userId;
     if (!isParticipant) return { error: 'Not a participant in this delivery' };
 
     await client.join(this.roomForDelivery(data.deliveryId));
@@ -127,18 +138,58 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
     return { unsubscribed: true, deliveryId: data.deliveryId };
   }
 
+  /**
+   * Admin-only room that receives every driver location update as it
+   * happens, regardless of which ride (if any) that driver is on — the
+   * per-ride rooms above intentionally scope to one ride at a time, which
+   * is right for a passenger/driver but wouldn't let the admin dashboard's
+   * live map see the whole fleet move at once.
+   */
+  @SubscribeMessage('subscribe:admin-live')
+  async handleSubscribeAdminLive(@ConnectedSocket() client: AuthedSocket) {
+    if (!ADMIN_LIKE_SOCKET_ROLES.includes(client.data.role as UserRole)) {
+      return { error: 'Not authorized' };
+    }
+    await client.join(this.adminLiveRoom());
+    return { subscribed: true };
+  }
+
+  @SubscribeMessage('unsubscribe:admin-live')
+  async handleUnsubscribeAdminLive(@ConnectedSocket() client: AuthedSocket) {
+    await client.leave(this.adminLiveRoom());
+    return { unsubscribed: true };
+  }
+
+  /** Called by LocationService on every driver location update, ride or no ride. */
+  broadcastAdminDriverLocation(payload: {
+    driverId: string;
+    lat: number;
+    lng: number;
+    at: Date;
+    rideId?: string | null;
+  }): void {
+    this.server.to(this.adminLiveRoom()).emit('admin:driver-location', payload);
+  }
+
+  private adminLiveRoom(): string {
+    return 'admin:live';
+  }
+
   @SubscribeMessage('subscribe:ticket')
   async handleSubscribeTicket(
     @ConnectedSocket() client: AuthedSocket,
     @MessageBody() data: { ticketId: string },
   ) {
-    const ticket = await this.ticketsRepo.findOne({ where: { id: data.ticketId } });
+    const ticket = await this.ticketsRepo.findOne({
+      where: { id: data.ticketId },
+    });
     if (!ticket) return { error: 'Ticket not found' };
 
     const userId = client.data.userId;
     const isOwner = ticket.userId === userId;
     const isStaff = SUPPORT_STAFF_ROLES.includes(client.data.role as UserRole);
-    if (!isOwner && !isStaff) return { error: 'Not authorized for this ticket' };
+    if (!isOwner && !isStaff)
+      return { error: 'Not authorized for this ticket' };
 
     await client.join(this.roomForTicket(data.ticketId));
     return { subscribed: true, ticketId: data.ticketId };
@@ -154,13 +205,23 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
   }
 
   /** Called by LocationService whenever a driver on an active ride reports a new position. */
-  broadcastDriverLocation(rideId: string, payload: { lat: number; lng: number; at: Date }): void {
-    this.server.to(this.roomFor(rideId)).emit('driver:location', { rideId, ...payload });
+  broadcastDriverLocation(
+    rideId: string,
+    payload: { lat: number; lng: number; at: Date },
+  ): void {
+    this.server
+      .to(this.roomFor(rideId))
+      .emit('driver:location', { rideId, ...payload });
   }
 
   /** Same as broadcastDriverLocation, for a driver currently handling an active delivery. */
-  broadcastDeliveryLocation(deliveryId: string, payload: { lat: number; lng: number; at: Date }): void {
-    this.server.to(this.roomForDelivery(deliveryId)).emit('driver:location', { deliveryId, ...payload });
+  broadcastDeliveryLocation(
+    deliveryId: string,
+    payload: { lat: number; lng: number; at: Date },
+  ): void {
+    this.server
+      .to(this.roomForDelivery(deliveryId))
+      .emit('driver:location', { deliveryId, ...payload });
   }
 
   /**
@@ -170,7 +231,14 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
    * messages.
    */
   @OnEvent('ride.message.sent')
-  broadcastRideMessage(message: { rideId: string; id: string; senderId: string; senderRole: string; message: string; createdAt: Date }): void {
+  broadcastRideMessage(message: {
+    rideId: string;
+    id: string;
+    senderId: string;
+    senderRole: string;
+    message: string;
+    createdAt: Date;
+  }): void {
     this.server.to(this.roomFor(message.rideId)).emit('ride:message', message);
   }
 
@@ -188,7 +256,16 @@ export class TrackingGateway implements OnGatewayConnection, OnGatewayDisconnect
 
   /** SupportService emits this after saving a message — see addMessage(). */
   @OnEvent('support.message.sent')
-  broadcastTicketMessage(message: { ticketId: string; id: string; senderId: string; senderRole: string; message: string; createdAt: Date }): void {
-    this.server.to(this.roomForTicket(message.ticketId)).emit('ticket:message', message);
+  broadcastTicketMessage(message: {
+    ticketId: string;
+    id: string;
+    senderId: string;
+    senderRole: string;
+    message: string;
+    createdAt: Date;
+  }): void {
+    this.server
+      .to(this.roomForTicket(message.ticketId))
+      .emit('ticket:message', message);
   }
 }
