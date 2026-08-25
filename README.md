@@ -2848,23 +2848,12 @@ a real registration call.
   allowlist). Every one of these falls back to a clearly-flagged
   simulated/Haversine path when unconfigured, so the rest of the system
   stays testable — test the live paths yourself once real keys are in place.
-- **Driver document approval isn't enforced.** `DriverDocumentsService
-  .hasAllRequiredApproved()` exists but nothing calls it —
-  `DriversService.setApprovalStatus()` will happily approve a driver who
-  hasn't uploaded or been reviewed on a single document. Wire the check in
-  before this handles real drivers.
 - **No real-time push layer.** Driver matching is "any online driver can
   claim a searching ride" plus a dispatch-visible nearby-drivers list — there's
   no websocket/push-notification flow to actively offer a ride to a specific
   nearby driver with a timeout/fallback.
 - **FCM should be migrated to HTTP v1** — the legacy server-key API used
   here is deprecated by Google.
-- **Wallet top-up doesn't route through a real payment charge yet.**
-  `POST /wallet/topup` credits the wallet directly rather than first
-  charging a card or confirming a bank transfer — the max-balance
-  enforcement is real, but the "how did the money get there" step is a
-  placeholder. Wiring it through `PaymentsService` (same card-on-file flow
-  rides use) is the natural next step.
 - **Cash-trip commission debits require an existing balance.** Both personal
   driver wallets and fleet wallets can only be debited commission-owed (on
   cash trips) up to their current balance — there's no negative-balance /
@@ -2984,6 +2973,24 @@ a real registration call.
   `migration:run` against. Type-checks and reads correctly against the
   schema the InitialSchema migration produced, but confirm with a real
   `migration:run` → inspect → `migration:revert` cycle before deploying.
+
+## Driver document approval now actually enforced
+
+Real gap closed: `DriverDocumentsService.hasAllRequiredApproved()`
+existed but nothing called it - an admin could approve a driver who
+never uploaded a single document (license, insurance, roadworthiness),
+and they'd immediately be a real, approved driver visible to
+passengers. Now enforced in `DriversService.setApprovalStatus()`,
+specifically only for the transition *to* `APPROVED` - rejecting or
+suspending a driver still always works regardless of document state,
+since an admin should never be blocked from those.
+
+Verified live: a driver with zero documents uploaded is correctly
+rejected (400, clear message) when an admin tries to approve them, and
+genuinely stays in `pending` status in the database, not just rejected
+at the API layer. Rejecting that same driver still succeeds regardless.
+After uploading and approving all three required documents, approval
+now succeeds. Full regression clean.
 
 ## Multi-role accounts, two-tier ride categories, and tiered time-based fares
 

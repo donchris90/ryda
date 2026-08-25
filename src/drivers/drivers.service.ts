@@ -80,6 +80,24 @@ export class DriversService {
     status: DriverApprovalStatus,
   ): Promise<DriverProfile> {
     const profile = await this.findById(driverId);
+
+    // Real gap this closes: nothing was checking this before - an admin
+    // could approve a driver who never uploaded a single document, and
+    // they'd immediately be a real, approved driver visible to
+    // passengers. Same hasAllRequiredApproved() check already used to
+    // gate going online (see setAvailability() below), applied here too
+    // since this is the actual moment a driver becomes approved in the
+    // first place. Only enforced for the APPROVED transition - an admin
+    // can always reject or suspend regardless of document state.
+    if (status === DriverApprovalStatus.APPROVED) {
+      const documentsApproved = await this.documentsService.hasAllRequiredApproved(profile.id);
+      if (!documentsApproved) {
+        throw new BadRequestException(
+          "This driver can't be approved yet — their license, insurance, and roadworthiness documents all need to be uploaded and approved first.",
+        );
+      }
+    }
+
     profile.approvalStatus = status;
     const saved = await this.driversRepo.save(profile);
 
