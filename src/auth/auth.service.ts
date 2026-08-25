@@ -18,6 +18,7 @@ import { MailerService } from '../mailer/mailer.service';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { User } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import { UserRole } from '../common/enums/user-role.enum';
 import { WalletsService } from '../wallets/wallets.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
@@ -43,7 +44,18 @@ export class AuthService {
 
   async register(dto: RegisterDto) {
     const existingByEmail = await this.usersService.findByEmail(dto.email);
-    if (existingByEmail) throw new ConflictException('Email already registered');
+    if (existingByEmail) {
+      // Same person wanting a second role (e.g. registered as a passenger,
+      // now trying to sign up as a driver) shouldn't create a second
+      // account — but we also can't silently graft a role onto an
+      // existing account from an unauthenticated register call, since
+      // that would let anyone add a role to someone else's account just
+      // by knowing their email. Point them at the authenticated flow.
+      throw new ConflictException(
+        'An account already exists with this email. Please log in and use "Add role" ' +
+          'from your profile to also register as a driver, instead of creating a new account.',
+      );
+    }
 
     if (dto.phone) {
       const existingByPhone = await this.usersService.findByPhone(dto.phone);
@@ -335,6 +347,32 @@ export class AuthService {
     );
 
     return { accessToken, refreshToken };
+  }
+
+  // Roles a user can self-service add to their own account. Staff/admin
+  // roles are deliberately excluded — those are granted by an admin, not
+  // requested by the user themselves.
+  private static readonly SELF_SERVICE_ROLES = [
+    UserRole.PASSENGER,
+    UserRole.DRIVER,
+    UserRole.CORPORATE,
+  ];
+
+  /**
+   * Lets an already-authenticated user add a second role to their existing
+   * account (e.g. a passenger who also wants to drive) instead of needing
+   * a second account with a different email/phone. Requires the caller to
+   * already be authenticated as that user — this is deliberately NOT
+   * reachable from the unauthenticated /auth/register endpoint.
+   */
+  async addRole(userId: string, role: UserRole) {
+    if (!AuthService.SELF_SERVICE_ROLES.includes(role)) {
+      throw new BadRequestException(
+        `Role "${role}" cannot be self-added. Contact an admin for staff roles.`,
+      );
+    }
+    const user = await this.usersService.addRole(userId, role);
+    return this.usersService.sanitize(user);
   }
 
   private hashToken(token: string): string {

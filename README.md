@@ -79,7 +79,7 @@ Safe to re-run — it's a no-op if a user with that phone already exists.
 | `users` | Shared `User` entity (all roles), profile endpoint, passenger rating aggregate |
 | `drivers` | Onboarding, approval workflow, availability, GPS location tracking, proximity-based nearby-driver search, automatic level progression, rating aggregate, **document upload + admin review workflow** (license, insurance, road worthiness, photos, background check) |
 | `vehicles` | Vehicle registration per driver; first vehicle auto-becomes the driver's active vehicle |
-| `rides` | Fare estimation (real Google Maps routing when configured, Haversine fallback otherwise; category multiplier; surge; night pricing; airport surcharge; waiting fee; cancellation fee), full lifecycle (request → accept → arrive → start → complete/cancel), ratings, dispatch nearby-drivers endpoint |
+| `rides` | Fare estimation (real Google Maps routing when configured, Haversine fallback otherwise; tiered time-based pricing + distance; category multiplier — economy/comfort only; surge; night pricing; airport surcharge; waiting fee; cancellation fee), full lifecycle (request → accept → arrive → start → complete/cancel), ratings, dispatch nearby-drivers endpoint |
 | `maps` | **New.** Real Google Maps Geocoding/Directions integration (`GET /maps/geocode`, `/maps/reverse-geocode`) plus the routing upgrade to `FareService`. Returns a clear error rather than crashing when unconfigured |
 | `wallets` | Ledgered, row-locked credit/debit |
 | `commission` | Configurable commission rules by driver level / city / vehicle category, with fallback to per-level defaults |
@@ -844,12 +844,13 @@ full-stack DB integration; the Jest suite covers pure logic and
 money-math in isolation with mocked dependencies) — **40 tests, all
 passing**:
 
-- `FareService` — base+distance+time math, category multiplier, night
-  multiplier (including the 22:00→05:00 wraparound), airport surcharge,
-  surge application, minimum-fare floor, Maps-configured vs. Haversine
-  fallback (and falling back correctly when a configured Maps call
-  fails), waiting fee (both billable and within-grace-period cases), and
-  the DB-setting-override-vs-env-fallback path for cancellation fee.
+- `FareService` — tiered time-based fare + distance math, category
+  multiplier (economy/comfort), night multiplier (including the
+  22:00→05:00 wraparound), airport surcharge, surge application,
+  minimum-fare floor, Maps-configured vs. Haversine fallback (and falling
+  back correctly when a configured Maps call fails), waiting fee (both
+  billable and within-grace-period cases), and the
+  DB-setting-override-vs-env-fallback path for cancellation fee.
 - `WalletsService` — credit/debit math, insufficient-balance rejection,
   frozen-wallet rejection, zero/negative-amount rejection, the
   top-up-only wallet limit (verified BOTH that it blocks an over-limit
@@ -2970,6 +2971,56 @@ a real registration call.
 - **Corporate accounts have no travel-policy/approval-workflow layer** — an
   employee can spend the full budget on any ride; the spec's "travel
   approvals" and "department billing" split aren't implemented.
+- **`POST /auth/add-role` has no e2e coverage yet.** Multi-role accounts
+  (a passenger adding the driver role, or vice versa) type-check and pass
+  the existing unit suite, but there's no bash e2e script exercising the
+  full flow (register as passenger → add driver role → onboard → confirm
+  both role-gated endpoint sets work on one account) the way the other
+  ~24 scripts do for their respective modules. Worth adding
+  `e2e-test-v25.sh` before this ships.
+- **The `1787610731738-MultiRoleAndRideCategoryTrim` migration is
+  written but unrun** — same "correct but unverified live" category as
+  Docker/Paystack/Maps: no live Postgres in this sandbox to run
+  `migration:run` against. Type-checks and reads correctly against the
+  schema the InitialSchema migration produced, but confirm with a real
+  `migration:run` → inspect → `migration:revert` cycle before deploying.
+
+## Multi-role accounts, two-tier ride categories, and tiered time-based fares
+
+Three related product changes, made together:
+
+- **Multi-role accounts.** `users.roles` (array) was added alongside the
+  existing `role` column, backfilled from it. `RolesGuard` and
+  `PermissionsGuard` now check membership across *all* of a user's roles,
+  not just one. Registration still rejects a duplicate email/phone (an
+  unauthenticated endpoint can't be allowed to silently attach a role to
+  someone else's account) — but a new `POST /auth/add-role` endpoint lets
+  an already-logged-in user add a second role (e.g. `driver`) to their
+  existing account without a second signup. Self-service is limited to
+  `passenger`/`driver`/`corporate`; staff/admin roles still require an
+  admin. Migration:
+  `1787610731738-MultiRoleAndRideCategoryTrim`.
+- **Ride categories trimmed to `economy`/`comfort`.** The other eight
+  (`executive`, `xl`, `suv`, `electric`, `motorcycle`, `tricycle`, `taxi`,
+  `luxury`) were removed from `RideCategory` per a product decision to
+  keep passenger rides to two simple tiers. Haulage/bike-delivery needs
+  are already covered by the separate Logistics module
+  (`DeliveryVehicleType`: bike/keke/car/van/pickup/truck) — no new
+  category was needed there. The same migration remaps any existing rides
+  with a removed category to `economy` before narrowing the DB enum.
+- **Fare formula switched from flat-base + linear-per-minute to tiered
+  time blocks.** The first `RIDE_TIER_MINUTES` (default 5) of estimated
+  trip duration cost `RIDE_TIER_BASE_FARE` (default ₦1700) flat; each
+  additional block of `RIDE_TIER_MINUTES` — a partial block still counts
+  as a full one, same as a metered taxi — adds `RIDE_TIER_INCREMENT_FARE`
+  (default ₦700). Distance (`perKm`) is still added on top so a highway
+  trip and a traffic-jam trip of the same duration don't cost the same.
+  All three values are admin-configurable via `SystemSettingsService`
+  with env-var fallback, same pattern as the rest of pricing. The old
+  flat `baseFare`/`perMinute` settings and env vars were removed as dead
+  code rather than left stale. `FareBreakdown.baseFare` is kept in the
+  response shape (always `0` now) so existing API consumers don't break
+  on a missing field.
 
 ## Test scripts
 

@@ -2,10 +2,11 @@ import { FareService } from './fare.service';
 import { RideCategory } from '../common/enums/ride.enum';
 
 const PRICING_CONFIG: Record<string, any> = {
-  'pricing.baseFare': 500,
   'pricing.perKm': 120,
-  'pricing.perMinute': 25,
   'pricing.minimumFare': 700,
+  'pricing.tierMinutes': 5,
+  'pricing.tierBaseFare': 1700,
+  'pricing.tierIncrementFare': 700,
   'pricing.currency': 'NGN',
   'pricingExtra.nightStartHour': 22,
   'pricingExtra.nightEndHour': 5,
@@ -39,14 +40,19 @@ describe('FareService', () => {
   const pickup = { lat: 6.6018, lng: 3.3515 };
   const dropoff = { lat: 6.4281, lng: 3.4219 };
 
-  it('computes base + distance + time fare with the economy multiplier (1x) and floors at the minimum fare', async () => {
+  it('computes tiered-time + distance fare with the economy multiplier (1x) and floors at the minimum fare', async () => {
     const service = new FareService(makeConfigService(), makeGoogleMapsService(), makeSettingsService());
     // Force a daytime hour so the night multiplier doesn't interfere with this test.
     const daytime = new Date('2026-01-01T14:00:00');
 
     const result = await service.estimate(RideCategory.ECONOMY, pickup, dropoff, { at: daytime });
 
-    expect(result.baseFare).toBeCloseTo(500, 1);
+    // baseFare is no longer a separate line item — the first time-tier
+    // block (tierBaseFare) now covers what a flat base fare used to.
+    expect(result.baseFare).toBe(0);
+    // timeFare should reflect the tiered schedule (₦1700 first 5 min +
+    // ₦700 per additional 5-min block), not a flat per-minute rate.
+    expect(result.timeFare).toBeGreaterThanOrEqual(1700);
     expect(result.estimatedDistanceKm).toBeGreaterThan(20);
     expect(result.estimatedDistanceKm).toBeLessThan(22);
     expect(result.usedRealRouting).toBe(false); // Maps not configured in this test
@@ -54,14 +60,14 @@ describe('FareService', () => {
     expect(result.totalFare).toBeGreaterThan(700);
   });
 
-  it('applies the category multiplier — luxury (2.2x) costs meaningfully more than economy for the same trip', async () => {
+  it('applies the category multiplier — comfort (1.25x) costs more than economy for the same trip', async () => {
     const service = new FareService(makeConfigService(), makeGoogleMapsService(), makeSettingsService());
     const daytime = new Date('2026-01-01T14:00:00');
 
     const economy = await service.estimate(RideCategory.ECONOMY, pickup, dropoff, { at: daytime });
-    const luxury = await service.estimate(RideCategory.LUXURY, pickup, dropoff, { at: daytime });
+    const comfort = await service.estimate(RideCategory.COMFORT, pickup, dropoff, { at: daytime });
 
-    expect(luxury.totalFare).toBeGreaterThan(economy.totalFare * 1.8);
+    expect(comfort.totalFare).toBeGreaterThan(economy.totalFare);
   });
 
   it('applies the night multiplier during night hours and not during the day', async () => {

@@ -43,6 +43,23 @@ const VEHICLE_CATEGORY_RANK: Record<VehicleCategory, number> = {
   [VehicleCategory.TRUCK]: DELIVERY_VEHICLE_RANK[DeliveryVehicleType.TRUCK],
 };
 
+// Preemptive, not fixing a current bug - this file's Records are
+// genuinely complete right now, but they use the same computed-
+// enum-key pattern (`[Enum.X]: value`) that was just found to let
+// ride-vehicle-match.util.ts silently drop 8 of 10 entries while still
+// compiling and booting cleanly. Same protection applied here before
+// it can happen to this file too, not after.
+for (const type of Object.values(DeliveryVehicleType)) {
+  if (!(type in DELIVERY_VEHICLE_RANK)) {
+    throw new Error(`DELIVERY_VEHICLE_RANK is missing an entry for DeliveryVehicleType.${type}.`);
+  }
+}
+for (const category of Object.values(VehicleCategory)) {
+  if (!(category in VEHICLE_CATEGORY_RANK)) {
+    throw new Error(`VEHICLE_CATEGORY_RANK is missing an entry for VehicleCategory.${category}.`);
+  }
+}
+
 /** True if a driver's registered vehicle category can physically cover a delivery requesting the given vehicle type. */
 export function canVehicleCoverDelivery(driverCategory: VehicleCategory, requestedType: DeliveryVehicleType): boolean {
   return VEHICLE_CATEGORY_RANK[driverCategory] >= DELIVERY_VEHICLE_RANK[requestedType];

@@ -25,15 +25,17 @@ export interface FareBreakdown {
 const CATEGORY_MULTIPLIER: Record<RideCategory, number> = {
   [RideCategory.ECONOMY]: 1.0,
   [RideCategory.COMFORT]: 1.25,
-  [RideCategory.EXECUTIVE]: 1.6,
-  [RideCategory.XL]: 1.5,
-  [RideCategory.SUV]: 1.7,
-  [RideCategory.ELECTRIC]: 1.15,
-  [RideCategory.MOTORCYCLE]: 0.55,
-  [RideCategory.TRICYCLE]: 0.65,
-  [RideCategory.TAXI]: 1.0,
-  [RideCategory.LUXURY]: 2.2,
 };
+
+// See ride-vehicle-match.util.ts for the full reasoning behind this
+// check - TypeScript's Record<K, V> typing does not reliably enforce
+// completeness when an object literal uses computed enum-member keys.
+// Kept as a real, cheap safeguard even for a 2-entry table.
+for (const category of Object.values(RideCategory)) {
+  if (!(category in CATEGORY_MULTIPLIER)) {
+    throw new Error(`CATEGORY_MULTIPLIER is missing an entry for RideCategory.${category}.`);
+  }
+}
 
 @Injectable()
 export class FareService {
@@ -83,6 +85,28 @@ export class FareService {
     return { distanceKm, durationMin: this.estimateDurationMin(distanceKm), usedRealRouting: false };
   }
 
+  /**
+   * Tiered time-based fare: the first `tierMinutes` of estimated trip
+   * duration cost `tierBaseFare` flat. Each additional block of
+   * `tierMinutes` (a partial block still counts as a full one, same as
+   * how metered taxi fares round up) adds `tierIncrementFare`.
+   *
+   * Example with the defaults (5 min / ₦1700 / ₦700): a 4-minute trip is
+   * ₦1700 flat; an 8-minute trip is ₦1700 + one extra block (minutes 6-10)
+   * = ₦2400; an 11-minute trip is ₦1700 + two extra blocks = ₦3100.
+   */
+  private calculateTieredTimeFare(
+    durationMin: number,
+    tierMinutes: number,
+    tierBaseFare: number,
+    tierIncrementFare: number,
+  ): number {
+    if (durationMin <= tierMinutes) return tierBaseFare;
+    const extraMinutes = durationMin - tierMinutes;
+    const extraBlocks = Math.ceil(extraMinutes / tierMinutes);
+    return tierBaseFare + extraBlocks * tierIncrementFare;
+  }
+
   private isNightFare(at: Date = new Date()): boolean {
     const hour = at.getHours();
     const start = this.config.get<number>('pricingExtra.nightStartHour')!;
@@ -101,17 +125,21 @@ export class FareService {
     const surgeMultiplier = options.surgeMultiplier ?? 1.0;
     const { distanceKm, durationMin, usedRealRouting } = await this.resolveRoute(pickup, dropoff);
 
-    const baseFare = await this.settingsService.getNumber(
-      SETTING_KEYS.PRICING_BASE_FARE,
-      this.config.get<number>('pricing.baseFare')!,
-    );
     const perKm = await this.settingsService.getNumber(
       SETTING_KEYS.PRICING_PER_KM,
       this.config.get<number>('pricing.perKm')!,
     );
-    const perMinute = await this.settingsService.getNumber(
-      SETTING_KEYS.PRICING_PER_MINUTE,
-      this.config.get<number>('pricing.perMinute')!,
+    const tierMinutes = await this.settingsService.getNumber(
+      SETTING_KEYS.PRICING_TIER_MINUTES,
+      this.config.get<number>('pricing.tierMinutes')!,
+    );
+    const tierBaseFare = await this.settingsService.getNumber(
+      SETTING_KEYS.PRICING_TIER_BASE_FARE,
+      this.config.get<number>('pricing.tierBaseFare')!,
+    );
+    const tierIncrementFare = await this.settingsService.getNumber(
+      SETTING_KEYS.PRICING_TIER_INCREMENT_FARE,
+      this.config.get<number>('pricing.tierIncrementFare')!,
     );
     const minimumFare = await this.settingsService.getNumber(
       SETTING_KEYS.PRICING_MINIMUM_FARE,
@@ -132,13 +160,16 @@ export class FareService {
     const airportFee = options.isAirportTrip ? airportFeeConfig : 0;
 
     const distanceFare = distanceKm * perKm * multiplier;
-    const timeFare = durationMin * perMinute * multiplier;
-    const rawSubtotal =
-      (baseFare * multiplier + distanceFare + timeFare) * surgeMultiplier * nightMultiplier + airportFee;
+    const timeFare =
+      this.calculateTieredTimeFare(durationMin, tierMinutes, tierBaseFare, tierIncrementFare) * multiplier;
+    const rawSubtotal = (distanceFare + timeFare) * surgeMultiplier * nightMultiplier + airportFee;
     const totalFare = Math.max(rawSubtotal, minimumFare);
 
     return {
-      baseFare: this.round(baseFare * multiplier),
+      // No separate flat base fare anymore — the first time-tier block
+      // (tierBaseFare) now covers what baseFare used to. Kept as a field,
+      // always 0, so API consumers reading FareBreakdown don't break.
+      baseFare: 0,
       distanceFare: this.round(distanceFare),
       timeFare: this.round(timeFare),
       surgeMultiplier,

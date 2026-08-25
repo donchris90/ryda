@@ -3,6 +3,7 @@ import { Throttle } from '@nestjs/throttler';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags, ApiTooManyRequestsResponse, ApiUnauthorizedResponse } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
+import { AddRoleDto } from './dto/add-role.dto';
 import { LoginDto } from './dto/login.dto';
 import { SendOtpDto, VerifyOtpDto } from './dto/otp.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
@@ -26,6 +27,21 @@ export class AuthController {
   @Post('register')
   register(@Body() dto: RegisterDto) {
     return this.authService.register(dto);
+  }
+
+  @ApiOperation({
+    summary: 'Add a role to your own account',
+    description:
+      'Lets an already-logged-in user add a second role to their existing account — e.g. a passenger who ' +
+      'also wants to drive — instead of registering a separate account with a different email. Staff/admin ' +
+      'roles cannot be self-added this way.',
+  })
+  @ApiBearerAuth()
+  @ApiResponse({ status: 200, description: 'Role added (or already present).' })
+  @UseGuards(JwtAuthGuard)
+  @Post('add-role')
+  addRole(@CurrentUser() user: User, @Body() dto: AddRoleDto) {
+    return this.authService.addRole(user.id, dto.role);
   }
 
   @ApiOperation({ summary: 'Log in', description: 'Email + password. Returns a new access/refresh token pair. Fails with a specific error if the email is not yet verified.' })

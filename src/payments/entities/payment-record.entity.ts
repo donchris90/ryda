@@ -58,6 +58,15 @@ export class PaymentRecord {
   @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
   refundedAmount: string | null;
 
+  // Reserved the moment a refund is requested (before Paystack is even
+  // called) and cleared once the refund.processed/refund.failed webhook
+  // confirms the outcome. Real Paystack refunds are usually asynchronous
+  // — this is what lets refundPayment() reject a second refund attempt
+  // while one is still in flight, instead of trusting `refundedAmount`
+  // alone, which wouldn't be updated yet.
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  pendingRefundAmount: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 

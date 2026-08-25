@@ -46,7 +46,9 @@ export class PaymentsController {
   @UseGuards(JwtAuthGuard)
   initCardAdd(@CurrentUser() user: User) {
     if (!user.email) {
-      throw new BadRequestException('Add an email to your account before adding a card');
+      throw new BadRequestException(
+        'Add an email to your account before adding a card',
+      );
     }
     return this.paymentsService.initCardAdd(user.id, user.email);
   }
@@ -59,7 +61,11 @@ export class PaymentsController {
 
   @Post('cards/:id/default')
   @UseGuards(JwtAuthGuard)
-  setDefaultCard(@CurrentUser() user: User, @Param('id') id: string, @Body() _dto: SetDefaultCardDto) {
+  setDefaultCard(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @Body() _dto: SetDefaultCardDto,
+  ) {
     return this.paymentsService.setDefaultCard(user.id, id);
   }
 
@@ -121,13 +127,37 @@ export class PaymentsController {
 
     const event = JSON.parse(rawBody);
 
-    if (event.event === 'transfer.success' || event.event === 'transfer.failed' || event.event === 'transfer.reversed') {
+    if (
+      event.event === 'transfer.success' ||
+      event.event === 'transfer.failed' ||
+      event.event === 'transfer.reversed'
+    ) {
       const transferReference: string | undefined = event?.data?.reference;
       if (transferReference) {
         await this.withdrawalsService.handleTransferWebhook(
           transferReference,
           event.event === 'transfer.success',
-          event.event !== 'transfer.success' ? (event?.data?.failure_reason ?? `Paystack reported ${event.event}`) : undefined,
+          event.event !== 'transfer.success'
+            ? (event?.data?.failure_reason ??
+                `Paystack reported ${event.event}`)
+            : undefined,
+        );
+      }
+      return { received: true };
+    }
+
+    // Confirms (or fails) a refund previously reserved by
+    // PaymentsService.refundPayment() — most refunds come back
+    // pending/queued from that initial call and only actually resolve
+    // here, asynchronously, once Paystack finishes processing it.
+    if (event.event === 'refund.processed' || event.event === 'refund.failed') {
+      const transactionReference: string | undefined =
+        event?.data?.transaction?.reference ??
+        event?.data?.transaction_reference;
+      if (transactionReference) {
+        await this.paymentsService.handleRefundWebhook(
+          transactionReference,
+          event.event === 'refund.processed',
         );
       }
       return { received: true };
@@ -137,16 +167,29 @@ export class PaymentsController {
     if (!reference) return { received: true };
 
     if (event.event === 'charge.success') {
-      const record = await this.paymentsService.markSuccessFromWebhook(
+      const result = await this.paymentsService.markSuccessFromWebhook(
         reference,
         event.data.id?.toString() ?? reference,
       );
 
+      // A replayed/duplicate webhook delivery for an already-settled
+      // payment — every side effect below (wallet credit, card save +
+      // refund) must run at most once per payment, so skip them entirely
+      // on a replay rather than re-triggering them.
+      if (result?.alreadyProcessed) {
+        return { received: true };
+      }
+
+      const record = result?.record ?? null;
       const purpose = event.data.metadata?.purpose;
 
       if (record && purpose === 'wallet_topup') {
         await this.paymentsService.creditWalletFromTopUp(record);
-      } else if (record && record.rideId === null && event.data.authorization?.authorization_code) {
+      } else if (
+        record &&
+        record.rideId === null &&
+        event.data.authorization?.authorization_code
+      ) {
         // Card-verification charges (not tied to a ride) tokenize the card
         // and get silently refunded — the point was only to capture the
         // reusable authorization_code.
@@ -157,10 +200,15 @@ export class PaymentsController {
           event.data.authorization.card_type ?? null,
           event.data.authorization.bank ?? null,
         );
-        await this.paystack.refund({ transactionReference: reference }).catch(() => undefined);
+        await this.paystack
+          .refund({ transactionReference: reference })
+          .catch(() => undefined);
       }
     } else if (event.event === 'charge.failed') {
-      await this.paymentsService.markFailedFromWebhook(reference, 'Paystack reported charge.failed');
+      await this.paymentsService.markFailedFromWebhook(
+        reference,
+        'Paystack reported charge.failed',
+      );
     }
 
     return { received: true };

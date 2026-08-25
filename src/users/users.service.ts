@@ -70,12 +70,30 @@ export class UsersService {
   }
 
   async create(input: CreateUserInput): Promise<User> {
+    const role = input.role ?? UserRole.PASSENGER;
     const user = this.usersRepo.create({
       ...input,
-      role: input.role ?? UserRole.PASSENGER,
+      role,
+      roles: [role],
       referralCode: this.generateReferralCode(),
     });
     return this.usersRepo.save(user);
+  }
+
+  /**
+   * Adds an additional role to an existing account (e.g. a passenger
+   * becoming a driver too) without creating a new user row. Only called
+   * from an authenticated context (POST /auth/add-role) — never during
+   * unauthenticated registration, since that would let anyone graft a role
+   * onto someone else's account just by knowing their email.
+   */
+  async addRole(userId: string, role: UserRole): Promise<User> {
+    const user = await this.findById(userId);
+    if (!user.roles.includes(role)) {
+      user.roles = [...user.roles, role];
+      await this.usersRepo.save(user);
+    }
+    return user;
   }
 
   async markPhoneVerified(userId: string): Promise<void> {

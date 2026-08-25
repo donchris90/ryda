@@ -49,13 +49,18 @@ export class PaymentsService {
    * webhook confirms) and Paystack returns a reusable authorization_code
    * that subsequent rides charge directly with no redirect.
    */
-  async initCardAdd(userId: string, email: string): Promise<{ authorizationUrl: string; reference: string }> {
+  async initCardAdd(
+    userId: string,
+    email: string,
+  ): Promise<{ authorizationUrl: string; reference: string }> {
     if (!this.paystack.isConfigured()) {
       throw new BadRequestException(
         'Card payments are not available — PAYSTACK_SECRET_KEY is not configured on this server',
       );
     }
-    const amountKobo = this.config.get<number>('paystack.cardVerificationKobo')!;
+    const amountKobo = this.config.get<number>(
+      'paystack.cardVerificationKobo',
+    )!;
     const reference = `card-verify-${randomUUID()}`;
 
     await this.paymentsRepo.save(
@@ -93,12 +98,19 @@ export class PaymentsService {
    * charge.success — never here, and never based on anything the
    * client claims.
    */
-  async initWalletTopUp(userId: string, email: string, amount: number): Promise<{ authorizationUrl: string; reference: string }> {
+  async initWalletTopUp(
+    userId: string,
+    email: string,
+    amount: number,
+  ): Promise<{ authorizationUrl: string; reference: string }> {
     if (!this.paystack.isConfigured()) {
-      throw new BadRequestException('Wallet top-up is not available — PAYSTACK_SECRET_KEY is not configured on this server');
+      throw new BadRequestException(
+        'Wallet top-up is not available — PAYSTACK_SECRET_KEY is not configured on this server',
+      );
     }
     const minAmount = this.config.get<number>('wallet.minTopUpAmount')!;
-    if (amount < minAmount) throw new BadRequestException(`Minimum top-up amount is ₦${minAmount}.`);
+    if (amount < minAmount)
+      throw new BadRequestException(`Minimum top-up amount is ₦${minAmount}.`);
 
     const reference = `wallet-topup-${randomUUID()}`;
     await this.paymentsRepo.save(
@@ -151,13 +163,17 @@ export class PaymentsService {
     );
   }
 
-
   async listSavedCards(userId: string): Promise<SavedCard[]> {
-    return this.savedCardsRepo.find({ where: { userId }, order: { createdAt: 'DESC' } });
+    return this.savedCardsRepo.find({
+      where: { userId },
+      order: { createdAt: 'DESC' },
+    });
   }
 
   async setDefaultCard(userId: string, cardId: string): Promise<SavedCard> {
-    const card = await this.savedCardsRepo.findOne({ where: { id: cardId, userId } });
+    const card = await this.savedCardsRepo.findOne({
+      where: { id: cardId, userId },
+    });
     if (!card) throw new NotFoundException('Saved card not found');
 
     await this.savedCardsRepo.update({ userId }, { isDefault: false });
@@ -165,7 +181,10 @@ export class PaymentsService {
     return this.savedCardsRepo.save(card);
   }
 
-  async removeCard(userId: string, cardId: string): Promise<{ removed: boolean }> {
+  async removeCard(
+    userId: string,
+    cardId: string,
+  ): Promise<{ removed: boolean }> {
     const result = await this.savedCardsRepo.delete({ id: cardId, userId });
     return { removed: (result.affected ?? 0) > 0 };
   }
@@ -235,7 +254,10 @@ export class PaymentsService {
         metadata: { rideId, purpose: 'ride_payment' },
       });
 
-      record.status = result.status === 'success' ? PaymentStatus.SUCCESS : PaymentStatus.FAILED;
+      record.status =
+        result.status === 'success'
+          ? PaymentStatus.SUCCESS
+          : PaymentStatus.FAILED;
       record.gatewayReference = result.reference;
       if (record.status === PaymentStatus.FAILED) {
         // A genuine decline from Paystack, not a network error — retrying
@@ -271,7 +293,9 @@ export class PaymentsService {
       } catch (err) {
         lastError = err as Error;
         if (attempt < maxAttempts) {
-          await new Promise((resolve) => setTimeout(resolve, 300 * 2 ** (attempt - 1)));
+          await new Promise((resolve) =>
+            setTimeout(resolve, 300 * 2 ** (attempt - 1)),
+          );
         }
       }
     }
@@ -338,31 +362,165 @@ export class PaymentsService {
   // Refunds
   // ---------------------------------------------------------------------
 
-  async refundPayment(paymentId: string, amount?: number): Promise<PaymentRecord> {
-    const record = await this.paymentsRepo.findOne({ where: { id: paymentId } });
-    if (!record) throw new NotFoundException('Payment record not found');
-    if (record.status !== PaymentStatus.SUCCESS) {
-      throw new BadRequestException('Only a successfully settled payment can be refunded');
-    }
-    if (record.simulated) {
-      throw new ConflictException('Cannot refund a simulated (dev-mode) payment');
+  /**
+   * Refund integrity, end to end:
+   *
+   *  1. RESERVE (short transaction, row-locked): validate the request and
+   *     move `amount` into `pendingRefundAmount` — this is what makes a
+   *     second refund request fail cleanly ("already in progress") instead
+   *     of racing the first, and what caps total refunds at the original
+   *     payment amount even across concurrent requests.
+   *  2. CALL Paystack — deliberately *outside* the lock, so a slow network
+   *     call never holds a row lock on this payment.
+   *  3. RESOLVE: most Paystack refunds come back `pending`/`queued` from
+   *     the initial call and only actually complete when Paystack later
+   *     calls the `refund.processed` (or `refund.failed`) webhook — see
+   *     `finalizeRefund()`, which both this method and that webhook call
+   *     into. A refund that fails outright, or that Paystack confirms
+   *     synchronously, is resolved immediately instead of waiting on a
+   *     webhook that may never distinguish itself from "still pending".
+   */
+  async refundPayment(
+    paymentId: string,
+    amount?: number,
+  ): Promise<PaymentRecord> {
+    const { record, refundReference, requested } = await this.reserveRefund(
+      paymentId,
+      amount,
+    );
+
+    let result: { status: string };
+    try {
+      result = await this.paystack.refund({
+        transactionReference: record.reference,
+        amountKobo: Math.round(requested * 100),
+      });
+    } catch (err) {
+      // Paystack rejected/never got the request — release the reservation
+      // so the amount is refundable again, then surface the real error.
+      await this.finalizeRefund(refundReference, false, requested);
+      throw err;
     }
 
-    const amountKobo = amount ? Math.round(amount * 100) : undefined;
-    const result = await this.paystack.refund({
-      transactionReference: record.reference,
-      amountKobo,
+    const TERMINAL_SUCCESS = ['success', 'processed', 'reversed'];
+    const TERMINAL_FAILURE = ['failed', 'declined', 'reversed_failed'];
+
+    if (TERMINAL_SUCCESS.includes(result.status)) {
+      await this.finalizeRefund(refundReference, true, requested);
+    } else if (TERMINAL_FAILURE.includes(result.status)) {
+      await this.finalizeRefund(refundReference, false, requested);
+      throw new ConflictException(
+        `Paystack could not process this refund (status: ${result.status})`,
+      );
+    }
+    // Anything else (pending/queued, the common case for real refunds)
+    // is left reserved — finalizeRefund() runs again when the
+    // refund.processed/refund.failed webhook arrives.
+
+    return this.paymentsRepo.findOneOrFail({ where: { id: paymentId } });
+  }
+
+  /** Step 1 of refundPayment() — see the block comment there. */
+  private async reserveRefund(
+    paymentId: string,
+    amount?: number,
+  ): Promise<{
+    record: PaymentRecord;
+    refundReference: string;
+    requested: number;
+  }> {
+    return this.paymentsRepo.manager.transaction(async (manager) => {
+      const record = await manager.findOne(PaymentRecord, {
+        where: { id: paymentId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!record) throw new NotFoundException('Payment record not found');
+      if (
+        record.status !== PaymentStatus.SUCCESS &&
+        record.status !== PaymentStatus.PARTIALLY_REFUNDED
+      ) {
+        throw new BadRequestException(
+          'Only a successfully settled payment can be refunded',
+        );
+      }
+      if (record.simulated) {
+        throw new ConflictException(
+          'Cannot refund a simulated (dev-mode) payment',
+        );
+      }
+
+      const alreadyPending = parseFloat(record.pendingRefundAmount ?? '0');
+      if (alreadyPending > 0) {
+        throw new ConflictException(
+          'A refund for this payment is already in progress — wait for it to be confirmed before requesting another.',
+        );
+      }
+
+      const total = parseFloat(record.amount);
+      const alreadyRefunded = parseFloat(record.refundedAmount ?? '0');
+      const remaining = total - alreadyRefunded;
+      const requested = amount ?? remaining;
+
+      if (requested <= 0) {
+        throw new BadRequestException('Nothing left to refund on this payment');
+      }
+      // Cent-level rounding tolerance, not a loophole for real overage.
+      if (requested > remaining + 0.01) {
+        throw new BadRequestException(
+          `Refund of ${requested.toFixed(2)} exceeds the remaining refundable amount of ${remaining.toFixed(2)}`,
+        );
+      }
+
+      record.pendingRefundAmount = requested.toFixed(2);
+      const saved = await manager.save(record);
+      return { record: saved, refundReference: saved.reference, requested };
     });
+  }
 
-    const refundedSoFar = parseFloat(record.refundedAmount ?? '0') + (amount ?? parseFloat(record.amount));
-    record.refundedAmount = refundedSoFar.toFixed(2);
-    record.status =
-      refundedSoFar >= parseFloat(record.amount)
-        ? PaymentStatus.REFUNDED
-        : PaymentStatus.PARTIALLY_REFUNDED;
+  /**
+   * Step 3 of refundPayment(), and the handler for Paystack's
+   * refund.processed/refund.failed webhooks. Idempotent: if there's
+   * nothing reserved for this reference (already finalized, or a stray/
+   * duplicate webhook), it's a no-op rather than double-applying a refund.
+   */
+  private async finalizeRefund(
+    reference: string,
+    succeeded: boolean,
+    expectedAmount?: number,
+  ): Promise<void> {
+    await this.paymentsRepo.manager.transaction(async (manager) => {
+      const record = await manager.findOne(PaymentRecord, {
+        where: { reference },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!record) return;
 
-    void result;
-    return this.paymentsRepo.save(record);
+      const pending = parseFloat(record.pendingRefundAmount ?? '0');
+      if (pending <= 0) return; // nothing in flight — already resolved
+
+      const amount = expectedAmount ?? pending;
+
+      if (succeeded) {
+        const newRefunded = parseFloat(record.refundedAmount ?? '0') + amount;
+        record.refundedAmount = newRefunded.toFixed(2);
+        record.status =
+          newRefunded >= parseFloat(record.amount) - 0.01
+            ? PaymentStatus.REFUNDED
+            : PaymentStatus.PARTIALLY_REFUNDED;
+      } else {
+        record.failureReason = 'Paystack reported the refund as failed';
+      }
+      record.pendingRefundAmount = null;
+      await manager.save(record);
+    });
+  }
+
+  /** Called from the webhook controller on refund.processed/refund.failed. */
+  async handleRefundWebhook(
+    transactionReference: string,
+    succeeded: boolean,
+  ): Promise<void> {
+    await this.finalizeRefund(transactionReference, succeeded);
   }
 
   // ---------------------------------------------------------------------
@@ -373,20 +531,57 @@ export class PaymentsService {
     return this.paymentsRepo.findOne({ where: { reference } });
   }
 
-  async markSuccessFromWebhook(reference: string, gatewayReference: string): Promise<PaymentRecord | null> {
-    const record = await this.findByReference(reference);
-    if (!record) return null;
-    record.status = PaymentStatus.SUCCESS;
-    record.gatewayReference = gatewayReference;
-    const saved = await this.paymentsRepo.save(record);
+  /**
+   * Idempotent: Paystack retries webhook delivery on any non-2xx response,
+   * and duplicate delivery of the same event is documented, expected
+   * behaviour on their end (not just a theoretical edge case). Without a
+   * guard here, a replayed `charge.success` would re-run every side effect
+   * below a second time — most dangerously, crediting a wallet top-up
+   * twice for one payment.
+   *
+   * The transition is done under a row lock so two near-simultaneous
+   * deliveries of the same event can't both observe PENDING and both
+   * "win" the transition. `alreadyProcessed: true` tells the caller this
+   * was a replay — every side effect (wallet credit, event emission,
+   * card tokenization) must be skipped in that case.
+   */
+  async markSuccessFromWebhook(
+    reference: string,
+    gatewayReference: string,
+  ): Promise<{ record: PaymentRecord; alreadyProcessed: boolean } | null> {
+    const result = await this.paymentsRepo.manager.transaction(
+      async (manager) => {
+        const record = await manager.findOne(PaymentRecord, {
+          where: { reference },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!record) return null;
 
-    if (saved.rideId) {
-      this.events.emit('payment.confirmed', { rideId: saved.rideId, paymentRecordId: saved.id });
+        if (record.status === PaymentStatus.SUCCESS) {
+          return { record, alreadyProcessed: true as const };
+        }
+
+        record.status = PaymentStatus.SUCCESS;
+        record.gatewayReference = gatewayReference;
+        const saved = await manager.save(record);
+        return { record: saved, alreadyProcessed: false as const };
+      },
+    );
+
+    if (result && !result.alreadyProcessed && result.record.rideId) {
+      this.events.emit('payment.confirmed', {
+        rideId: result.record.rideId,
+        paymentRecordId: result.record.id,
+      });
     }
-    return saved;
+
+    return result;
   }
 
-  async markFailedFromWebhook(reference: string, reason: string): Promise<PaymentRecord | null> {
+  async markFailedFromWebhook(
+    reference: string,
+    reason: string,
+  ): Promise<PaymentRecord | null> {
     const record = await this.findByReference(reference);
     if (!record) return null;
     record.status = PaymentStatus.FAILED;
@@ -401,7 +596,9 @@ export class PaymentsService {
     cardType: string | null,
     bank: string | null,
   ): Promise<SavedCard> {
-    const existing = await this.savedCardsRepo.findOne({ where: { authorizationCode } });
+    const existing = await this.savedCardsRepo.findOne({
+      where: { authorizationCode },
+    });
     if (existing) return existing;
 
     const hasAnyCard = await this.savedCardsRepo.count({ where: { userId } });
@@ -421,7 +618,10 @@ export class PaymentsService {
   // ---------------------------------------------------------------------
 
   async findByRide(rideId: string): Promise<PaymentRecord[]> {
-    return this.paymentsRepo.find({ where: { rideId }, order: { createdAt: 'DESC' } });
+    return this.paymentsRepo.find({
+      where: { rideId },
+      order: { createdAt: 'DESC' },
+    });
   }
 
   async findForUser(userId: string, limit = 50): Promise<PaymentRecord[]> {
@@ -441,7 +641,15 @@ export class PaymentsService {
    * cast is needed here (unlike DriverProfile.userId, which turned out
    * to be a real uuid because of its @JoinColumn relation).
    */
-  async findAll(filter?: { status?: PaymentStatus; method?: PaymentMethod; search?: string }, page = 1, limit = 25) {
+  async findAll(
+    filter?: {
+      status?: PaymentStatus;
+      method?: PaymentMethod;
+      search?: string;
+    },
+    page = 1,
+    limit = 25,
+  ) {
     const qb = this.paymentsRepo
       .createQueryBuilder('payment')
       .leftJoin(User, 'payer', 'payer.id::text = payment.userId')
@@ -460,8 +668,10 @@ export class PaymentsService {
       .addSelect('payer.phone', 'payerPhone')
       .orderBy('payment.createdAt', 'DESC');
 
-    if (filter?.status) qb.andWhere('payment.status = :status', { status: filter.status });
-    if (filter?.method) qb.andWhere('payment.method = :method', { method: filter.method });
+    if (filter?.status)
+      qb.andWhere('payment.status = :status', { status: filter.status });
+    if (filter?.method)
+      qb.andWhere('payment.method = :method', { method: filter.method });
     if (filter?.search) {
       qb.andWhere(
         '(payer."firstName" ILIKE :search OR payer."lastName" ILIKE :search OR payer.phone ILIKE :search OR payment.reference ILIKE :search)',

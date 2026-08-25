@@ -11,17 +11,13 @@ export enum RideStatus {
   NO_DRIVER_FOUND = 'no_driver_found',
 }
 
+// Passenger ride categories, deliberately kept to two tiers per product
+// decision — haulage/bike-delivery needs are served by the separate
+// Logistics module (DeliveryVehicleType: bike/keke/car/van/pickup/truck),
+// not by adding more passenger-ride categories here.
 export enum RideCategory {
   ECONOMY = 'economy',
   COMFORT = 'comfort',
-  EXECUTIVE = 'executive',
-  XL = 'xl',
-  SUV = 'suv',
-  ELECTRIC = 'electric',
-  MOTORCYCLE = 'motorcycle',
-  TRICYCLE = 'tricycle',
-  TAXI = 'taxi',
-  LUXURY = 'luxury',
 }
 
 export enum PaymentMethod {

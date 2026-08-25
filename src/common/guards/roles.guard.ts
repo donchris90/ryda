@@ -15,6 +15,11 @@ export class RolesGuard implements CanActivate {
     if (!requiredRoles || requiredRoles.length === 0) return true;
 
     const { user } = context.switchToHttp().getRequest();
-    return requiredRoles.includes(user?.role);
+    // A user can hold multiple roles (e.g. passenger + driver on one
+    // account) — pass if ANY of their roles satisfies the requirement.
+    // Falls back to the single `role` field for safety if `roles` is
+    // ever missing (e.g. a stale cached object).
+    const userRoles: string[] = user?.roles ?? (user?.role ? [user.role] : []);
+    return requiredRoles.some((r) => userRoles.includes(r));
   }
 }

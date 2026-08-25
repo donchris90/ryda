@@ -12,12 +12,16 @@ export const SETTING_KEYS = {
   WALLET_MAX_BALANCE: 'wallet.maxBalance',
   MAINTENANCE_MODE: 'system.maintenanceMode',
   MAX_CASH_DEBT_BEFORE_RESTRICTION: 'wallet.maxCashDebtBeforeRestriction',
-  PRICING_BASE_FARE: 'pricing.baseFare',
   PRICING_PER_KM: 'pricing.perKm',
-  PRICING_PER_MINUTE: 'pricing.perMinute',
   PRICING_MINIMUM_FARE: 'pricing.minimumFare',
   PRICING_AIRPORT_FEE: 'pricing.airportFee',
   PRICING_NIGHT_MULTIPLIER: 'pricing.nightMultiplier',
+  // Tiered time-based fare: a flat price covers the first block of minutes,
+  // then a flat increment is added per additional block (whole or partial).
+  // Replaces the old flat baseFare + linear perMinute combination.
+  PRICING_TIER_MINUTES: 'pricing.tierMinutes',
+  PRICING_TIER_BASE_FARE: 'pricing.tierBaseFare',
+  PRICING_TIER_INCREMENT_FARE: 'pricing.tierIncrementFare',
   LOGISTICS_BASE_FARE: 'logistics.baseFare',
   LOGISTICS_PER_KM: 'logistics.perKm',
   LOGISTICS_PER_KG: 'logistics.perKg',

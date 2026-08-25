@@ -14,7 +14,11 @@ import { FareEstimateDto } from './dto/fare-estimate.dto';
 import { RequestRideDto } from './dto/request-ride.dto';
 import { CancelRideDto } from './dto/cancel-ride.dto';
 import { RateRideDto } from './dto/rate-ride.dto';
-import { RideStatus, PaymentMethod, CancelledBy } from '../common/enums/ride.enum';
+import {
+  RideStatus,
+  PaymentMethod,
+  CancelledBy,
+} from '../common/enums/ride.enum';
 import { DriversService, NearbyDriverResult } from '../drivers/drivers.service';
 import { DriverProfile } from '../drivers/entities/driver-profile.entity';
 import { VehiclesService } from '../vehicles/vehicles.service';
@@ -31,7 +35,10 @@ import { FleetService } from '../fleet/fleet.service';
 import { DispatchService } from '../dispatch/dispatch.service';
 import { PricingService } from '../ai/pricing.service';
 import { ReconciliationService } from '../reconciliation/reconciliation.service';
-import { SystemSettingsService, SETTING_KEYS } from '../settings/settings.service';
+import {
+  SystemSettingsService,
+  SETTING_KEYS,
+} from '../settings/settings.service';
 import { MetricsService } from '../observability/metrics.service';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectQueue } from '@nestjs/bullmq';
@@ -48,7 +55,10 @@ const STAFF_ROLES = [
 ];
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { TransactionCategory } from '../common/enums/transaction.enum';
-import { DriverAvailability, DriverApprovalStatus } from '../common/enums/driver-status.enum';
+import {
+  DriverAvailability,
+  DriverApprovalStatus,
+} from '../common/enums/driver-status.enum';
 import { doesVehicleMatchRideCategory } from '../common/ride-vehicle-match.util';
 
 export interface SelectableDriverResult {
@@ -118,15 +128,21 @@ export class RidesService {
     let scheduledAt: Date | null = null;
     if (dto.scheduledAt) {
       scheduledAt = new Date(dto.scheduledAt);
-      if (Number.isNaN(scheduledAt.getTime()) || scheduledAt.getTime() <= Date.now()) {
-        throw new BadRequestException('scheduledAt must be a valid future date/time');
+      if (
+        Number.isNaN(scheduledAt.getTime()) ||
+        scheduledAt.getTime() <= Date.now()
+      ) {
+        throw new BadRequestException(
+          'scheduledAt must be a valid future date/time',
+        );
       }
     }
 
     // Fail fast if the passenger picked corporate billing but isn't attached
     // to an active corporate account, rather than discovering it at settlement.
     if (paymentMethod === PaymentMethod.CORPORATE) {
-      const account = await this.corporateService.getAccountForEmployee(passengerId);
+      const account =
+        await this.corporateService.getAccountForEmployee(passengerId);
       if (!account) {
         throw new BadRequestException(
           'You are not linked to an active corporate account',
@@ -165,7 +181,10 @@ export class RidesService {
     });
 
     const savedRide = await this.ridesRepo.save(ride);
-    this.events.emit('ride.created', { rideId: savedRide.id, passengerId: savedRide.passengerId });
+    this.events.emit('ride.created', {
+      rideId: savedRide.id,
+      passengerId: savedRide.passengerId,
+    });
     this.metricsService.rideRequestsTotal.inc({ category: dto.category });
 
     if (dto.promoCode) {
@@ -191,7 +210,9 @@ export class RidesService {
       // Delayed job — fires shortly before the requested pickup time to
       // flip the ride to searching and kick off normal dispatch. Real
       // BullMQ delayed job, not a polling loop.
-      const leadMinutes = this.config.get<number>('dispatch.scheduledRideLeadMinutes')!;
+      const leadMinutes = this.config.get<number>(
+        'dispatch.scheduledRideLeadMinutes',
+      )!;
       const activateAt = scheduledAt.getTime() - leadMinutes * 60 * 1000;
       const delay = Math.max(0, activateAt - Date.now());
 
@@ -231,7 +252,9 @@ export class RidesService {
     // un-stick them once the ride itself is no longer active.
     const terminalStatuses = [RideStatus.CANCELLED, RideStatus.COMPLETED];
     if (terminalStatuses.includes(status) && ride.driverId) {
-      await this.driversService.setAvailability(ride.driverId, DriverAvailability.ONLINE).catch(() => undefined);
+      await this.driversService
+        .setAvailability(ride.driverId, DriverAvailability.ONLINE)
+        .catch(() => undefined);
     }
 
     return saved;
@@ -271,9 +294,14 @@ export class RidesService {
    * used by getDriverInfo/getPassengerInfo/getRoute, specifically for
    * the controller's direct "fetch one ride" endpoint.
    */
-  async getForUser(rideId: string, requesterId: string, requesterRole: UserRole): Promise<Ride> {
+  async getForUser(
+    rideId: string,
+    requesterId: string,
+    requesterRole: UserRole,
+  ): Promise<Ride> {
     const ride = await this.findById(rideId);
-    let isParticipant = ride.passengerId === requesterId || ride.driverId === requesterId;
+    let isParticipant =
+      ride.passengerId === requesterId || ride.driverId === requesterId;
     if (!isParticipant && requesterRole === UserRole.DRIVER) {
       // ride.driverId only gets set on acceptance — a driver viewing
       // their own offer screen (to see pickup/dropoff/fare *before*
@@ -281,7 +309,10 @@ export class RidesService {
       // all. Real bug found from a live report: this produced a 403 on
       // a completely valid, pending offer, surfacing as "Unable to load
       // this ride offer" for a driver who had every right to see it.
-      const pendingOffer = await this.dispatchService.getMyPendingOffer(rideId, requesterId);
+      const pendingOffer = await this.dispatchService.getMyPendingOffer(
+        rideId,
+        requesterId,
+      );
       isParticipant = !!pendingOffer;
     }
     const isStaff = STAFF_ROLES.includes(requesterRole);
@@ -300,7 +331,11 @@ export class RidesService {
    * joining User twice (once per role) rather than adding new service
    * dependencies just for names.
    */
-  async listForAdmin(filter?: { status?: RideStatus; search?: string }, page = 1, limit = 25) {
+  async listForAdmin(
+    filter?: { status?: RideStatus; search?: string },
+    page = 1,
+    limit = 25,
+  ) {
     const qb = this.ridesRepo
       .createQueryBuilder('ride')
       .leftJoin(User, 'passenger', 'passenger.id::text = ride.passengerId')
@@ -353,7 +388,11 @@ export class RidesService {
    * to the ride's own passenger (or staff) — not a general "look up any
    * driver" endpoint.
    */
-  async getDriverInfo(rideId: string, requesterId: string, requesterRole: UserRole) {
+  async getDriverInfo(
+    rideId: string,
+    requesterId: string,
+    requesterRole: UserRole,
+  ) {
     const ride = await this.findById(rideId);
 
     const isPassenger = ride.passengerId === requesterId;
@@ -367,7 +406,9 @@ export class RidesService {
     const [driverUser, driverProfile, vehicle] = await Promise.all([
       this.usersService.findById(ride.driverId),
       this.driversService.findByUserId(ride.driverId),
-      ride.vehicleId ? this.vehiclesService.findById(ride.vehicleId) : Promise.resolve(null),
+      ride.vehicleId
+        ? this.vehiclesService.findById(ride.vehicleId)
+        : Promise.resolve(null),
     ]);
 
     return {
@@ -400,7 +441,11 @@ export class RidesService {
    * call them. Same access pattern, same plain-phone caveat (no
    * telephony proxy in this deployment).
    */
-  async getPassengerInfo(rideId: string, requesterId: string, requesterRole: UserRole) {
+  async getPassengerInfo(
+    rideId: string,
+    requesterId: string,
+    requesterRole: UserRole,
+  ) {
     const ride = await this.findById(rideId);
 
     const isDriver = ride.driverId === requesterId;
@@ -420,7 +465,10 @@ export class RidesService {
   }
 
   /** Idempotent — returns the existing token if one was already generated for this ride. */
-  async getOrCreateShareToken(rideId: string, requesterId: string): Promise<{ shareToken: string }> {
+  async getOrCreateShareToken(
+    rideId: string,
+    requesterId: string,
+  ): Promise<{ shareToken: string }> {
     const ride = await this.findById(rideId);
     if (ride.passengerId !== requesterId) {
       throw new ForbiddenException('Only the passenger can share this ride');
@@ -456,7 +504,11 @@ export class RidesService {
       dropoffLat: ride.dropoffLat,
       dropoffLng: ride.dropoffLng,
       driver: driverInfo
-        ? { firstName: driverInfo.firstName, vehicle: driverInfo.vehicle, rating: driverInfo.rating }
+        ? {
+            firstName: driverInfo.firstName,
+            vehicle: driverInfo.vehicle,
+            rating: driverInfo.rating,
+          }
         : null,
     };
   }
@@ -474,7 +526,8 @@ export class RidesService {
   async getRoute(rideId: string, requesterId: string, requesterRole: UserRole) {
     const ride = await this.findById(rideId);
 
-    const isParticipant = ride.passengerId === requesterId || ride.driverId === requesterId;
+    const isParticipant =
+      ride.passengerId === requesterId || ride.driverId === requesterId;
     const isStaff = STAFF_ROLES.includes(requesterRole);
     if (!isParticipant && !isStaff) {
       throw new ForbiddenException("You don't have access to this ride");
@@ -499,7 +552,11 @@ export class RidesService {
    * for a feature that should stay opt-in extra assurance, not a new
    * failure mode for a driver who forgets to ask.
    */
-  async verifyPin(rideId: string, driverId: string, pin: string): Promise<{ verified: boolean }> {
+  async verifyPin(
+    rideId: string,
+    driverId: string,
+    pin: string,
+  ): Promise<{ verified: boolean }> {
     const ride = await this.findById(rideId);
     if (ride.driverId !== driverId) {
       throw new ForbiddenException("You're not the driver on this ride");
@@ -518,15 +575,22 @@ export class RidesService {
    * (`completeRide()`), which is already closed out by the time a tip
    * makes sense to add.
    */
-  async addTip(rideId: string, passengerId: string, amount: number): Promise<Ride> {
-    if (amount <= 0) throw new BadRequestException('Tip amount must be positive');
+  async addTip(
+    rideId: string,
+    passengerId: string,
+    amount: number,
+  ): Promise<Ride> {
+    if (amount <= 0)
+      throw new BadRequestException('Tip amount must be positive');
 
     const ride = await this.findById(rideId);
     if (ride.passengerId !== passengerId) {
       throw new ForbiddenException("You're not the passenger on this ride");
     }
     if (ride.status !== RideStatus.COMPLETED) {
-      throw new BadRequestException('You can only tip after the trip is completed');
+      throw new BadRequestException(
+        'You can only tip after the trip is completed',
+      );
     }
     if (!ride.driverId) {
       throw new BadRequestException('This ride has no driver to tip');
@@ -538,8 +602,20 @@ export class RidesService {
     const passengerWallet = await this.walletsService.getByUserId(passengerId);
     const driverWallet = await this.walletsService.getByUserId(ride.driverId);
 
-    await this.walletsService.debit(passengerWallet.id, amount, TransactionCategory.TIP_PAYMENT, ride.id, 'Driver tip');
-    await this.walletsService.credit(driverWallet.id, amount, TransactionCategory.TIP_RECEIVED, ride.id, 'Tip received');
+    await this.walletsService.debit(
+      passengerWallet.id,
+      amount,
+      TransactionCategory.TIP_PAYMENT,
+      ride.id,
+      'Driver tip',
+    );
+    await this.walletsService.credit(
+      driverWallet.id,
+      amount,
+      TransactionCategory.TIP_RECEIVED,
+      ride.id,
+      'Tip received',
+    );
 
     ride.tipAmount = amount.toFixed(2);
     return this.ridesRepo.save(ride);
@@ -581,7 +657,10 @@ export class RidesService {
    * Lists online, approved drivers near a ride's pickup point, nearest first.
    * Backs the dispatch console's "who's nearby" view (Smart Dispatch Engine).
    */
-  async findNearbyDrivers(rideId: string, radiusKm?: number): Promise<NearbyDriverResult[]> {
+  async findNearbyDrivers(
+    rideId: string,
+    radiusKm?: number,
+  ): Promise<NearbyDriverResult[]> {
     const ride = await this.findById(rideId);
     return this.driversService.findNearby(
       { lat: ride.pickupLat, lng: ride.pickupLng },
@@ -605,7 +684,9 @@ export class RidesService {
    * (already built, uses Directions when configured) is for, once
    * there's a single specific driver to route to.
    */
-  async findSelectableDrivers(rideId: string): Promise<SelectableDriverResult[]> {
+  async findSelectableDrivers(
+    rideId: string,
+  ): Promise<SelectableDriverResult[]> {
     const ride = await this.findById(rideId);
     const candidates = await this.driversService.findNearby(
       { lat: ride.pickupLat, lng: ride.pickupLng },
@@ -616,13 +697,23 @@ export class RidesService {
     const ASSUMED_AVG_SPEED_KMH = 28;
 
     const userIds = candidates.map((c) => c.userId);
-    const vehicleIds = candidates.map((c) => c.vehicleId).filter((v): v is string => !!v);
+    const vehicleIds = candidates
+      .map((c) => c.vehicleId)
+      .filter((v): v is string => !!v);
     const [users, vehicles] = await Promise.all([
       this.usersService.findByIds(userIds),
-      Promise.all(vehicleIds.map((id) => this.vehiclesService.findById(id).catch(() => null))),
+      Promise.all(
+        vehicleIds.map((id) =>
+          this.vehiclesService.findById(id).catch(() => null),
+        ),
+      ),
     ]);
     const userById = new Map(users.map((u) => [u.id, u]));
-    const vehicleById = new Map(vehicles.filter((v): v is NonNullable<typeof v> => !!v).map((v) => [v.id, v]));
+    const vehicleById = new Map(
+      vehicles
+        .filter((v): v is NonNullable<typeof v> => !!v)
+        .map((v) => [v.id, v]),
+    );
 
     return candidates
       .filter((c) => {
@@ -633,7 +724,9 @@ export class RidesService {
         // decide who gets shown to the passenger. A driver with no
         // active vehicle on file is excluded, not assumed to match -
         // same reasoning as the delivery vehicle matching fix.
-        return vehicle ? doesVehicleMatchRideCategory(vehicle, ride.category) : false;
+        return vehicle
+          ? doesVehicleMatchRideCategory(vehicle, ride.category)
+          : false;
       })
       .map((c) => {
         const user = userById.get(c.userId);
@@ -645,7 +738,10 @@ export class RidesService {
           rating: c.rating,
           level: c.level,
           distanceKm: c.distanceKm,
-          etaMinutes: Math.max(1, Math.round((c.distanceKm / ASSUMED_AVG_SPEED_KMH) * 60)),
+          etaMinutes: Math.max(
+            1,
+            Math.round((c.distanceKm / ASSUMED_AVG_SPEED_KMH) * 60),
+          ),
           vehicleMake: vehicle?.make ?? null,
           vehicleModel: vehicle?.model ?? null,
           vehicleColor: vehicle?.color ?? null,
@@ -662,11 +758,18 @@ export class RidesService {
    * one live offer per ride — the exclusivity check in acceptRide()
    * below depends on that being true.
    */
-  async selectDriver(rideId: string, passengerId: string, driverUserId: string): Promise<void> {
+  async selectDriver(
+    rideId: string,
+    passengerId: string,
+    driverUserId: string,
+  ): Promise<void> {
     const ride = await this.findById(rideId);
-    if (ride.passengerId !== passengerId) throw new ForbiddenException('This is not your ride');
+    if (ride.passengerId !== passengerId)
+      throw new ForbiddenException('This is not your ride');
     if (ride.status !== RideStatus.SEARCHING) {
-      throw new BadRequestException(`Cannot select a driver while the ride is ${ride.status}`);
+      throw new BadRequestException(
+        `Cannot select a driver while the ride is ${ride.status}`,
+      );
     }
 
     const driverProfile = await this.driversService.findByUserId(driverUserId);
@@ -674,7 +777,9 @@ export class RidesService {
       throw new BadRequestException('This driver is not currently available.');
     }
     if (driverProfile.availability !== DriverAvailability.ONLINE) {
-      throw new BadRequestException('This driver is no longer online — pick another from the list.');
+      throw new BadRequestException(
+        'This driver is no longer online — pick another from the list.',
+      );
     }
 
     await this.dispatchService.offerToSpecificDriver(rideId, driverUserId);
@@ -689,16 +794,25 @@ export class RidesService {
    * defensively, and superseding zero rows (e.g. the offer already
    * expired) is a harmless no-op, not an error worth surfacing.
    */
-  async withdrawCurrentOffer(rideId: string, passengerId: string): Promise<void> {
+  async withdrawCurrentOffer(
+    rideId: string,
+    passengerId: string,
+  ): Promise<void> {
     const ride = await this.findById(rideId);
-    if (ride.passengerId !== passengerId) throw new ForbiddenException('This is not your ride');
+    if (ride.passengerId !== passengerId)
+      throw new ForbiddenException('This is not your ride');
     await this.dispatchService.withdrawOffer(rideId);
   }
 
   async acceptRide(rideId: string, driverUserId: string): Promise<Ride> {
     const ride = await this.findById(rideId);
-    if (ride.status !== RideStatus.SEARCHING && ride.status !== RideStatus.REQUESTED) {
-      throw new BadRequestException(`Ride cannot be accepted from status ${ride.status}`);
+    if (
+      ride.status !== RideStatus.SEARCHING &&
+      ride.status !== RideStatus.REQUESTED
+    ) {
+      throw new BadRequestException(
+        `Ride cannot be accepted from status ${ride.status}`,
+      );
     }
 
     // If the passenger has a pending offer out to a specific driver,
@@ -707,10 +821,13 @@ export class RidesService {
     // deciding, which would defeat the entire point of letting the
     // passenger pick. No pending offer at all (nobody's been selected
     // yet) still allows the plain broadcast-accept path below.
-    const pendingOffer = await this.dispatchService.getPendingOfferForRide(rideId);
+    const pendingOffer =
+      await this.dispatchService.getPendingOfferForRide(rideId);
     if (pendingOffer) {
       if (pendingOffer.driverUserId !== driverUserId) {
-        throw new ForbiddenException('This ride is currently offered to another driver.');
+        throw new ForbiddenException(
+          'This ride is currently offered to another driver.',
+        );
       }
     } else if (await this.dispatchService.hasEverHadOffer(rideId)) {
       // An offer existed for this ride but isn't live anymore (expired,
@@ -718,7 +835,9 @@ export class RidesService {
       // for other drivers. Falling through to open acceptance here
       // would let the exact driver whose own offer just expired accept
       // anyway, which defeats the point of the exclusivity check above.
-      throw new BadRequestException('This offer is no longer available — ask the passenger to select a driver again.');
+      throw new BadRequestException(
+        'This offer is no longer available — ask the passenger to select a driver again.',
+      );
     }
     // else: this ride has never been offered to anyone at all — the
     // open broadcast-accept path (offerToNearestDriver(), kept but
@@ -737,9 +856,13 @@ export class RidesService {
     // path without ever appearing in a filtered list, so this needs
     // enforcing here too, not only at selection time.
     if (!driverProfile.activeVehicleId) {
-      throw new BadRequestException('You need an active vehicle on file to accept rides');
+      throw new BadRequestException(
+        'You need an active vehicle on file to accept rides',
+      );
     }
-    const acceptingVehicle = await this.vehiclesService.findById(driverProfile.activeVehicleId);
+    const acceptingVehicle = await this.vehiclesService.findById(
+      driverProfile.activeVehicleId,
+    );
     if (!doesVehicleMatchRideCategory(acceptingVehicle, ride.category)) {
       throw new BadRequestException(
         `Your registered vehicle doesn't match this ride's ${ride.category} category.`,
@@ -755,8 +878,12 @@ export class RidesService {
     // threshold an admin can adjust without a redeploy — see
     // SETTING_KEYS.MAX_CASH_DEBT_BEFORE_RESTRICTION.
     if (ride.paymentMethod === PaymentMethod.CASH) {
-      const maxDebt = await this.settingsService.getNumber(SETTING_KEYS.MAX_CASH_DEBT_BEFORE_RESTRICTION, 5000);
-      const { totalOwed } = await this.reconciliationService.getOutstandingBalance(driverUserId);
+      const maxDebt = await this.settingsService.getNumber(
+        SETTING_KEYS.MAX_CASH_DEBT_BEFORE_RESTRICTION,
+        5000,
+      );
+      const { totalOwed } =
+        await this.reconciliationService.getOutstandingBalance(driverUserId);
       if (parseFloat(totalOwed) >= maxDebt) {
         throw new BadRequestException(
           `You have ₦${totalOwed} in unpaid commission from cash trips — pay this down or top up your wallet before accepting another cash ride.`,
@@ -764,13 +891,41 @@ export class RidesService {
       }
     }
 
-    ride.driverId = driverUserId;
-    ride.vehicleId = driverProfile.activeVehicleId;
-    ride.status = RideStatus.ACCEPTED;
-    ride.acceptedAt = new Date();
-    await this.driversService.setAvailability(driverUserId, DriverAvailability.ON_TRIP);
+    // Atomic, conditional transition — not a read-modify-write. Every
+    // check above was against a snapshot read, so without a WHERE clause
+    // on status here, two drivers who both pass those checks concurrently
+    // would both plainly `.save()` the same row and the second write
+    // would silently clobber the first (last-write-wins, no error to
+    // either driver). Scoping the UPDATE to `status IN (SEARCHING,
+    // REQUESTED)` means only whichever request's UPDATE commits first
+    // can actually match — the loser's `affected` count comes back 0.
+    const updateResult = await this.ridesRepo
+      .createQueryBuilder()
+      .update(Ride)
+      .set({
+        driverId: driverUserId,
+        vehicleId: driverProfile.activeVehicleId,
+        status: RideStatus.ACCEPTED,
+        acceptedAt: new Date(),
+      })
+      .where('id = :id', { id: rideId })
+      .andWhere('status IN (:...statuses)', {
+        statuses: [RideStatus.SEARCHING, RideStatus.REQUESTED],
+      })
+      .execute();
 
-    const saved = await this.ridesRepo.save(ride);
+    if (updateResult.affected !== 1) {
+      throw new BadRequestException(
+        'This ride was just accepted by another driver.',
+      );
+    }
+
+    await this.driversService.setAvailability(
+      driverUserId,
+      DriverAvailability.ON_TRIP,
+    );
+
+    const saved = await this.findById(rideId);
 
     const driver = await this.usersService.findById(driverUserId);
     this.events.emit('ride.accepted', {
@@ -782,7 +937,9 @@ export class RidesService {
     // supersedes any other pending offers for this ride. Works the same
     // whether this driver came in via a dispatch offer or the plain
     // broadcast-accept path.
-    await this.dispatchService.markAccepted(rideId, driverUserId).catch(() => undefined);
+    await this.dispatchService
+      .markAccepted(rideId, driverUserId)
+      .catch(() => undefined);
 
     return saved;
   }
@@ -790,7 +947,9 @@ export class RidesService {
   async markArrived(rideId: string, driverUserId: string): Promise<Ride> {
     const ride = await this.getOwnedByDriver(rideId, driverUserId);
     if (ride.status !== RideStatus.ACCEPTED) {
-      throw new BadRequestException('Ride must be accepted before marking arrival');
+      throw new BadRequestException(
+        'Ride must be accepted before marking arrival',
+      );
     }
     ride.status = RideStatus.ARRIVED;
     ride.arrivedAt = new Date();
@@ -806,22 +965,36 @@ export class RidesService {
 
   async startRide(rideId: string, driverUserId: string): Promise<Ride> {
     const ride = await this.getOwnedByDriver(rideId, driverUserId);
-    if (ride.status !== RideStatus.ARRIVED && ride.status !== RideStatus.ACCEPTED) {
-      throw new BadRequestException('Ride must be accepted/arrived before starting');
+    if (
+      ride.status !== RideStatus.ARRIVED &&
+      ride.status !== RideStatus.ACCEPTED
+    ) {
+      throw new BadRequestException(
+        'Ride must be accepted/arrived before starting',
+      );
     }
     ride.status = RideStatus.IN_PROGRESS;
     ride.startedAt = new Date();
 
     if (ride.arrivedAt) {
-      const waitingFee = this.fareService.calculateWaitingFee(ride.arrivedAt, ride.startedAt);
+      const waitingFee = this.fareService.calculateWaitingFee(
+        ride.arrivedAt,
+        ride.startedAt,
+      );
       if (waitingFee > 0) {
         ride.waitingFee = waitingFee.toFixed(2);
-        ride.totalFare = this.round(parseFloat(ride.totalFare) + waitingFee).toFixed(2);
+        ride.totalFare = this.round(
+          parseFloat(ride.totalFare) + waitingFee,
+        ).toFixed(2);
       }
     }
 
     const saved = await this.ridesRepo.save(ride);
-    this.events.emit('ride.started', { rideId: saved.id, driverId: driverUserId, passengerId: ride.passengerId });
+    this.events.emit('ride.started', {
+      rideId: saved.id,
+      driverId: driverUserId,
+      passengerId: ride.passengerId,
+    });
     return saved;
   }
 
@@ -846,7 +1019,8 @@ export class RidesService {
 
     const driverProfile = await this.driversService.findByUserId(driverUserId);
     const vehicleCategory = driverProfile.activeVehicleId
-      ? (await this.vehiclesService.findById(driverProfile.activeVehicleId)).category
+      ? (await this.vehiclesService.findById(driverProfile.activeVehicleId))
+          .category
       : undefined;
 
     const commissionPercent =
@@ -871,7 +1045,9 @@ export class RidesService {
 
     try {
       if (ride.paymentMethod === PaymentMethod.WALLET) {
-        const passengerWallet = await this.walletsService.getByUserId(ride.passengerId);
+        const passengerWallet = await this.walletsService.getByUserId(
+          ride.passengerId,
+        );
         await this.walletsService.debit(
           passengerWallet.id,
           totalFare,
@@ -879,7 +1055,12 @@ export class RidesService {
           ride.id,
           `Ride payment for trip ${ride.id}`,
         );
-        await this.creditDriverEarnings(ride, driverProfile, driverEarnings, commissionPercent);
+        await this.creditDriverEarnings(
+          ride,
+          driverProfile,
+          driverEarnings,
+          commissionPercent,
+        );
       } else if (ride.paymentMethod === PaymentMethod.CASH) {
         // Fleet drivers still collect cash directly, but the commission they
         // owe comes out of the fleet's wallet, not their personal one — the
@@ -890,12 +1071,22 @@ export class RidesService {
         // blocking a driver from finishing a trip over an accounting gap.
         if (driverProfile.fleetCompanyId) {
           try {
-            await this.fleetService.debitFleetCommission(driverProfile.fleetCompanyId, commissionAmount, ride.id);
+            await this.fleetService.debitFleetCommission(
+              driverProfile.fleetCompanyId,
+              commissionAmount,
+              ride.id,
+            );
           } catch {
-            await this.reconciliationService.recordDebt(null, driverProfile.fleetCompanyId, ride.id, commissionAmount);
+            await this.reconciliationService.recordDebt(
+              null,
+              driverProfile.fleetCompanyId,
+              ride.id,
+              commissionAmount,
+            );
           }
         } else {
-          const driverWallet = await this.walletsService.getByUserId(driverUserId);
+          const driverWallet =
+            await this.walletsService.getByUserId(driverUserId);
           try {
             await this.walletsService.debit(
               driverWallet.id,
@@ -905,7 +1096,12 @@ export class RidesService {
               `Commission owed on cash trip ${ride.id} (${commissionPercent}%)`,
             );
           } catch {
-            await this.reconciliationService.recordDebt(driverUserId, null, ride.id, commissionAmount);
+            await this.reconciliationService.recordDebt(
+              driverUserId,
+              null,
+              ride.id,
+              commissionAmount,
+            );
           }
         }
         ride.earningsSettled = true;
@@ -913,7 +1109,9 @@ export class RidesService {
       } else if (ride.paymentMethod === PaymentMethod.CARD) {
         const passenger = await this.usersService.findById(ride.passengerId);
         if (!passenger.email) {
-          throw new BadRequestException('Add an email to your account before paying by card');
+          throw new BadRequestException(
+            'Add an email to your account before paying by card',
+          );
         }
         const payment = await this.paymentsService.chargeSavedCard(
           ride.id,
@@ -922,28 +1120,58 @@ export class RidesService {
           totalFare,
         );
         if (payment.status !== PaymentStatus.SUCCESS) {
-          const reason = payment.failureReason ?? 'Card payment failed — trip cannot be completed';
-          this.events.emit('payment.failed', { userId: ride.passengerId, reason });
+          const reason =
+            payment.failureReason ??
+            'Card payment failed — trip cannot be completed';
+          this.events.emit('payment.failed', {
+            userId: ride.passengerId,
+            reason,
+          });
           throw new BadRequestException(reason);
         }
         // Synchronous charge — settle immediately, same as wallet.
-        await this.creditDriverEarnings(ride, driverProfile, driverEarnings, commissionPercent);
+        await this.creditDriverEarnings(
+          ride,
+          driverProfile,
+          driverEarnings,
+          commissionPercent,
+        );
       } else if (ride.paymentMethod === PaymentMethod.BANK_TRANSFER) {
         const passenger = await this.usersService.findById(ride.passengerId);
         if (!passenger.email) {
-          throw new BadRequestException('Add an email to your account before paying by bank transfer');
+          throw new BadRequestException(
+            'Add an email to your account before paying by bank transfer',
+          );
         }
         // Asynchronous — driver earnings are NOT credited yet. See
         // handlePaymentConfirmed(), triggered by the Paystack webhook once
         // the transfer actually lands.
-        await this.paymentsService.initBankTransfer(ride.id, ride.passengerId, passenger.email, totalFare);
+        await this.paymentsService.initBankTransfer(
+          ride.id,
+          ride.passengerId,
+          passenger.email,
+          totalFare,
+        );
       } else if (ride.paymentMethod === PaymentMethod.CORPORATE) {
-        const account = await this.corporateService.getAccountForEmployee(ride.passengerId);
+        const account = await this.corporateService.getAccountForEmployee(
+          ride.passengerId,
+        );
         if (!account) {
-          throw new BadRequestException('Passenger is not linked to a corporate account');
+          throw new BadRequestException(
+            'Passenger is not linked to a corporate account',
+          );
         }
-        await this.corporateService.debitForRide(account.id, totalFare, ride.id);
-        await this.creditDriverEarnings(ride, driverProfile, driverEarnings, commissionPercent);
+        await this.corporateService.debitForRide(
+          account.id,
+          totalFare,
+          ride.id,
+        );
+        await this.creditDriverEarnings(
+          ride,
+          driverProfile,
+          driverEarnings,
+          commissionPercent,
+        );
       }
     } catch (err) {
       // Real bug found from a live report: without this, a payment
@@ -966,9 +1194,19 @@ export class RidesService {
     }
 
     await this.driversService.recordTripOutcome(driverProfile.id, 'completed');
-    await this.driversService.setAvailability(driverUserId, DriverAvailability.ONLINE);
-    await this.passengersService.recordTripOutcome(ride.passengerId, 'completed', totalFare);
-    await this.promotionsService.settleCashbackForRide(ride.id, ride.passengerId);
+    await this.driversService.setAvailability(
+      driverUserId,
+      DriverAvailability.ONLINE,
+    );
+    await this.passengersService.recordTripOutcome(
+      ride.passengerId,
+      'completed',
+      totalFare,
+    );
+    await this.promotionsService.settleCashbackForRide(
+      ride.id,
+      ride.passengerId,
+    );
     await this.promotionsService.grantReferralBonusIfEligible(ride.passengerId);
 
     this.events.emit('ride.completed', {
@@ -976,7 +1214,9 @@ export class RidesService {
       driverId: driverUserId,
       totalFare: ride.totalFare,
     });
-    this.metricsService.rideCompletionsTotal.inc({ paymentMethod: ride.paymentMethod });
+    this.metricsService.rideCompletionsTotal.inc({
+      paymentMethod: ride.paymentMethod,
+    });
 
     return ride;
   }
@@ -995,9 +1235,15 @@ export class RidesService {
     commissionPercent: number,
   ): Promise<void> {
     if (driverProfile.fleetCompanyId) {
-      await this.fleetService.creditForRideEarning(driverProfile.fleetCompanyId, driverEarnings, ride.id);
+      await this.fleetService.creditForRideEarning(
+        driverProfile.fleetCompanyId,
+        driverEarnings,
+        ride.id,
+      );
     } else {
-      const driverWallet = await this.walletsService.getByUserId(driverProfile.userId);
+      const driverWallet = await this.walletsService.getByUserId(
+        driverProfile.userId,
+      );
       await this.walletsService.credit(
         driverWallet.id,
         driverEarnings,
@@ -1017,9 +1263,15 @@ export class RidesService {
    * completeRide() doesn't settle synchronously.
    */
   @OnEvent('payment.confirmed')
-  async handlePaymentConfirmed(payload: { rideId: string; paymentRecordId: string }): Promise<void> {
-    const ride = await this.ridesRepo.findOne({ where: { id: payload.rideId } });
-    if (!ride || ride.earningsSettled || !ride.driverId || !ride.driverEarnings) return;
+  async handlePaymentConfirmed(payload: {
+    rideId: string;
+    paymentRecordId: string;
+  }): Promise<void> {
+    const ride = await this.ridesRepo.findOne({
+      where: { id: payload.rideId },
+    });
+    if (!ride || ride.earningsSettled || !ride.driverId || !ride.driverEarnings)
+      return;
     if (ride.paymentMethod !== PaymentMethod.BANK_TRANSFER) return;
 
     const driverProfile = await this.driversService.findByUserId(ride.driverId);
@@ -1039,7 +1291,10 @@ export class RidesService {
   ): Promise<Ride> {
     const ride = await this.findById(rideId);
 
-    if (cancelledBy === CancelledBy.PASSENGER && ride.passengerId !== actorUserId) {
+    if (
+      cancelledBy === CancelledBy.PASSENGER &&
+      ride.passengerId !== actorUserId
+    ) {
       throw new ForbiddenException('Not your ride');
     }
     if (cancelledBy === CancelledBy.DRIVER && ride.driverId !== actorUserId) {
@@ -1049,7 +1304,9 @@ export class RidesService {
       ride.status === RideStatus.COMPLETED ||
       ride.status === RideStatus.CANCELLED
     ) {
-      throw new BadRequestException(`Ride cannot be cancelled from status ${ride.status}`);
+      throw new BadRequestException(
+        `Ride cannot be cancelled from status ${ride.status}`,
+      );
     }
 
     if (ride.status === RideStatus.SCHEDULED) {
@@ -1081,7 +1338,9 @@ export class RidesService {
       // settlement but not wired up yet (see Known gaps).
       const fee = await this.fareService.getCancellationFee();
       try {
-        const passengerWallet = await this.walletsService.getByUserId(ride.passengerId);
+        const passengerWallet = await this.walletsService.getByUserId(
+          ride.passengerId,
+        );
         await this.walletsService.debit(
           passengerWallet.id,
           fee,
@@ -1091,11 +1350,19 @@ export class RidesService {
         );
         ride.cancellationFee = fee.toFixed(2);
 
-        const driverProfile = await this.driversService.findByUserId(ride.driverId);
+        const driverProfile = await this.driversService.findByUserId(
+          ride.driverId,
+        );
         if (driverProfile.fleetCompanyId) {
-          await this.fleetService.creditForRideEarning(driverProfile.fleetCompanyId, fee, ride.id);
+          await this.fleetService.creditForRideEarning(
+            driverProfile.fleetCompanyId,
+            fee,
+            ride.id,
+          );
         } else {
-          const driverWallet = await this.walletsService.getByUserId(ride.driverId);
+          const driverWallet = await this.walletsService.getByUserId(
+            ride.driverId,
+          );
           await this.walletsService.credit(
             driverWallet.id,
             fee,
@@ -1114,16 +1381,31 @@ export class RidesService {
     await this.ridesRepo.save(ride);
 
     if (ride.driverId) {
-      const driverProfile = await this.driversService.findByUserId(ride.driverId);
-      await this.driversService.recordTripOutcome(driverProfile.id, 'cancelled');
-      await this.driversService.setAvailability(ride.driverId, DriverAvailability.ONLINE);
+      const driverProfile = await this.driversService.findByUserId(
+        ride.driverId,
+      );
+      await this.driversService.recordTripOutcome(
+        driverProfile.id,
+        'cancelled',
+      );
+      await this.driversService.setAvailability(
+        ride.driverId,
+        DriverAvailability.ONLINE,
+      );
     }
-    await this.passengersService.recordTripOutcome(ride.passengerId, 'cancelled');
+    await this.passengersService.recordTripOutcome(
+      ride.passengerId,
+      'cancelled',
+    );
 
     // Notify whichever party DIDN'T do the cancelling.
-    const notifyUserId = cancelledBy === CancelledBy.PASSENGER ? ride.driverId : ride.passengerId;
+    const notifyUserId =
+      cancelledBy === CancelledBy.PASSENGER ? ride.driverId : ride.passengerId;
     if (notifyUserId) {
-      this.events.emit('ride.cancelled', { notifyUserId, reason: ride.cancelReason });
+      this.events.emit('ride.cancelled', {
+        notifyUserId,
+        reason: ride.cancelReason,
+      });
     }
     this.metricsService.rideCancellationsTotal.inc({ cancelledBy });
 
@@ -1131,16 +1413,22 @@ export class RidesService {
   }
 
   /** Passenger rates the driver after a completed trip. */
-  async rateDriver(rideId: string, passengerUserId: string, dto: RateRideDto): Promise<Ride> {
+  async rateDriver(
+    rideId: string,
+    passengerUserId: string,
+    dto: RateRideDto,
+  ): Promise<Ride> {
     const ride = await this.findById(rideId);
-    if (ride.passengerId !== passengerUserId) throw new ForbiddenException('Not your ride');
+    if (ride.passengerId !== passengerUserId)
+      throw new ForbiddenException('Not your ride');
     if (ride.status !== RideStatus.COMPLETED) {
       throw new BadRequestException('Can only rate a completed ride');
     }
     if (ride.driverRating != null) {
       throw new BadRequestException('This ride has already been rated');
     }
-    if (!ride.driverId) throw new BadRequestException('This ride has no driver to rate');
+    if (!ride.driverId)
+      throw new BadRequestException('This ride has no driver to rate');
 
     ride.driverRating = dto.rating;
     ride.driverRatingComment = dto.comment ?? null;
@@ -1153,7 +1441,11 @@ export class RidesService {
   }
 
   /** Driver rates the passenger after a completed trip. */
-  async ratePassenger(rideId: string, driverUserId: string, dto: RateRideDto): Promise<Ride> {
+  async ratePassenger(
+    rideId: string,
+    driverUserId: string,
+    dto: RateRideDto,
+  ): Promise<Ride> {
     const ride = await this.getOwnedByDriver(rideId, driverUserId);
     if (ride.status !== RideStatus.COMPLETED) {
       throw new BadRequestException('Can only rate a completed ride');
@@ -1171,7 +1463,10 @@ export class RidesService {
     return ride;
   }
 
-  private async getOwnedByDriver(rideId: string, driverUserId: string): Promise<Ride> {
+  private async getOwnedByDriver(
+    rideId: string,
+    driverUserId: string,
+  ): Promise<Ride> {
     const ride = await this.findById(rideId);
     if (ride.driverId !== driverUserId) {
       throw new ForbiddenException('Not your ride');

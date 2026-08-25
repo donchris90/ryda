@@ -3,10 +3,10 @@ import { VehicleCategory } from '../common/enums/vehicle.enum';
 
 /**
  * Strict, not permissive (unlike delivery vehicle matching) - a
- * passenger choosing "Executive" is choosing a specific experience,
- * not just asking for enough capacity, so a random car showing up for
- * it would defeat the entire point of offering the category. Economy
- * and Comfort both map to the same "car" registration - there's no
+ * passenger choosing "Comfort" is choosing a specific experience, not
+ * just asking for enough capacity, so a random car showing up for it
+ * would defeat the entire point of offering the category. Economy and
+ * Comfort both map to the same "car" registration - there's no
  * dedicated vehicle tier distinguishing them in what a driver actually
  * registers, and that's a real limitation of the current data model,
  * not an oversight here specifically.
@@ -14,15 +14,22 @@ import { VehicleCategory } from '../common/enums/vehicle.enum';
 const RIDE_CATEGORY_TO_VEHICLE_CATEGORY: Record<RideCategory, VehicleCategory> = {
   [RideCategory.ECONOMY]: VehicleCategory.CAR,
   [RideCategory.COMFORT]: VehicleCategory.CAR,
-  [RideCategory.EXECUTIVE]: VehicleCategory.LUXURY,
-  [RideCategory.XL]: VehicleCategory.VAN,
-  [RideCategory.SUV]: VehicleCategory.SUV,
-  [RideCategory.ELECTRIC]: VehicleCategory.EV,
-  [RideCategory.MOTORCYCLE]: VehicleCategory.MOTORCYCLE,
-  [RideCategory.TRICYCLE]: VehicleCategory.TRICYCLE,
-  [RideCategory.TAXI]: VehicleCategory.TAXI,
-  [RideCategory.LUXURY]: VehicleCategory.LUXURY,
 };
+
+// TypeScript's Record<K, V> typing does not reliably enforce
+// completeness when an object literal uses computed enum-member keys
+// ([RideCategory.X]: ...) rather than plain string literals - a real
+// gap found and fixed once already on this exact file, when
+// RideCategory briefly had 10 values and this only had 2. Kept as a
+// cheap, real safeguard even now that RideCategory is back down to 2,
+// so a future addition to the enum can't silently repeat that mistake.
+for (const category of Object.values(RideCategory)) {
+  if (!(category in RIDE_CATEGORY_TO_VEHICLE_CATEGORY)) {
+    throw new Error(
+      `RIDE_CATEGORY_TO_VEHICLE_CATEGORY is missing an entry for RideCategory.${category} - every ride category must map to a required vehicle category, or rides booked with it will silently never match a driver.`,
+    );
+  }
+}
 
 /**
  * True if a vehicle can serve a given ride category - either through

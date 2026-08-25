@@ -15,7 +15,9 @@ import * as Joi from 'joi';
  * a clear message at boot.
  */
 export const envValidationSchema = Joi.object({
-  NODE_ENV: Joi.string().valid('development', 'test', 'production').default('development'),
+  NODE_ENV: Joi.string()
+    .valid('development', 'test', 'production')
+    .default('development'),
   PORT: Joi.number().default(3000),
 
   DB_HOST: Joi.string().optional(),
@@ -33,7 +35,10 @@ export const envValidationSchema = Joi.object({
   REDIS_URL: Joi.string().optional(),
 }).unknown(true); // this project reads many more env vars directly via ConfigService — don't reject those
 
-const INSECURE_DEFAULTS = ['dev-access-secret-change-me', 'dev-refresh-secret-change-me'];
+const INSECURE_DEFAULTS = [
+  'dev-access-secret-change-me',
+  'dev-refresh-secret-change-me',
+];
 
 /**
  * The one check that's actually worth hard-failing on: booting in
@@ -43,13 +48,61 @@ const INSECURE_DEFAULTS = ['dev-access-secret-change-me', 'dev-refresh-secret-ch
  * accidentally block a legitimate deployment the way a broad `.required()`
  * schema would.
  */
-export function assertProductionSecretsAreSet(nodeEnv: string, accessSecret: string, refreshSecret: string): void {
+export function assertProductionSecretsAreSet(
+  nodeEnv: string,
+  accessSecret: string,
+  refreshSecret: string,
+): void {
   if (nodeEnv !== 'production') return;
 
-  if (INSECURE_DEFAULTS.includes(accessSecret) || INSECURE_DEFAULTS.includes(refreshSecret)) {
+  if (
+    INSECURE_DEFAULTS.includes(accessSecret) ||
+    INSECURE_DEFAULTS.includes(refreshSecret)
+  ) {
     throw new Error(
       'Refusing to start with NODE_ENV=production while JWT_ACCESS_SECRET/JWT_REFRESH_SECRET ' +
         'are still set to their insecure development defaults. Set real secrets via env vars.',
+    );
+  }
+}
+
+/**
+ * Local disk storage means driver documents, chat attachments, etc. live
+ * on the container's own (usually ephemeral, single-instance) filesystem —
+ * fine for local dev, a real problem in production: files vanish on
+ * redeploy, and there's nothing to genuinely protect them beyond
+ * whatever the app itself enforces. If `STORAGE_DRIVER` is set to `s3`
+ * or `r2` but the required credentials for that driver aren't actually
+ * present, `StorageService` would silently fall back to local disk
+ * instead of failing loudly — refuse to boot in that situation instead.
+ */
+export function assertProductionStorageIsConfigured(
+  nodeEnv: string,
+  driver: string,
+  s3Configured: boolean,
+  r2Configured: boolean,
+): void {
+  if (nodeEnv !== 'production') return;
+
+  if (driver === 'local') {
+    throw new Error(
+      'Refusing to start with NODE_ENV=production while STORAGE_DRIVER=local. ' +
+        'Set STORAGE_DRIVER=s3 or STORAGE_DRIVER=r2 with real credentials — local disk storage ' +
+        "doesn't survive a redeploy and isn't an acceptable place to keep driver documents in production.",
+    );
+  }
+  if (driver === 's3' && !s3Configured) {
+    throw new Error(
+      'Refusing to start with NODE_ENV=production while STORAGE_DRIVER=s3 but S3 credentials ' +
+        '(S3_BUCKET/S3_ACCESS_KEY_ID/S3_SECRET_ACCESS_KEY) are not fully set — StorageService would ' +
+        'otherwise silently fall back to local disk.',
+    );
+  }
+  if (driver === 'r2' && !r2Configured) {
+    throw new Error(
+      'Refusing to start with NODE_ENV=production while STORAGE_DRIVER=r2 but R2 credentials ' +
+        '(R2_ACCOUNT_ID/R2_BUCKET/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY) are not fully set — ' +
+        'StorageService would otherwise silently fall back to local disk.',
     );
   }
 }

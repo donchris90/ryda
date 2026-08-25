@@ -4,7 +4,11 @@ import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
-import { assertProductionSecretsAreSet } from './config/env.validation';
+import {
+  assertProductionSecretsAreSet,
+  assertProductionStorageIsConfigured,
+} from './config/env.validation';
+import { StorageService } from './storage/storage.service';
 
 async function bootstrap() {
   // Buffer Nest's bootstrap logs until the real pino logger
@@ -24,7 +28,34 @@ async function bootstrap() {
     config.get('jwt.refreshSecret')!,
   );
 
-  app.enableCors();
+  const storage = app.get(StorageService);
+  assertProductionStorageIsConfigured(
+    config.get('nodeEnv')!,
+    storage.configuredDriver(),
+    storage.isS3Configured(),
+    storage.isR2Configured(),
+  );
+
+  const corsOrigins = config.get<string[]>('corsOrigins')!;
+  if (config.get('nodeEnv') === 'production') {
+    if (corsOrigins.length === 0) {
+      // Same "refuse to boot" pattern as the JWT-secret and storage
+      // checks above — an unrestricted app.enableCors() in production
+      // means literally any website can call this API with a logged-in
+      // user's browser credentials. Fail loudly rather than silently
+      // wide open.
+      throw new Error(
+        'Refusing to start with NODE_ENV=production and no CORS_ORIGINS set. ' +
+          'Set CORS_ORIGINS to a comma-separated list of your admin/partner web app origins ' +
+          '(mobile apps are unaffected by CORS either way).',
+      );
+    }
+    app.enableCors({ origin: corsOrigins, credentials: true });
+  } else {
+    // Local/staging convenience — every web frontend during development
+    // runs from an unpredictable localhost port.
+    app.enableCors();
+  }
 
   app.setGlobalPrefix('api/v1', {
     // Email verification and password reset links are generated

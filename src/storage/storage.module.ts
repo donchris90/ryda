@@ -1,12 +1,20 @@
 import { Module } from '@nestjs/common';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { StorageService } from './storage.service';
 import { StorageController } from './storage.controller';
 import { LocalDiskProvider } from './providers/local-disk.provider';
 import { S3Provider } from './providers/s3.provider';
 import { CloudflareR2Provider } from './providers/cloudflare-r2.provider';
+import { DriverDocument } from '../drivers/entities/driver-document.entity';
 
 @Module({
-  providers: [StorageService, LocalDiskProvider, S3Provider, CloudflareR2Provider],
+  imports: [TypeOrmModule.forFeature([DriverDocument])],
+  providers: [
+    StorageService,
+    LocalDiskProvider,
+    S3Provider,
+    CloudflareR2Provider,
+  ],
   controllers: [StorageController],
   exports: [StorageService],
 })
