@@ -7,6 +7,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import { RideCategory, RideStatus, PaymentMethod, CancelledBy } from '../../common/enums/ride.enum';
+import { DispatchMode } from '../../candidate-search/candidate-search.types';
 
 @Entity('rides')
 export class Ride {
@@ -30,6 +31,17 @@ export class Ride {
   @Index()
   @Column({ type: 'enum', enum: RideStatus, default: RideStatus.REQUESTED })
   status: RideStatus;
+
+  // Chosen at request time. MANUAL (default, existing behavior): the ride
+  // sits SEARCHING until the passenger picks a driver themselves via
+  // POST /rides/:id/select-driver. AUTO: AutoDispatchService offers the
+  // ride to the best-ranked eligible candidate automatically, moving to
+  // the next candidate on decline/timeout. Both modes read from the same
+  // shared CandidateSearchService/DriverRankingService pipeline — see
+  // candidate-search.types.ts's DispatchMode doc comment for why this
+  // must never branch matching logic on which mode a ride is in.
+  @Column({ type: 'enum', enum: DispatchMode, default: DispatchMode.MANUAL })
+  dispatchMode: DispatchMode;
 
   @Column('double precision')
   pickupLat: number;

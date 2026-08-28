@@ -168,6 +168,35 @@ export default () => ({
       process.env.SCHEDULED_RIDE_LEAD_MINUTES ?? '10',
       10,
     ),
+    // Progressive-radius search bounds for the shared live-driver
+    // candidate engine (see live-driver-index/ and, once built, the
+    // candidate-search service). Defaults intentionally preserve the
+    // existing DriversService.findNearby() 8km behavior so introducing
+    // this config doesn't change production matching radius on its own.
+    initialRadiusKm: parseFloat(process.env.DISPATCH_INITIAL_RADIUS_KM ?? '8'),
+    maxRadiusKm: parseFloat(process.env.DISPATCH_MAX_RADIUS_KM ?? '15'),
+    // How far each progressive-expansion round widens the search by.
+    // Default of 4 reproduces the exact 0-8/8-12/12-15 rounds requested
+    // as the migration-safe starting behavior, purely from the
+    // initial/max/step combination rather than a hardcoded round list.
+    radiusStepKm: parseFloat(process.env.DISPATCH_RADIUS_STEP_KM ?? '4'),
+    // Max raw candidates pulled from the Redis GEO index per round,
+    // before eligibility filtering. Bounds the PostgreSQL lookup in
+    // CandidateSearchService.applyEligibility() to a small, fixed set —
+    // never a full online-driver scan.
+    candidateFetchLimit: parseInt(process.env.DISPATCH_CANDIDATE_LIMIT ?? '50', 10),
+    // How many of the (already distance-sorted) eligible candidates get a
+    // real routing-API call during ranking. Kept small on purpose — see
+    // the cost requirement doc comment in DriverRankingService.rank().
+    etaCandidateLimit: parseInt(process.env.DISPATCH_ETA_CANDIDATE_LIMIT ?? '8', 10),
+  },
+  driverLocation: {
+    // How old a driver's last GPS fix can be before the live-driver index
+    // stops returning them as a dispatch candidate. Matches the value
+    // DriversService.findNearby() already hardcodes (2 minutes), kept
+    // here so the new index and the legacy Postgres scan agree until the
+    // legacy path is retired.
+    staleSeconds: parseInt(process.env.DRIVER_LOCATION_STALE_SECONDS ?? '120', 10),
   },
   logistics: {
     baseFare: parseFloat(process.env.LOGISTICS_BASE_FARE ?? '300'),

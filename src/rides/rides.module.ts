@@ -23,6 +23,8 @@ import { SettingsModule } from '../settings/settings.module';
 import { FeatureFlagsModule } from '../feature-flags/feature-flags.module';
 import { ReconciliationModule } from '../reconciliation/reconciliation.module';
 import { ObservabilityModule } from '../observability/observability.module';
+import { CandidateSearchModule } from '../candidate-search/candidate-search.module';
+import { RankingModule } from '../ranking/ranking.module';
 
 @Module({
   imports: [
@@ -45,6 +47,8 @@ import { ObservabilityModule } from '../observability/observability.module';
     BullModule.registerQueue({ name: 'scheduled-rides' }),
     ReconciliationModule,
     ObservabilityModule,
+    CandidateSearchModule,
+    RankingModule,
   ],
   providers: [RidesService, FareService, ScheduledRideProcessor],
   controllers: [RidesController],

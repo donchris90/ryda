@@ -17,6 +17,9 @@ import { PaymentsModule } from '../payments/payments.module';
 import { FeatureFlagsModule } from '../feature-flags/feature-flags.module';
 import { ReconciliationModule } from '../reconciliation/reconciliation.module';
 import { SettingsModule } from '../settings/settings.module';
+import { CandidateSearchModule } from '../candidate-search/candidate-search.module';
+import { RankingModule } from '../ranking/ranking.module';
+import { ObservabilityModule } from '../observability/observability.module';
 
 @Module({
   imports: [
@@ -32,6 +35,15 @@ import { SettingsModule } from '../settings/settings.module';
     FeatureFlagsModule,
     ReconciliationModule,
     SettingsModule,
+    // Batch 7: courier matching reuses the exact same shared live-driver
+    // index + candidate discovery + ETA ranking pipeline rides use — see
+    // LogisticsService.requestDelivery()/acceptDelivery() and
+    // candidate-search.types.ts's DispatchDomain doc comment for why
+    // courier must never grow its own parallel driver-search
+    // implementation.
+    CandidateSearchModule,
+    RankingModule,
+    ObservabilityModule,
   ],
   providers: [LogisticsService, DeliveryVehicleTypesService],
   controllers: [LogisticsController, DeliveryVehicleTypesController, AdminDeliveryVehicleTypesController],

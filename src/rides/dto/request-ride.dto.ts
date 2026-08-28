@@ -1,6 +1,7 @@
 import { IsBoolean, IsDateString, IsEnum, IsNumber, IsOptional, IsString } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { RideCategory, PaymentMethod } from '../../common/enums/ride.enum';
+import { DispatchMode } from '../../candidate-search/candidate-search.types';
 
 export class RequestRideDto {
   @IsEnum(RideCategory)
@@ -48,4 +49,14 @@ export class RequestRideDto {
   @IsOptional()
   @IsDateString()
   scheduledAt?: string;
+
+  @ApiPropertyOptional({
+    enum: DispatchMode,
+    description:
+      'MANUAL (default): ride stays "searching" until the passenger picks a driver from GET /rides/:id/selectable-drivers. ' +
+      'AUTO: the system automatically offers the ride to the best-ranked eligible driver, moving to the next one on decline/timeout.',
+  })
+  @IsOptional()
+  @IsEnum(DispatchMode)
+  dispatchMode?: DispatchMode;
 }

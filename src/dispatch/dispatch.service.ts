@@ -142,12 +142,34 @@ export class DispatchService {
     );
   }
 
-  /** Driver explicitly declines their offer — the passenger picks someone else themselves, no automatic reassignment. */
+  /**
+   * Driver explicitly declines their offer. For a MANUAL ride this is the
+   * end of it — the passenger picks someone else themselves, no automatic
+   * reassignment. For an AUTO ride, AutoDispatchService listens for this
+   * event and moves on to the next best-ranked candidate; this method
+   * itself stays mode-agnostic and just does the bookkeeping + event, the
+   * same as it always has.
+   */
   async markDeclined(rideId: string, driverUserId: string): Promise<void> {
-    await this.offersRepo.update(
+    const result = await this.offersRepo.update(
       { rideId, driverUserId, status: RideOfferStatus.PENDING },
       { status: RideOfferStatus.DECLINED },
     );
+    if (result.affected) {
+      this.events.emit('ride.offer.declined', { rideId, driverUserId });
+    }
+  }
+
+  /**
+   * All driver ids ever offered this ride, regardless of outcome
+   * (pending/accepted/declined/expired/superseded). AutoDispatchService
+   * uses this to build its exclude list so it never offers the same
+   * driver twice for the same ride, satisfying "do not repeatedly select
+   * the same driver" without AUTO needing its own tracking table.
+   */
+  async getTriedDriverUserIds(rideId: string): Promise<string[]> {
+    const offers = await this.offersRepo.find({ where: { rideId } });
+    return [...new Set(offers.map((o) => o.driverUserId))];
   }
 
   /**
@@ -157,21 +179,32 @@ export class DispatchService {
    * earlier selection that expired or was declined), so there's always
    * at most one live offer per ride — the exclusivity check in
    * RidesService.acceptRide() depends on that invariant holding.
+   *
+   * Both current callers — MANUAL's RidesService.selectDriver() and
+   * AUTO's AutoDispatchService — already have this driver's distance from
+   * the shared CandidateSearchService result they just computed, so they
+   * pass it in directly. `distanceKm` is only left optional, with the
+   * legacy findNearby() scan as a fallback, for callers that predate the
+   * shared pipeline; nothing on the current hot path should hit that scan.
    */
-  async offerToSpecificDriver(rideId: string, driverUserId: string): Promise<RideOffer> {
+  async offerToSpecificDriver(rideId: string, driverUserId: string, distanceKm?: number): Promise<RideOffer> {
     await this.offersRepo.update(
       { rideId, status: RideOfferStatus.PENDING },
       { status: RideOfferStatus.SUPERSEDED },
     );
 
     const ride = await this.ridesRepo.findOne({ where: { id: rideId } });
-    let distanceKm = 0;
-    if (ride) {
-      const candidates = await this.driversService.findNearby(
-        { lat: ride.pickupLat, lng: ride.pickupLng },
-        { limit: 20 },
-      );
-      distanceKm = candidates.find((c) => c.userId === driverUserId)?.distanceKm ?? 0;
+    let resolvedDistanceKm = distanceKm;
+    if (resolvedDistanceKm === undefined) {
+      if (ride) {
+        const candidates = await this.driversService.findNearby(
+          { lat: ride.pickupLat, lng: ride.pickupLng },
+          { limit: 20 },
+        );
+        resolvedDistanceKm = candidates.find((c) => c.userId === driverUserId)?.distanceKm ?? 0;
+      } else {
+        resolvedDistanceKm = 0;
+      }
     }
 
     const timeoutSeconds = this.config.get<number>('dispatch.offerTimeoutSeconds')!;
@@ -179,7 +212,7 @@ export class DispatchService {
       this.offersRepo.create({
         rideId,
         driverUserId,
-        distanceKm,
+        distanceKm: resolvedDistanceKm,
         expiresAt: new Date(Date.now() + timeoutSeconds * 1000),
       }),
     );
@@ -197,7 +230,7 @@ export class DispatchService {
       driverUserId,
       rideId,
       pickupAddress: ride?.pickupAddress ?? '',
-      distanceKm,
+      distanceKm: resolvedDistanceKm,
       timeoutSeconds,
     });
     this.metricsService.dispatchOffersTotal.inc();
@@ -253,13 +286,22 @@ export class DispatchService {
   lastSweepAt: Date | null = null;
 
   /**
-   * Periodic sweep: expires offers past their deadline. Used to
-   * auto-reassign to the next-nearest driver here too — that's exactly
-   * the "system silently picks a different driver instead of the
-   * passenger" behavior this feature was rebuilt to remove. Now it only
-   * does the expiry bookkeeping; the passenger's app polls/detects the
-   * expired offer and shows them the driver list again to choose
-   * themselves.
+   * Periodic sweep: expires offers past their deadline. This method
+   * itself only ever does the expiry bookkeeping — it deliberately does
+   * NOT decide who to reassign to. What happens after an offer expires
+   * depends entirely on the ride's own dispatchMode, and that decision
+   * belongs to whoever owns that mode's behavior:
+   *
+   *   - MANUAL: nothing further happens here. The passenger's app
+   *     polls/detects the expired offer and shows them the driver list
+   *     again to choose themselves — silently picking a different driver
+   *     for them is exactly the behavior this feature was rebuilt to
+   *     remove (see the class doc comment above).
+   *   - AUTO: AutoDispatchService listens for the 'ride.offer.expired'
+   *     event emitted below and offers the ride to the next best-ranked
+   *     candidate. It re-checks the ride's current status/dispatchMode
+   *     itself before doing anything, so this sweep doesn't need to know
+   *     which rides are AUTO — it just reports every expiry uniformly.
    */
   @Interval(15000)
   async expireStaleOffersAndReassign(): Promise<void> {
@@ -274,5 +316,13 @@ export class DispatchService {
       offer.status = RideOfferStatus.EXPIRED;
     }
     await this.offersRepo.save(stale);
+
+    // offer_timeout_rate (batch 9): every offer that times out unanswered,
+    // MANUAL or AUTO alike — divide against dispatchOffersTotal in PromQL.
+    this.metricsService.dispatchOfferTimeoutsTotal.inc(stale.length);
+
+    for (const offer of stale) {
+      this.events.emit('ride.offer.expired', { rideId: offer.rideId, driverUserId: offer.driverUserId });
+    }
   }
 }

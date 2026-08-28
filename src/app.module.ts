@@ -54,6 +54,9 @@ import { ChatModule } from './chat/chat.module';
 import { SplitFareModule } from './split-fare/split-fare.module';
 import { LoyaltyModule } from './loyalty/loyalty.module';
 import { MaintenanceModeGuard } from './admin-tools/maintenance-mode.guard';
+import { LiveDriverIndexModule } from './live-driver-index/live-driver-index.module';
+import { CandidateSearchModule } from './candidate-search/candidate-search.module';
+import { RankingModule } from './ranking/ranking.module';
 
 @Module({
   imports: [
@@ -140,6 +143,9 @@ import { MaintenanceModeGuard } from './admin-tools/maintenance-mode.guard';
     ChatModule,
     SplitFareModule,
     LoyaltyModule,
+    LiveDriverIndexModule,
+    CandidateSearchModule,
+    RankingModule,
   ],
   controllers: [AppController],
   providers: [

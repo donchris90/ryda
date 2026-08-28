@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull } from 'typeorm';
+import { Repository, IsNull, EntityManager } from 'typeorm';
 import { DriverProfile } from './entities/driver-profile.entity';
 import { DriverAvailabilityLog } from './entities/driver-availability-log.entity';
 import { DriverLevel } from '../common/enums/driver-level.enum';
@@ -192,9 +192,105 @@ export class DriversService {
       } else if (availability === DriverAvailability.OFFLINE) {
         this.events.emit('driver.offline', { driverUserId: userId });
       }
+
+      // Generic transition event, additive alongside the two above
+      // (which webhooks.service.ts dispatches externally and shouldn't
+      // be touched). This is what the live-driver index listens to —
+      // it needs every transition, not just online/offline, since
+      // ON_TRIP and BREAK also need to pull a driver out of the
+      // dispatch-candidate pool.
+      this.events.emit('driver.availability.changed', {
+        driverUserId: userId,
+        driverProfileId: saved.id,
+        previous,
+        availability,
+        vehicleId: saved.activeVehicleId,
+        lat: saved.currentLat,
+        lng: saved.currentLng,
+        locationUpdatedAt: saved.locationUpdatedAt,
+      });
     }
 
     return saved;
+  }
+
+  /**
+   * Atomically transitions a driver from ONLINE to ON_TRIP, scoped to the
+   * given transaction manager. This is the actual driver-level lock: the
+   * WHERE clause on `availability = ONLINE` means that if two concurrent
+   * bookings (two rides, or a ride and a delivery) both try to claim the
+   * same driver, only one UPDATE can match — the other gets `affected: 0`
+   * and must fail its booking rather than silently proceeding. Without
+   * this, checking `driverProfile.availability === ONLINE` as a plain
+   * read before assigning (the previous behavior) leaves a window where
+   * both concurrent callers pass the check before either writes.
+   *
+   * Must be called from inside the *same* transaction that atomically
+   * claims the ride/delivery row itself — that's what makes the driver
+   * claim and the booking claim succeed or roll back together. A booking
+   * claim that fails after this succeeds must roll the whole transaction
+   * back, or the driver would be left ON_TRIP with no trip.
+   *
+   * Deliberately does not emit `driver.availability.changed` — see
+   * emitReservedForTrip() below.
+   */
+  async reserveOnlineDriverForTrip(manager: EntityManager, userId: string): Promise<DriverProfile> {
+    const result = await manager
+      .createQueryBuilder()
+      .update(DriverProfile)
+      .set({ availability: DriverAvailability.ON_TRIP })
+      .where('userId = :userId', { userId })
+      .andWhere('availability = :online', { online: DriverAvailability.ONLINE })
+      .execute();
+
+    if (result.affected !== 1) {
+      throw new BadRequestException(
+        'Driver is no longer available — they may already be on another trip.',
+      );
+    }
+
+    // Same shift-history bookkeeping setAvailability() does, run through
+    // the transaction's manager so it commits/rolls back with everything
+    // else rather than as a separate, unprotected write.
+    const open = await manager.findOne(DriverAvailabilityLog, {
+      where: { driverUserId: userId, endedAt: IsNull() },
+      order: { startedAt: 'DESC' },
+    });
+    if (open) {
+      open.endedAt = new Date();
+      await manager.save(open);
+    }
+    await manager.save(
+      manager.create(DriverAvailabilityLog, {
+        driverUserId: userId,
+        status: DriverAvailability.ON_TRIP,
+      }),
+    );
+
+    return manager.findOneOrFail(DriverProfile, { where: { userId } });
+  }
+
+  /**
+   * Emits the same `driver.availability.changed` event setAvailability()
+   * would have, for a reservation performed via
+   * reserveOnlineDriverForTrip(). Call this only after the transaction
+   * that called reserveOnlineDriverForTrip() has actually committed —
+   * emitting earlier would tell the live-driver index to remove a driver
+   * who, if the transaction then rolled back (e.g. the ride was claimed
+   * by someone else a moment later), never actually left ONLINE from
+   * PostgreSQL's point of view.
+   */
+  emitReservedForTrip(profile: DriverProfile): void {
+    this.events.emit('driver.availability.changed', {
+      driverUserId: profile.userId,
+      driverProfileId: profile.id,
+      previous: DriverAvailability.ONLINE,
+      availability: DriverAvailability.ON_TRIP,
+      vehicleId: profile.activeVehicleId,
+      lat: profile.currentLat,
+      lng: profile.currentLng,
+      locationUpdatedAt: profile.locationUpdatedAt,
+    });
   }
 
   async setActiveVehicle(userId: string, vehicleId: string): Promise<DriverProfile> {
@@ -232,8 +328,21 @@ export class DriversService {
 
     // Decoupled the same way notifications/payments are — the tracking
     // module listens for this rather than DriversService knowing anything
-    // about websockets or route history.
-    this.events.emit('driver.location.updated', { driverUserId: userId, lat, lng, at: now });
+    // about websockets or route history. availability/approvalStatus/
+    // driverProfileId/vehicleId are additive fields for the live-driver
+    // index (see live-driver-index/) — existing consumers (LocationService,
+    // GeofenceService) only ever destructured driverUserId/lat/lng/at and
+    // are unaffected by the extra fields.
+    this.events.emit('driver.location.updated', {
+      driverUserId: userId,
+      lat,
+      lng,
+      at: now,
+      availability: saved.availability,
+      approvalStatus: saved.approvalStatus,
+      driverProfileId: saved.id,
+      vehicleId: saved.activeVehicleId,
+    });
 
     return saved;
   }

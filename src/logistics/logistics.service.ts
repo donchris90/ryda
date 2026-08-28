@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -33,6 +34,10 @@ import { ReconciliationService } from '../reconciliation/reconciliation.service'
 import { SystemSettingsService, SETTING_KEYS } from '../settings/settings.service';
 import { DeliveryVehicleTypesService } from './delivery-vehicle-types.service';
 import { canVehicleCoverDelivery } from '../common/vehicle-capacity-match.util';
+import { CandidateSearchService } from '../candidate-search/candidate-search.service';
+import { DispatchDomain, DispatchMode } from '../candidate-search/candidate-search.types';
+import { DriverRankingService } from '../ranking/ranking.service';
+import { MetricsService } from '../observability/metrics.service';
 
 export interface DeliveryFareBreakdown {
   baseFare: number;
@@ -45,6 +50,8 @@ export interface DeliveryFareBreakdown {
 
 @Injectable()
 export class LogisticsService {
+  private readonly logger = new Logger(LogisticsService.name);
+
   constructor(
     @InjectRepository(DeliveryOrder)
     private readonly ordersRepo: Repository<DeliveryOrder>,
@@ -60,7 +67,10 @@ export class LogisticsService {
     private readonly reconciliationService: ReconciliationService,
     private readonly settingsService: SystemSettingsService,
     private readonly vehicleTypesService: DeliveryVehicleTypesService,
+    private readonly candidateSearchService: CandidateSearchService,
+    private readonly driverRankingService: DriverRankingService,
     private readonly events: EventEmitter2,
+    private readonly metrics: MetricsService,
   ) {}
 
   async estimateFare(dto: EstimateDeliveryDto): Promise<DeliveryFareBreakdown> {
@@ -173,41 +183,66 @@ export class LogisticsService {
     // any-driver-can-accept model (no targeted offer like rides have),
     // which meant nobody was ever told a new delivery even existed. A
     // driver would only discover one by manually checking the list.
-    const nearbyDrivers = await this.driversService.findNearby(
-      { lat: dto.pickupLat, lng: dto.pickupLng },
-      { limit: 10 },
-    );
+    //
+    // Uses the exact same shared pipeline rides use —
+    // CandidateSearchService (Redis-backed live driver index ->
+    // eligibility -> progressive radius) and DriverRankingService (road-
+    // ETA ranking) — rather than the legacy findNearby() Postgres scan
+    // this used to call directly. That scan is also what used to do the
+    // vehicle-capability filtering by hand here; CandidateSearchService's
+    // COURIER-domain eligibility already does the identical
+    // canVehicleCoverDelivery() check internally, so there's no separate
+    // filtering step left to duplicate.
+    //
+    // `mode` doesn't map cleanly onto courier's broadcast-and-first-
+    // accept-wins model (there's no passenger driver-picking step the
+    // way MANUAL rides have) — AUTO is used since, like AUTO rides,
+    // nothing here waits for a human to choose a specific driver before
+    // notifying.
+    const searchOutcome = await this.candidateSearchService.search({
+      pickup: { lat: dto.pickupLat, lng: dto.pickupLng },
+      domain: DispatchDomain.COURIER,
+      mode: DispatchMode.AUTO,
+      deliveryVehicleType: saved.vehicleType,
+      minCandidates: 1,
+      limit: 10,
+    });
 
-    // Second real gap, found separately: vehicleType only ever affected
-    // pricing/weight limits, never who actually got notified - a car
-    // driver could be offered a "bike" delivery. Filter to drivers whose
-    // registered vehicle can genuinely cover the requested type,
-    // permissively (a bigger vehicle can cover a smaller request, not
-    // the reverse). Drivers with no active vehicle on file are skipped
-    // rather than assumed compatible - notifying someone about a
-    // delivery they structurally can't fulfil isn't better than not
-    // notifying them at all.
-    const requestedType = saved.vehicleType;
-    const capableDrivers = (
-      await Promise.all(
-        nearbyDrivers.map(async (d) => {
-          if (!d.vehicleId) return null;
-          try {
-            const vehicle = await this.vehiclesService.findById(d.vehicleId);
-            return canVehicleCoverDelivery(vehicle.category, requestedType) ? d : null;
-          } catch {
-            return null;
-          }
-        }),
-      )
-    ).filter((d): d is NonNullable<typeof d> => d !== null);
+    if (searchOutcome.candidates.length > 0) {
+      // Ranked by ETA (best first) purely so whichever notification
+      // channel consumes this list (push batching, in-app ordering)
+      // can surface the most useful drivers first — the actual
+      // acceptance is still first-to-call-acceptDelivery()-wins, this
+      // doesn't reserve or target anyone the way a ride offer does.
+      const rankingOutcome = await this.driverRankingService.rank(
+        { lat: dto.pickupLat, lng: dto.pickupLng },
+        searchOutcome.candidates,
+      );
 
-    if (capableDrivers.length > 0) {
       this.events.emit('delivery.requested', {
-        driverUserIds: capableDrivers.map((d) => d.userId),
+        driverUserIds: rankingOutcome.ranked.map((c) => c.driverUserId),
         deliveryId: saved.id,
         pickupAddress: dto.pickupAddress,
       });
+
+      // Structured dispatch log (batch 9) — same shape AUTO ride
+      // dispatch already logs, for the courier notify step.
+      this.logger.log(
+        `COURIER notify: deliveryId=${saved.id} dispatchMode=auto pickup=(${dto.pickupLat.toFixed(4)},${dto.pickupLng.toFixed(4)}) ` +
+          `finalRadiusKm=${searchOutcome.radiusUsedKm} candidateCount=${rankingOutcome.ranked.length} selectedDriver=broadcast_first_accept_wins selectionReason=eta_ranked_notify_order`,
+      );
+    } else {
+      // courier_no_driver_rate's numerator (batch 9) — divide against
+      // total delivery requests. Mirrors autoDispatchNoDriverFoundTotal's
+      // role for rides; courier has no NO_DRIVER_FOUND status of its own
+      // to key off (the order just sits in SEARCHING for the customer to
+      // cancel or retry), so this is tracked here at the request step
+      // rather than via a status transition.
+      this.metrics.courierDispatchNoDriverFoundTotal.inc();
+      this.logger.warn(
+        `COURIER notify: deliveryId=${saved.id} dispatchMode=auto pickup=(${dto.pickupLat.toFixed(4)},${dto.pickupLng.toFixed(4)}) ` +
+          `finalRadiusKm=${searchOutcome.radiusUsedKm} candidateCount=0 — no eligible driver found, order left in ${saved.status}`,
+      );
     }
 
     return saved;
@@ -256,12 +291,34 @@ export class LogisticsService {
     return order;
   }
 
+  /**
+   * First driver to call this wins — deliveries stay a broadcast/first-
+   * accept-wins model, unlike rides' targeted single-offer flow, so
+   * there's no equivalent to RidesService's offer-exclusivity check
+   * here. What there IS an equivalent of is the driver-level reservation
+   * race rides had before it was fixed: two concurrent accept calls for
+   * the same driver — two deliveries, or a delivery and a ride — must
+   * not both succeed.
+   *
+   * reserveOnlineDriverForTrip() is the same atomic, conditional
+   * ONLINE->ON_TRIP UPDATE rides.service.ts's acceptRide() uses, run
+   * inside the same transaction as this delivery's own atomic claim.
+   * Because it's the exact same method operating on the exact same
+   * driver_profiles.availability column, a driver mid-accept on a ride
+   * cannot simultaneously be accepted onto a delivery, and vice versa —
+   * there's only one lock, shared by both domains, not two separate ones
+   * that could each think they'd won.
+   */
   async acceptDelivery(orderId: string, driverUserId: string): Promise<DeliveryOrder> {
     const order = await this.findById(orderId);
     if (order.status !== DeliveryStatus.SEARCHING && order.status !== DeliveryStatus.REQUESTED) {
       throw new BadRequestException(`Delivery cannot be accepted from status ${order.status}`);
     }
 
+    // Read-only pre-checks for a clear, specific error message before
+    // opening a transaction — the real, race-proof enforcement of
+    // "driver must actually still be ONLINE" is reserveOnlineDriverForTrip()'s
+    // conditional UPDATE below, not this snapshot read.
     const driverProfile = await this.driversService.findByUserId(driverUserId);
     if (driverProfile.approvalStatus !== DriverApprovalStatus.APPROVED) {
       throw new ForbiddenException('Driver is not approved');
@@ -269,11 +326,6 @@ export class LogisticsService {
     if (driverProfile.availability !== DriverAvailability.ONLINE) {
       throw new BadRequestException('Driver must be online to accept deliveries');
     }
-
-    // Defense in depth, not just filtered notifications - a driver
-    // could still discover a delivery outside the notification (e.g. a
-    // general "available deliveries" list), so this needs to be
-    // enforced here too, not only at the notify step.
     if (!driverProfile.activeVehicleId) {
       throw new BadRequestException('You need an active vehicle on file to accept deliveries');
     }
@@ -284,13 +336,41 @@ export class LogisticsService {
       );
     }
 
-    order.driverId = driverUserId;
-    order.vehicleId = driverProfile.activeVehicleId;
-    order.status = DeliveryStatus.ACCEPTED;
-    order.acceptedAt = new Date();
-    await this.driversService.setAvailability(driverUserId, DriverAvailability.ON_TRIP);
+    const { saved, reservedProfile } = await this.ordersRepo.manager.transaction(async (manager) => {
+      const reservedProfile = await this.driversService.reserveOnlineDriverForTrip(manager, driverUserId);
 
-    return this.ordersRepo.save(order);
+      const updateResult = await manager
+        .createQueryBuilder()
+        .update(DeliveryOrder)
+        .set({
+          driverId: driverUserId,
+          vehicleId: reservedProfile.activeVehicleId,
+          status: DeliveryStatus.ACCEPTED,
+          acceptedAt: new Date(),
+        })
+        .where('id = :id', { id: orderId })
+        .andWhere('status IN (:...statuses)', {
+          statuses: [DeliveryStatus.SEARCHING, DeliveryStatus.REQUESTED],
+        })
+        .execute();
+
+      if (updateResult.affected !== 1) {
+        // Rolls back reserveOnlineDriverForTrip()'s UPDATE too — the
+        // driver goes right back to ONLINE, exactly as if this call had
+        // never happened.
+        throw new BadRequestException('This delivery was just accepted by another driver.');
+      }
+
+      const savedOrder = await manager.findOneOrFail(DeliveryOrder, { where: { id: orderId } });
+      return { saved: savedOrder, reservedProfile };
+    });
+
+    // Only after the transaction actually commits — see
+    // reserveOnlineDriverForTrip()'s doc comment in drivers.service.ts
+    // for why this can't happen any earlier.
+    this.driversService.emitReservedForTrip(reservedProfile);
+
+    return saved;
   }
 
   async markPickupArrived(orderId: string, driverUserId: string): Promise<DeliveryOrder> {
@@ -448,11 +528,38 @@ export class LogisticsService {
       throw new BadRequestException(`Delivery cannot be cancelled from status ${order.status}`);
     }
 
+    // Same lost-update risk cancelRide() had, and the same fix: claim the
+    // cancellation atomically, conditioned on the delivery still being in
+    // the exact status just read. A plain save() here raced against a
+    // concurrent acceptDelivery() (SEARCHING/REQUESTED -> ACCEPTED) could
+    // otherwise commit after acceptDelivery's transaction and silently
+    // overwrite the order back to CANCELLED — leaving a driver reserved
+    // ON_TRIP for a delivery that no longer exists from the customer's
+    // point of view.
+    const originalStatus = order.status;
+    const claimResult = await this.ordersRepo
+      .createQueryBuilder()
+      .update(DeliveryOrder)
+      .set({
+        status: DeliveryStatus.CANCELLED,
+        cancelledAt: new Date(),
+        cancelledBy,
+        cancelReason: dto.reason ?? null,
+      })
+      .where('id = :id', { id: order.id })
+      .andWhere('status = :originalStatus', { originalStatus })
+      .execute();
+
+    if (claimResult.affected !== 1) {
+      throw new BadRequestException(
+        'This delivery just changed status (it may already have been accepted, delivered, or cancelled) — please refresh and try again.',
+      );
+    }
+
     order.status = DeliveryStatus.CANCELLED;
     order.cancelledAt = new Date();
     order.cancelledBy = cancelledBy;
     order.cancelReason = dto.reason ?? null;
-    await this.ordersRepo.save(order);
 
     if (order.driverId) {
       const driverProfile = await this.driversService.findByUserId(order.driverId);

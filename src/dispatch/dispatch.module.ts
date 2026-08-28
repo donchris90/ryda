@@ -3,11 +3,14 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { RideOffer } from './entities/ride-offer.entity';
 import { Ride } from '../rides/entities/ride.entity';
 import { DispatchService } from './dispatch.service';
+import { AutoDispatchService } from './auto-dispatch.service';
 import { DispatchController } from './dispatch.controller';
 import { DriversModule } from '../drivers/drivers.module';
 import { AiModule } from '../ai/ai.module';
 import { FeatureFlagsModule } from '../feature-flags/feature-flags.module';
 import { ObservabilityModule } from '../observability/observability.module';
+import { CandidateSearchModule } from '../candidate-search/candidate-search.module';
+import { RankingModule } from '../ranking/ranking.module';
 
 @Module({
   imports: [
@@ -16,9 +19,15 @@ import { ObservabilityModule } from '../observability/observability.module';
     AiModule,
     FeatureFlagsModule,
     ObservabilityModule,
+    // Batch 6: AUTO dispatch reuses the exact same shared candidate
+    // discovery + ETA ranking pipeline MANUAL selection uses — see
+    // AutoDispatchService's class doc comment.
+    CandidateSearchModule,
+    RankingModule,
   ],
-  providers: [DispatchService],
+  providers: [DispatchService, AutoDispatchService],
   controllers: [DispatchController],
-  exports: [DispatchService],
+  exports: [DispatchService, AutoDispatchService],
 })
 export class DispatchModule {}
+

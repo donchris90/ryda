@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -33,6 +34,7 @@ import { PassengersService } from '../passengers/passengers.service';
 import { PromotionsService } from '../promotions/promotions.service';
 import { FleetService } from '../fleet/fleet.service';
 import { DispatchService } from '../dispatch/dispatch.service';
+import { AutoDispatchService } from '../dispatch/auto-dispatch.service';
 import { PricingService } from '../ai/pricing.service';
 import { ReconciliationService } from '../reconciliation/reconciliation.service';
 import {
@@ -40,6 +42,9 @@ import {
   SETTING_KEYS,
 } from '../settings/settings.service';
 import { MetricsService } from '../observability/metrics.service';
+import { CandidateSearchService } from '../candidate-search/candidate-search.service';
+import { DispatchDomain, DispatchMode } from '../candidate-search/candidate-search.types';
+import { DriverRankingService } from '../ranking/ranking.service';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -77,6 +82,8 @@ export interface SelectableDriverResult {
 
 @Injectable()
 export class RidesService {
+  private readonly logger = new Logger(RidesService.name);
+
   constructor(
     @InjectRepository(Ride)
     private readonly ridesRepo: Repository<Ride>,
@@ -92,6 +99,7 @@ export class RidesService {
     private readonly promotionsService: PromotionsService,
     private readonly fleetService: FleetService,
     private readonly dispatchService: DispatchService,
+    private readonly autoDispatchService: AutoDispatchService,
     private readonly pricingService: PricingService,
     private readonly events: EventEmitter2,
     private readonly config: ConfigService,
@@ -100,6 +108,8 @@ export class RidesService {
     private readonly settingsService: SystemSettingsService,
     private readonly metricsService: MetricsService,
     private readonly googleMaps: GoogleMapsService,
+    private readonly candidateSearchService: CandidateSearchService,
+    private readonly driverRankingService: DriverRankingService,
   ) {}
 
   async estimateFare(dto: FareEstimateDto) {
@@ -154,6 +164,7 @@ export class RidesService {
       passengerId,
       category: dto.category,
       status: scheduledAt ? RideStatus.SCHEDULED : RideStatus.SEARCHING,
+      dispatchMode: dto.dispatchMode ?? DispatchMode.MANUAL,
       scheduledAt,
       pickupLat: dto.pickupLat,
       pickupLng: dto.pickupLng,
@@ -222,11 +233,23 @@ export class RidesService {
         { delay, jobId: `activate-${savedRide.id}` },
       );
     }
-    // No automatic dispatch here anymore — the passenger picks a driver
-    // themselves from the nearby-drivers list (GET /rides/:id/nearby-drivers)
-    // and targets them explicitly (POST /rides/:id/select-driver). The ride
-    // just sits SEARCHING until they do. See dispatch.service.ts for why
-    // the old auto-pick-nearest behavior was removed as the primary flow.
+    // No automatic dispatch for MANUAL rides — the passenger picks a
+    // driver themselves from the nearby-drivers list
+    // (GET /rides/:id/nearby-drivers or /rides/:id/selectable-drivers)
+    // and targets them explicitly (POST /rides/:id/select-driver). The
+    // ride just sits SEARCHING until they do.
+    //
+    // AUTO rides kick off here instead. A scheduled AUTO ride is *not*
+    // started now — it's still SCHEDULED, not SEARCHING, and there's
+    // nothing to offer yet; activateScheduledRide() below starts it at
+    // the right time instead. Fire-and-forget from this method's point
+    // of view: AutoDispatchService swallows its own errors (see its
+    // tryOfferNextCandidate()), so a transient failure here can never
+    // fail ride creation — the ride simply stays SEARCHING and the next
+    // decline/timeout/retry gets another chance.
+    if (!scheduledAt && savedRide.dispatchMode === DispatchMode.AUTO) {
+      void this.autoDispatchService.startForRide(savedRide.id);
+    }
 
     return savedRide;
   }
@@ -642,8 +665,12 @@ export class RidesService {
 
     ride.status = RideStatus.SEARCHING;
     await this.ridesRepo.save(ride);
-    // No auto-dispatch — same reasoning as requestRide() above. The
-    // passenger picks a driver from the list once the ride activates.
+
+    if (ride.dispatchMode === DispatchMode.AUTO) {
+      void this.autoDispatchService.startForRide(ride.id);
+    }
+    // MANUAL: no auto-dispatch — same reasoning as requestRide() above.
+    // The passenger picks a driver from the list once the ride activates.
   }
 
   async findForDriver(driverId: string): Promise<Ride[]> {
@@ -675,79 +702,89 @@ export class RidesService {
    * deliberately doesn't include (kept lean for its one existing
    * caller, the dispatch console).
    *
-   * ETA is a straight-line-distance estimate, not real routing — this
-   * environment has no Google Directions key configured, and even where
-   * one is, calling it per-candidate for a whole list on every refresh
-   * would be slow and expensive. 28 km/h is a reasonable average urban
-   * driving speed assumption for a Lagos-style city; genuinely
-   * traffic-aware ETA is what the ride-tracking screen's real routing
-   * (already built, uses Directions when configured) is for, once
-   * there's a single specific driver to route to.
+   * Uses the same shared pipeline AUTO dispatch uses (see
+   * DispatchService's auto-offer path): CandidateSearchService for
+   * discovery + eligibility off the live Redis driver index, then
+   * DriverRankingService for road-ETA ranking. MANUAL and AUTO reading
+   * from anything other than this one shared source is exactly the
+   * split architecture this was built to avoid — see
+   * candidate-search.types.ts's DispatchMode doc comment.
    */
   async findSelectableDrivers(
     rideId: string,
   ): Promise<SelectableDriverResult[]> {
     const ride = await this.findById(rideId);
-    const candidates = await this.driversService.findNearby(
+    // manual_selection_time (batch 9): full search+rank latency for the
+    // MANUAL driver-list screen — the one metric on this list that has
+    // no AUTO equivalent, since AUTO never shows a list to anyone.
+    const stopTimer = this.metricsService.dispatchLatencySeconds.startTimer({
+      domain: DispatchDomain.RIDE,
+      mode: DispatchMode.MANUAL,
+    });
+
+    const searchOutcome = await this.candidateSearchService.search({
+      pickup: { lat: ride.pickupLat, lng: ride.pickupLng },
+      domain: DispatchDomain.RIDE,
+      mode: DispatchMode.MANUAL,
+      rideCategory: ride.category,
+      // A passenger picking manually wants a real list to choose from,
+      // not just "the first one found" — keep expanding until there's a
+      // reasonable spread or the max radius is reached.
+      minCandidates: 5,
+      limit: 20,
+    });
+
+    if (searchOutcome.candidates.length === 0) {
+      stopTimer();
+      // Structured dispatch log (batch 9) — same shape AUTO already
+      // logs (see AutoDispatchService.offerNextCandidate()), just for
+      // the MANUAL list-building step instead of an offer.
+      this.logger.log(
+        `MANUAL list: rideId=${rideId} dispatchMode=manual pickup=(${ride.pickupLat.toFixed(4)},${ride.pickupLng.toFixed(4)}) ` +
+          `finalRadiusKm=${searchOutcome.radiusUsedKm} candidateCount=0 selectedDriver=none selectionReason=no_eligible_candidates`,
+      );
+      return [];
+    }
+
+    const rankingOutcome = await this.driverRankingService.rank(
       { lat: ride.pickupLat, lng: ride.pickupLng },
-      { city: ride.city ?? undefined, limit: 20 },
+      searchOutcome.candidates,
     );
-    if (candidates.length === 0) return [];
+    stopTimer();
 
-    const ASSUMED_AVG_SPEED_KMH = 28;
+    this.logger.log(
+      `MANUAL list: rideId=${rideId} dispatchMode=manual pickup=(${ride.pickupLat.toFixed(4)},${ride.pickupLng.toFixed(4)}) ` +
+        `finalRadiusKm=${searchOutcome.radiusUsedKm} candidateCount=${rankingOutcome.ranked.length} selectedDriver=passenger_will_choose selectionReason=eta_ranked_list_shown`,
+    );
 
-    const userIds = candidates.map((c) => c.userId);
-    const vehicleIds = candidates
-      .map((c) => c.vehicleId)
-      .filter((v): v is string => !!v);
+    const userIds = rankingOutcome.ranked.map((c) => c.driverUserId);
+    const vehicleIds = rankingOutcome.ranked.map((c) => c.vehicleId);
     const [users, vehicles] = await Promise.all([
       this.usersService.findByIds(userIds),
-      Promise.all(
-        vehicleIds.map((id) =>
-          this.vehiclesService.findById(id).catch(() => null),
-        ),
-      ),
+      Promise.all(vehicleIds.map((id) => this.vehiclesService.findById(id).catch(() => null))),
     ]);
     const userById = new Map(users.map((u) => [u.id, u]));
     const vehicleById = new Map(
-      vehicles
-        .filter((v): v is NonNullable<typeof v> => !!v)
-        .map((v) => [v.id, v]),
+      vehicles.filter((v): v is NonNullable<typeof v> => !!v).map((v) => [v.id, v]),
     );
 
-    return candidates
-      .filter((c) => {
-        const vehicle = c.vehicleId ? vehicleById.get(c.vehicleId) : undefined;
-        // Real gap found from a live user report: a motorcycle-
-        // registered driver was showing up for every ride category,
-        // since category was only ever used for pricing, never to
-        // decide who gets shown to the passenger. A driver with no
-        // active vehicle on file is excluded, not assumed to match -
-        // same reasoning as the delivery vehicle matching fix.
-        return vehicle
-          ? doesVehicleMatchRideCategory(vehicle, ride.category)
-          : false;
-      })
-      .map((c) => {
-        const user = userById.get(c.userId);
-        const vehicle = c.vehicleId ? vehicleById.get(c.vehicleId) : undefined;
-        return {
-          driverUserId: c.userId,
-          firstName: user?.firstName ?? 'Driver',
-          lastName: user?.lastName ?? '',
-          rating: c.rating,
-          level: c.level,
-          distanceKm: c.distanceKm,
-          etaMinutes: Math.max(
-            1,
-            Math.round((c.distanceKm / ASSUMED_AVG_SPEED_KMH) * 60),
-          ),
-          vehicleMake: vehicle?.make ?? null,
-          vehicleModel: vehicle?.model ?? null,
-          vehicleColor: vehicle?.color ?? null,
-          vehiclePlateNumber: vehicle?.plateNumber ?? null,
-        };
-      });
+    return rankingOutcome.ranked.map((c) => {
+      const user = userById.get(c.driverUserId);
+      const vehicle = vehicleById.get(c.vehicleId);
+      return {
+        driverUserId: c.driverUserId,
+        firstName: user?.firstName ?? 'Driver',
+        lastName: user?.lastName ?? '',
+        rating: c.rating,
+        level: c.level,
+        distanceKm: c.distanceKm,
+        etaMinutes: c.etaMinutes,
+        vehicleMake: vehicle?.make ?? null,
+        vehicleModel: vehicle?.model ?? null,
+        vehicleColor: vehicle?.color ?? null,
+        vehiclePlateNumber: vehicle?.plateNumber ?? null,
+      };
+    });
   }
 
   /**
@@ -757,6 +794,17 @@ export class RidesService {
    * or was declined) is superseded first, so there's never more than
    * one live offer per ride — the exclusivity check in acceptRide()
    * below depends on that being true.
+   *
+   * Re-validates the driver against the same eligibility rules
+   * findSelectableDrivers() used to build the list in the first place —
+   * a driver can go offline, go on-trip, or lose vehicle compatibility
+   * in the seconds between the passenger loading the list and tapping a
+   * name, and this must not silently offer the ride to someone no
+   * longer eligible just because they were in a list fetched moments
+   * ago. If the driver has fallen out of eligibility, the passenger is
+   * told to refresh and pick again — this never silently offers to a
+   * different driver instead (that would be converting MANUAL into
+   * AUTO without asking).
    */
   async selectDriver(
     rideId: string,
@@ -772,17 +820,29 @@ export class RidesService {
       );
     }
 
-    const driverProfile = await this.driversService.findByUserId(driverUserId);
-    if (driverProfile.approvalStatus !== DriverApprovalStatus.APPROVED) {
-      throw new BadRequestException('This driver is not currently available.');
-    }
-    if (driverProfile.availability !== DriverAvailability.ONLINE) {
+    const searchOutcome = await this.candidateSearchService.search({
+      pickup: { lat: ride.pickupLat, lng: ride.pickupLng },
+      domain: DispatchDomain.RIDE,
+      mode: DispatchMode.MANUAL,
+      rideCategory: ride.category,
+      // We only need to know whether this one specific driver is still
+      // eligible, not build a full list — but the engine has no
+      // "search for one driver" mode, so ask for a reasonably sized
+      // pool and check membership. minCandidates high enough that a
+      // single round rarely needs to expand for a driver who was
+      // eligible moments ago.
+      minCandidates: 20,
+      limit: 50,
+    });
+
+    const stillEligible = searchOutcome.candidates.find((c) => c.driverUserId === driverUserId);
+    if (!stillEligible) {
       throw new BadRequestException(
-        'This driver is no longer online — pick another from the list.',
+        'This driver is no longer available — please refresh and select another driver.',
       );
     }
 
-    await this.dispatchService.offerToSpecificDriver(rideId, driverUserId);
+    await this.dispatchService.offerToSpecificDriver(rideId, driverUserId, stillEligible.distanceKm);
   }
 
   /**
@@ -891,41 +951,67 @@ export class RidesService {
       }
     }
 
-    // Atomic, conditional transition — not a read-modify-write. Every
-    // check above was against a snapshot read, so without a WHERE clause
-    // on status here, two drivers who both pass those checks concurrently
-    // would both plainly `.save()` the same row and the second write
-    // would silently clobber the first (last-write-wins, no error to
-    // either driver). Scoping the UPDATE to `status IN (SEARCHING,
-    // REQUESTED)` means only whichever request's UPDATE commits first
-    // can actually match — the loser's `affected` count comes back 0.
-    const updateResult = await this.ridesRepo
-      .createQueryBuilder()
-      .update(Ride)
-      .set({
-        driverId: driverUserId,
-        vehicleId: driverProfile.activeVehicleId,
-        status: RideStatus.ACCEPTED,
-        acceptedAt: new Date(),
-      })
-      .where('id = :id', { id: rideId })
-      .andWhere('status IN (:...statuses)', {
-        statuses: [RideStatus.SEARCHING, RideStatus.REQUESTED],
-      })
-      .execute();
+    // Both claims below — "this driver is now ON_TRIP" and "this ride now
+    // belongs to this driver" — must succeed or fail together. Before
+    // this, the driver's ONLINE→ON_TRIP transition was a plain read-then-
+    // write *after* the ride was already claimed: two concurrent
+    // acceptRide() calls for the SAME driver on two DIFFERENT rides could
+    // both pass the `availability === ONLINE` check above (both are
+    // snapshot reads taken before either write happens), then both
+    // succeed at claiming their own ride (different ride ids don't
+    // conflict with each other), and only then both call
+    // setAvailability(ON_TRIP) — leaving the driver assigned to two
+    // simultaneous rides with nothing having ever failed loudly.
+    //
+    // reserveOnlineDriverForTrip() closes that window with its own
+    // conditional UPDATE (`WHERE availability = ONLINE`), run inside the
+    // same transaction as the ride claim: whichever request's driver-
+    // reservation UPDATE commits first wins, and the loser's transaction
+    // rolls back entirely — including the ride claim — rather than
+    // leaving a half-succeeded booking.
+    const { saved, reservedProfile } = await this.ridesRepo.manager.transaction(async (manager) => {
+      const reservedProfile = await this.driversService.reserveOnlineDriverForTrip(manager, driverUserId);
 
-    if (updateResult.affected !== 1) {
-      throw new BadRequestException(
-        'This ride was just accepted by another driver.',
-      );
+      const updateResult = await manager
+        .createQueryBuilder()
+        .update(Ride)
+        .set({
+          driverId: driverUserId,
+          vehicleId: reservedProfile.activeVehicleId,
+          status: RideStatus.ACCEPTED,
+          acceptedAt: new Date(),
+        })
+        .where('id = :id', { id: rideId })
+        .andWhere('status IN (:...statuses)', {
+          statuses: [RideStatus.SEARCHING, RideStatus.REQUESTED],
+        })
+        .execute();
+
+      if (updateResult.affected !== 1) {
+        // Throwing here rolls back reserveOnlineDriverForTrip()'s UPDATE
+        // too, in the same transaction — the driver goes right back to
+        // ONLINE from PostgreSQL's perspective, exactly as if this whole
+        // call had never happened.
+        throw new BadRequestException('This ride was just accepted by another driver.');
+      }
+
+      const savedRide = await manager.findOneOrFail(Ride, { where: { id: rideId } });
+      return { saved: savedRide, reservedProfile };
+    });
+
+    // Only now, after the transaction has actually committed, tell the
+    // rest of the system (the live-driver index, primarily) that this
+    // driver left the available pool — see reserveOnlineDriverForTrip()'s
+    // doc comment for why this can't happen any earlier.
+    this.driversService.emitReservedForTrip(reservedProfile);
+
+    // auto_offer_accept_rate's numerator (batch 9) — divide against
+    // autoDispatchOffersTotal in PromQL. Only counted for AUTO rides;
+    // a MANUAL acceptance was never an AUTO "offer" to begin with, so it
+    // has no denominator to be a numerator for.
+    if (saved.dispatchMode === DispatchMode.AUTO) {
+      this.metricsService.autoDispatchOffersAcceptedTotal.inc();
     }
-
-    await this.driversService.setAvailability(
-      driverUserId,
-      DriverAvailability.ON_TRIP,
-    );
-
-    const saved = await this.findById(rideId);
 
     const driver = await this.usersService.findById(driverUserId);
     this.events.emit('ride.accepted', {
@@ -1316,16 +1402,49 @@ export class RidesService {
 
     // A driver was already engaged (en route or arrived) — the passenger
     // cancelling now costs them real time, so a cancellation fee applies.
+    // Captured from the status as read here, before anything below can
+    // change it.
     const driverWasEngaged = [
       RideStatus.ACCEPTED,
       RideStatus.ARRIVING,
       RideStatus.ARRIVED,
     ].includes(ride.status);
+    const originalStatus = ride.status;
 
     ride.status = RideStatus.CANCELLED;
     ride.cancelledAt = new Date();
     ride.cancelledBy = cancelledBy;
     ride.cancelReason = dto.reason ?? null;
+
+    // Claim the cancellation atomically, conditioned on the ride still
+    // being in the exact status just read — the same optimistic-
+    // concurrency shape acceptRide()'s reservation transaction uses.
+    // Without this, a plain save() here raced against a concurrent
+    // acceptRide() (SEARCHING -> ACCEPTED) is a lost-update: acceptRide's
+    // transaction can commit first, reserving the driver ON_TRIP, and
+    // this save() then silently overwrites the ride back to CANCELLED —
+    // leaving a driver ON_TRIP for a ride nobody is actually taking, with
+    // nothing having ever failed loudly. Doing this claim BEFORE the
+    // wallet cancellation-fee debit below also means a losing cancel
+    // attempt never charges a fee for a cancellation that didn't happen.
+    const claimResult = await this.ridesRepo
+      .createQueryBuilder()
+      .update(Ride)
+      .set({
+        status: RideStatus.CANCELLED,
+        cancelledAt: ride.cancelledAt,
+        cancelledBy: ride.cancelledBy,
+        cancelReason: ride.cancelReason,
+      })
+      .where('id = :id', { id: ride.id })
+      .andWhere('status = :originalStatus', { originalStatus })
+      .execute();
+
+    if (claimResult.affected !== 1) {
+      throw new BadRequestException(
+        'This ride just changed status (it may already have been accepted, completed, or cancelled) — please refresh and try again.',
+      );
+    }
 
     if (
       cancelledBy === CancelledBy.PASSENGER &&
@@ -1378,7 +1497,15 @@ export class RidesService {
       }
     }
 
-    await this.ridesRepo.save(ride);
+    // The atomic claim above already persisted status/cancelledAt/
+    // cancelledBy/cancelReason. cancellationFee (only known after the
+    // wallet debit, which must happen after the claim succeeds — see
+    // above) is the one field still needing its own write; no race risk
+    // here since the ride is already CANCELLED and this is an
+    // unconditional single-column update on an id match.
+    if (ride.cancellationFee) {
+      await this.ridesRepo.update(ride.id, { cancellationFee: ride.cancellationFee });
+    }
 
     if (ride.driverId) {
       const driverProfile = await this.driversService.findByUserId(

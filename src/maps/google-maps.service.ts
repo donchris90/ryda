@@ -7,164 +7,799 @@ export interface GeocodeResult {
   formattedAddress: string;
 }
 
+export interface PlaceSuggestion {
+  placeId: string;
+  description: string;
+}
+
 export interface DirectionsResult {
   distanceKm: number;
   durationMin: number;
   polyline: string | null;
 }
 
-/**
- * Thin client over Google Maps' Geocoding and Directions APIs. Used to
- * upgrade FareService from a Haversine estimate to real road distance/
- * duration, and to resolve addresses passengers type into coordinates.
- *
- * Falls back gracefully everywhere it's called from — see
- * FareService.estimate(), which only calls this when isConfigured() is
- * true and silently keeps using Haversine otherwise.
- */
 @Injectable()
 export class GoogleMapsService {
   private readonly logger = new Logger(GoogleMapsService.name);
-  private readonly apiKey: string;
-  private readonly baseUrl = 'https://maps.googleapis.com/maps/api';
 
-  constructor(private readonly config: ConfigService) {
-    this.apiKey = this.config.get<string>('googleMaps.apiKey') ?? '';
+  private readonly apiKey: string;
+
+  private readonly mapsBaseUrl =
+    'https://maps.googleapis.com/maps/api';
+
+  private readonly placesBaseUrl =
+    'https://places.googleapis.com/v1';
+
+  constructor(
+    private readonly config: ConfigService,
+  ) {
+    this.apiKey =
+      this.config
+        .get<string>('googleMaps.apiKey')
+        ?.trim() ?? '';
   }
 
   isConfigured(): boolean {
     return this.apiKey.length > 0;
   }
 
-  async geocode(address: string): Promise<GeocodeResult | null> {
-    if (!this.isConfigured()) return null;
+  private isValidCoordinate(
+    lat: number,
+    lng: number,
+  ): boolean {
+    return (
+      Number.isFinite(lat) &&
+      Number.isFinite(lng) &&
+      lat >= -90 &&
+      lat <= 90 &&
+      lng >= -180 &&
+      lng <= 180
+    );
+  }
+
+  /**
+   * Broad Nigeria coordinate check.
+   *
+   * This is only used to determine whether GPS can be used
+   * as a location bias and to prevent obviously foreign
+   * coordinates from being used by Ryda.
+   *
+   * There is NO Lagos fallback.
+   */
+  private isPlausibleNigeriaCoordinate(
+    lat: number,
+    lng: number,
+  ): boolean {
+    return (
+      this.isValidCoordinate(lat, lng) &&
+      lat >= 4 &&
+      lat <= 14 &&
+      lng >= 2 &&
+      lng <= 15
+    );
+  }
+
+  /**
+   * Validate Google legacy Geocoding API result.
+   */
+  private isNigeria(result: any): boolean {
+    const components =
+      result?.address_components ??
+      result?.addressComponents ??
+      [];
+
+    if (!Array.isArray(components)) {
+      return false;
+    }
+
+    const country = components.find(
+      (component: any) =>
+        Array.isArray(component?.types) &&
+        component.types.includes('country'),
+    );
+
+    if (
+      country?.short_name === 'NG' ||
+      country?.shortText === 'NG'
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * ============================================================
+   * AUTOCOMPLETE
+   * ============================================================
+   *
+   * Google Places API (New).
+   *
+   * Nigeria-wide.
+   *
+   * IMPORTANT:
+   *
+   * - No Lagos fallback.
+   * - No Abuja fallback.
+   * - No fixed coordinates.
+   * - If GPS is supplied and is Nigerian, it is used as a bias.
+   * - If GPS is missing, Google performs the search without a
+   *   location bias.
+   * - Results are restricted to Nigeria.
+   */
+  async suggest(
+    query: string,
+    limit = 5,
+    lat?: number,
+    lng?: number,
+  ): Promise<PlaceSuggestion[]> {
+    if (
+      !this.isConfigured() ||
+      !query?.trim()
+    ) {
+      return [];
+    }
+
+    const resultLimit = Math.min(
+      Math.max(
+        Number.isFinite(limit)
+          ? Math.floor(limit)
+          : 5,
+        1,
+      ),
+      5,
+    );
 
     try {
-      const url = `${this.baseUrl}/geocode/json?address=${encodeURIComponent(address)}&key=${this.apiKey}`;
-      const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
-      const json = await response.json();
+      /**
+       * Google Places API (New) request body.
+       */
+      const body: Record<string, any> = {
+        input: query.trim(),
 
-      if (json.status !== 'OK' || !json.results?.length) {
-        this.logger.warn(`Geocode failed for "${address}": ${json.status}`);
+        /**
+         * HARD COUNTRY RESTRICTION.
+         *
+         * Nigeria only.
+         */
+        includedRegionCodes: ['ng'],
+
+        /**
+         * Response language.
+         */
+        languageCode: 'en',
+      };
+
+      /**
+       * Use the user's actual GPS position when supplied.
+       *
+       * There is deliberately NO fallback coordinate.
+       */
+      if (
+        typeof lat === 'number' &&
+        typeof lng === 'number' &&
+        this.isPlausibleNigeriaCoordinate(
+          lat,
+          lng,
+        )
+      ) {
+        body.locationBias = {
+          circle: {
+            center: {
+              latitude: lat,
+              longitude: lng,
+            },
+            radius: 50000,
+          },
+        };
+
+        this.logger.debug(
+          `Autocomplete GPS bias: ${lat}, ${lng}`,
+        );
+      }
+
+      /**
+       * Google Places API (New).
+       */
+      const response = await fetch(
+        `${this.placesBaseUrl}/places:autocomplete`,
+        {
+          method: 'POST',
+
+          headers: {
+            'Content-Type': 'application/json',
+
+            'X-Goog-Api-Key':
+              this.apiKey,
+
+            'X-Goog-FieldMask':
+              [
+                'suggestions.placePrediction.place',
+                'suggestions.placePrediction.placeId',
+                'suggestions.placePrediction.text.text',
+                'suggestions.placePrediction.structuredFormat.mainText.text',
+                'suggestions.placePrediction.structuredFormat.secondaryText.text',
+              ].join(','),
+          },
+
+          body: JSON.stringify(body),
+
+          signal:
+            AbortSignal.timeout(5000),
+        },
+      );
+
+      /**
+       * IMPORTANT:
+       *
+       * Log Google's actual response.
+       *
+       * This prevents Google errors from silently
+       * becoming [].
+       */
+      const responseText =
+        await response.text();
+
+      this.logger.warn(
+        `GOOGLE AUTOCOMPLETE STATUS: ${response.status}`,
+      );
+
+      this.logger.warn(
+        `GOOGLE AUTOCOMPLETE RESPONSE: ${responseText}`,
+      );
+
+      if (!response.ok) {
+        this.logger.error(
+          `Google Places Autocomplete failed with HTTP ${response.status}`,
+        );
+
+        return [];
+      }
+
+      let json: any;
+
+      try {
+        json =
+          JSON.parse(responseText);
+      } catch {
+        this.logger.error(
+          'Google Places returned invalid JSON',
+        );
+
+        return [];
+      }
+
+      if (
+        !Array.isArray(
+          json?.suggestions,
+        )
+      ) {
+        this.logger.warn(
+          'Google Places returned no suggestions array',
+        );
+
+        return [];
+      }
+
+      /**
+       * Extract place predictions.
+       *
+       * Deliberately NOT fetching Place Details here for every
+       * prediction - that was calling Google's GetPlaceRequest
+       * (a separate, more tightly quota-limited call) up to 5 times
+       * per search, for suggestions a person almost never all
+       * actually visits. Confirmed live: this alone hit Google's
+       * 100/day GetPlaceRequest quota after normal testing use.
+       * Full coordinates are now only fetched once someone actually
+       * taps a specific suggestion, via getPlaceDetailsById() below.
+       */
+      const predictions: PlaceSuggestion[] = json.suggestions
+        .map((item: any) => item?.placePrediction)
+        .filter((prediction: any) => prediction?.placeId)
+        .slice(0, resultLimit)
+        .map((prediction: any) => ({
+          placeId: prediction.placeId,
+          description:
+            prediction.text?.text ??
+            [prediction.structuredFormat?.mainText?.text, prediction.structuredFormat?.secondaryText?.text]
+              .filter(Boolean)
+              .join(', '),
+        }));
+
+      return predictions;
+    } catch (error) {
+      this.logger.error(
+        'Places Autocomplete request failed',
+        error instanceof Error
+          ? error.stack
+          : String(error),
+      );
+
+      return [];
+    }
+  }
+
+  /**
+   * Fetches full coordinates/formatted address for a single place_id -
+   * split out from suggest() specifically so this (quota-limited)
+   * Google call only happens once, for whichever one suggestion a
+   * person actually selects, not for every suggestion shown.
+   */
+  async getPlaceDetailsById(placeId: string): Promise<GeocodeResult | null> {
+    if (!this.isConfigured() || !placeId?.trim()) return null;
+    return this.getPlaceDetails({ placeId: placeId.trim() });
+  }
+
+  /**
+   * ============================================================
+   * PLACE DETAILS
+   * ============================================================
+   */
+  private async getPlaceDetails(
+    prediction: any,
+  ): Promise<GeocodeResult | null> {
+    const placeId =
+      prediction?.placeId;
+
+    if (!placeId) {
+      return null;
+    }
+
+    try {
+      /**
+       * IMPORTANT:
+       *
+       * Correct Places API (New) URL:
+       *
+       * /v1/places/{PLACE_ID}
+       */
+      const response = await fetch(
+        `${this.placesBaseUrl}/places/${encodeURIComponent(
+          placeId,
+        )}`,
+        {
+          method: 'GET',
+
+          headers: {
+            'X-Goog-Api-Key':
+              this.apiKey,
+
+            'X-Goog-FieldMask':
+              [
+                'location',
+                'formattedAddress',
+                'addressComponents',
+              ].join(','),
+          },
+
+          signal:
+            AbortSignal.timeout(5000),
+        },
+      );
+
+      const responseText =
+        await response.text();
+
+      if (!response.ok) {
+        this.logger.warn(
+          `Google Place Details HTTP ${response.status} for ${placeId}: ${responseText}`,
+        );
+
         return null;
       }
 
-      const result = json.results[0];
+      let result: any;
+
+      try {
+        result =
+          JSON.parse(responseText);
+      } catch {
+        return null;
+      }
+
+      if (
+        !result?.location ||
+        !Number.isFinite(
+          result.location.latitude,
+        ) ||
+        !Number.isFinite(
+          result.location.longitude,
+        )
+      ) {
+        return null;
+      }
+
+      /**
+       * HARD Nigeria validation.
+       */
+      if (!this.isNigeria(result)) {
+        this.logger.warn(
+          `Rejected non-Nigeria place: ${
+            result.formattedAddress ??
+            placeId
+          }`,
+        );
+
+        return null;
+      }
+
       return {
-        lat: result.geometry.location.lat,
-        lng: result.geometry.location.lng,
-        formattedAddress: result.formatted_address,
+        lat:
+          result.location.latitude,
+
+        lng:
+          result.location.longitude,
+
+        formattedAddress:
+          result.formattedAddress ??
+          prediction?.text?.text ??
+          '',
       };
-    } catch (err) {
-      this.logger.error('Geocode request failed', err as Error);
+    } catch (error) {
+      this.logger.warn(
+        `Place Details failed for ${placeId}: ${
+          error instanceof Error
+            ? error.message
+            : String(error)
+        }`,
+      );
+
       return null;
     }
   }
 
   /**
-   * Real bug found from a live report: this previously called the same
-   * /geocode/json endpoint as geocode() above, just returning multiple
-   * results. Geocoding is built to resolve a *complete* address into
-   * coordinates — fed a partial, as-you-type query like "511 rd,
-   * festac" it does its best-effort loose matching on individual
-   * tokens ("festac", "road"), returning results like "New Festac
-   * Bridge Road" or "22 Road" that share a word but aren't remotely
-   * what was being typed. Places Autocomplete is Google's actual
-   * purpose-built endpoint for this — ranked, relevance-aware
-   * suggestions for partial input, which is what every real ride-
-   * hailing app's address search actually uses.
-   *
-   * Autocomplete predictions don't include coordinates on their own —
-   * fetching Place Details for each one preserves the existing
-   * GeocodeResult[] contract (lat/lng/formattedAddress per result) so
-   * nothing on the app side needs to change to benefit from this.
+   * ============================================================
+   * GEOCODING
+   * ============================================================
    */
-  async suggest(query: string, limit = 5): Promise<GeocodeResult[]> {
-    if (!this.isConfigured()) return [];
-    try {
-      const autocompleteUrl = `${this.baseUrl}/place/autocomplete/json?input=${encodeURIComponent(query)}&components=country:ng&key=${this.apiKey}`;
-      const autocompleteRes = await fetch(autocompleteUrl, { signal: AbortSignal.timeout(5000) });
-      const autocompleteJson = await autocompleteRes.json();
-      if (autocompleteJson.status !== 'OK' || !autocompleteJson.predictions?.length) return [];
-
-      const predictions = autocompleteJson.predictions.slice(0, limit);
-      const details = await Promise.all(
-        predictions.map(async (p: any) => {
-          try {
-            const detailsUrl = `${this.baseUrl}/place/details/json?place_id=${p.place_id}&fields=geometry,formatted_address&key=${this.apiKey}`;
-            const detailsRes = await fetch(detailsUrl, { signal: AbortSignal.timeout(5000) });
-            const detailsJson = await detailsRes.json();
-            if (detailsJson.status !== 'OK' || !detailsJson.result?.geometry) return null;
-            return {
-              lat: detailsJson.result.geometry.location.lat,
-              lng: detailsJson.result.geometry.location.lng,
-              formattedAddress: detailsJson.result.formatted_address ?? p.description,
-            };
-          } catch {
-            return null;
-          }
-        }),
-      );
-
-      return details.filter((d): d is GeocodeResult => d !== null);
-    } catch (err) {
-      this.logger.error('Suggest request failed', err as Error);
-      return [];
+  async geocode(
+    address: string,
+  ): Promise<GeocodeResult | null> {
+    if (
+      !this.isConfigured() ||
+      !address?.trim()
+    ) {
+      return null;
     }
-  }
-
-  async reverseGeocode(lat: number, lng: number): Promise<GeocodeResult | null> {
-    if (!this.isConfigured()) return null;
 
     try {
-      const url = `${this.baseUrl}/geocode/json?latlng=${lat},${lng}&key=${this.apiKey}`;
-      const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
-      const json = await response.json();
+      const params =
+        new URLSearchParams({
+          address:
+            address.trim(),
 
-      if (json.status !== 'OK' || !json.results?.length) {
-        this.logger.warn(`Reverse geocode failed for ${lat},${lng}: ${json.status}`);
+          components:
+            'country:NG',
+
+          key:
+            this.apiKey,
+        });
+
+      const response =
+        await fetch(
+          `${this.mapsBaseUrl}/geocode/json?${params.toString()}`,
+          {
+            signal:
+              AbortSignal.timeout(5000),
+          },
+        );
+
+      if (!response.ok) {
+        this.logger.warn(
+          `Geocode HTTP ${response.status}`,
+        );
+
         return null;
       }
 
-      const result = json.results[0];
+      const json =
+        await response.json();
+
+      if (
+        json.status !== 'OK' ||
+        !Array.isArray(
+          json.results,
+        )
+      ) {
+        this.logger.warn(
+          `Geocode failed: ${json.status}`,
+        );
+
+        return null;
+      }
+
+      const result =
+        json.results.find(
+          (item: any) =>
+            this.isNigeria(item),
+        );
+
+      if (
+        !result?.geometry?.location
+      ) {
+        return null;
+      }
+
       return {
-        lat: result.geometry.location.lat,
-        lng: result.geometry.location.lng,
-        formattedAddress: result.formatted_address,
+        lat:
+          result.geometry.location.lat,
+
+        lng:
+          result.geometry.location.lng,
+
+        formattedAddress:
+          result.formatted_address ??
+          address.trim(),
       };
-    } catch (err) {
-      this.logger.error('Reverse geocode request failed', err as Error);
+    } catch (error) {
+      this.logger.error(
+        'Geocode request failed',
+        error instanceof Error
+          ? error.stack
+          : String(error),
+      );
+
       return null;
     }
   }
 
-  /** Real road distance/duration — swaps in for FareService's Haversine estimate when configured. */
-  async getDirections(
-    origin: { lat: number; lng: number },
-    destination: { lat: number; lng: number },
-  ): Promise<DirectionsResult | null> {
-    if (!this.isConfigured()) return null;
+  /**
+   * ============================================================
+   * REVERSE GEOCODING
+   * ============================================================
+   */
+  async reverseGeocode(
+    lat: number,
+    lng: number,
+  ): Promise<GeocodeResult | null> {
+    if (
+      !this.isConfigured() ||
+      !this.isValidCoordinate(lat, lng)
+    ) {
+      this.logger.warn(
+        `Reverse geocode skipped - not configured or invalid coordinate: ${lat}, ${lng}`,
+      );
+      return null;
+    }
+
+    /**
+     * Only allow Nigerian coordinates.
+     */
+    if (
+      !this.isPlausibleNigeriaCoordinate(
+        lat,
+        lng,
+      )
+    ) {
+      this.logger.warn(
+        `Reverse geocode rejected foreign coordinates: ${lat}, ${lng}`,
+      );
+
+      return null;
+    }
 
     try {
-      const url =
-        `${this.baseUrl}/directions/json?origin=${origin.lat},${origin.lng}` +
-        `&destination=${destination.lat},${destination.lng}&key=${this.apiKey}`;
-      const response = await fetch(url, { signal: AbortSignal.timeout(5000) });
-      const json = await response.json();
+      const params =
+        new URLSearchParams({
+          latlng:
+            `${lat},${lng}`,
 
-      if (json.status !== 'OK' || !json.routes?.length) {
-        this.logger.warn(`Directions failed: ${json.status}`);
+          key:
+            this.apiKey,
+        });
+
+      const response =
+        await fetch(
+          `${this.mapsBaseUrl}/geocode/json?${params.toString()}`,
+          {
+            signal:
+              AbortSignal.timeout(5000),
+          },
+        );
+
+      // This function had NO logging at all on any failure path before -
+      // every other method in this file logs the actual Google response
+      // on failure, this one silently returned null no matter what
+      // Google actually said. That's why a genuine 400 on a known-good
+      // Lagos coordinate (6.5244, 3.3792) produced nothing in the logs
+      // to diagnose from.
+      const responseText = await response.text();
+
+      if (!response.ok) {
+        this.logger.warn(
+          `Reverse geocode HTTP ${response.status} for ${lat},${lng}: ${responseText}`,
+        );
         return null;
       }
 
-      const leg = json.routes[0].legs[0];
+      let json: any;
+      try {
+        json = JSON.parse(responseText);
+      } catch {
+        this.logger.error(`Reverse geocode returned invalid JSON for ${lat},${lng}: ${responseText}`);
+        return null;
+      }
+
+      if (
+        json.status !== 'OK' ||
+        !Array.isArray(
+          json.results,
+        )
+      ) {
+        this.logger.warn(
+          `Reverse geocode Google status for ${lat},${lng}: ${json.status} - ${JSON.stringify(json.error_message ?? json)}`,
+        );
+        return null;
+      }
+
+      const result =
+        json.results.find(
+          (item: any) =>
+            this.isNigeria(item),
+        );
+
+      if (
+        !result?.geometry?.location
+      ) {
+        // Distinguishes this specific failure mode from every other
+        // one above: Google succeeded and returned real results, but
+        // isNigeria() rejected every single one of them - worth
+        // knowing which country Google actually thought this was,
+        // since that's a genuinely different bug than "Google failed."
+        const firstResultCountry = json.results[0]?.address_components?.find((c: any) =>
+          c.types?.includes('country'),
+        )?.short_name;
+        this.logger.warn(
+          `Reverse geocode for ${lat},${lng}: Google returned ${json.results.length} result(s) but none passed isNigeria() - first result's country was '${firstResultCountry ?? 'unknown'}'`,
+        );
+        return null;
+      }
+
       return {
-        distanceKm: leg.distance.value / 1000,
-        durationMin: Math.ceil(leg.duration.value / 60),
-        polyline: json.routes[0].overview_polyline?.points ?? null,
+        lat:
+          result.geometry.location.lat,
+
+        lng:
+          result.geometry.location.lng,
+
+        formattedAddress:
+          result.formatted_address ??
+          `${lat}, ${lng}`,
       };
-    } catch (err) {
-      this.logger.error('Directions request failed', err as Error);
+    } catch (error) {
+      this.logger.error(
+        'Reverse geocode request failed',
+        error instanceof Error
+          ? error.stack
+          : String(error),
+      );
+
+      return null;
+    }
+  }
+
+  /**
+   * ============================================================
+   * DIRECTIONS
+   * ============================================================
+   */
+  async getDirections(
+    origin: {
+      lat: number;
+      lng: number;
+    },
+    destination: {
+      lat: number;
+      lng: number;
+    },
+  ): Promise<DirectionsResult | null> {
+    if (
+      !this.isConfigured()
+    ) {
+      return null;
+    }
+
+    /**
+     * Do not route outside Nigeria.
+     */
+    if (
+      !this.isPlausibleNigeriaCoordinate(
+        origin.lat,
+        origin.lng,
+      ) ||
+      !this.isPlausibleNigeriaCoordinate(
+        destination.lat,
+        destination.lng,
+      )
+    ) {
+      this.logger.warn(
+        'Directions rejected because coordinates are outside Nigeria',
+      );
+
+      return null;
+    }
+
+    try {
+      const params =
+        new URLSearchParams({
+          origin:
+            `${origin.lat},${origin.lng}`,
+
+          destination:
+            `${destination.lat},${destination.lng}`,
+
+          key:
+            this.apiKey,
+        });
+
+      const response =
+        await fetch(
+          `${this.mapsBaseUrl}/directions/json?${params.toString()}`,
+          {
+            signal:
+              AbortSignal.timeout(5000),
+          },
+        );
+
+      if (!response.ok) {
+        return null;
+      }
+
+      const json =
+        await response.json();
+
+      if (
+        json.status !== 'OK' ||
+        !Array.isArray(
+          json.routes,
+        ) ||
+        !json.routes.length
+      ) {
+        this.logger.warn(
+          `Directions failed: ${json.status}`,
+        );
+
+        return null;
+      }
+
+      const route =
+        json.routes[0];
+
+      const leg =
+        route?.legs?.[0];
+
+      if (
+        !leg?.distance?.value ||
+        !leg?.duration?.value
+      ) {
+        return null;
+      }
+
+      return {
+        distanceKm:
+          leg.distance.value /
+          1000,
+
+        durationMin:
+          Math.ceil(
+            leg.duration.value /
+              60,
+          ),
+
+        polyline:
+          route
+            .overview_polyline
+            ?.points ?? null,
+      };
+    } catch (error) {
+      this.logger.error(
+        'Directions request failed',
+        error instanceof Error
+          ? error.stack
+          : String(error),
+      );
+
       return null;
     }
   }
