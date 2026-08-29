@@ -1,12 +1,16 @@
 import { IsPhoneNumber, IsString, Length } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { normalizeNigerianPhone } from '../../common/utils/phone.util';
 
 export class SendOtpDto {
-  @IsPhoneNumber()
+  @Transform(({ value }) => (typeof value === 'string' ? normalizeNigerianPhone(value) : value))
+  @IsPhoneNumber('NG')
   phone: string;
 }
 
 export class VerifyOtpDto {
-  @IsPhoneNumber()
+  @Transform(({ value }) => (typeof value === 'string' ? normalizeNigerianPhone(value) : value))
+  @IsPhoneNumber('NG')
   phone: string;
 
   @IsString()

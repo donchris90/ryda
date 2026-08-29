@@ -1,9 +1,14 @@
 import { ArrayMinSize, IsArray, IsNumber, IsOptional, IsPhoneNumber, Min } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { normalizeNigerianPhone } from '../../common/utils/phone.util';
 
 export class CreateSplitFareDto {
   @IsArray()
   @ArrayMinSize(1)
-  @IsPhoneNumber(undefined, { each: true })
+  @Transform(({ value }) =>
+    Array.isArray(value) ? value.map((v) => (typeof v === 'string' ? normalizeNigerianPhone(v) : v)) : value,
+  )
+  @IsPhoneNumber('NG', { each: true })
   participantPhones: string[];
 
   @IsOptional()
