@@ -43,6 +43,21 @@ export enum DeliveryCancelledBy {
   SYSTEM = 'system',
 }
 
+/**
+ * OPTION A (AUTO) vs OPTION B (choose a courier) — the same product
+ * distinction rides already offer. Persisted on the order (not just a
+ * request-time flag) because it also governs whether requestDelivery()
+ * broadcasts to every eligible driver immediately (AUTO) or waits for
+ * the passenger to pick one via selectCourier() (MANUAL) — a later
+ * reader of this row (support, admin diagnostics, a driver wondering
+ * why they were never notified) needs to be able to tell which
+ * happened.
+ */
+export enum DeliveryDispatchMode {
+  AUTO = 'auto',
+  MANUAL = 'manual',
+}
+
 @Entity('delivery_orders')
 export class DeliveryOrder {
   @PrimaryGeneratedColumn('uuid')
@@ -65,11 +80,30 @@ export class DeliveryOrder {
   // Default of CAR protects any existing production rows from a
   // NOT NULL failure when this column is added via synchronize - new
   // deliveries always specify one explicitly via the DTO.
-  @Column({ type: 'enum', enum: DeliveryVehicleType, default: DeliveryVehicleType.CAR })
+  @Column({
+    type: 'enum',
+    enum: DeliveryVehicleType,
+    default: DeliveryVehicleType.CAR,
+  })
   vehicleType: DeliveryVehicleType;
 
+  // Default of AUTO protects existing production rows the same way
+  // vehicleType's default does above — every delivery ever created
+  // before this column existed was, in effect, AUTO (broadcast to
+  // everyone), since MANUAL/selectCourier() didn't exist yet.
+  @Column({
+    type: 'enum',
+    enum: DeliveryDispatchMode,
+    default: DeliveryDispatchMode.AUTO,
+  })
+  dispatchMode: DeliveryDispatchMode;
+
   @Index()
-  @Column({ type: 'enum', enum: DeliveryStatus, default: DeliveryStatus.REQUESTED })
+  @Column({
+    type: 'enum',
+    enum: DeliveryStatus,
+    default: DeliveryStatus.REQUESTED,
+  })
   status: DeliveryStatus;
 
   // ---- Pickup ----

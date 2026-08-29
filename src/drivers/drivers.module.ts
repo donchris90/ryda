@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { DriverProfile } from './entities/driver-profile.entity';
 import { DriverDocument } from './entities/driver-document.entity';
 import { DriverAvailabilityLog } from './entities/driver-availability-log.entity';
+import { DriverServiceCapability } from './entities/driver-service-capability.entity';
 import { Ride } from '../rides/entities/ride.entity';
 import { RideOffer } from '../dispatch/entities/ride-offer.entity';
 import { DriversService } from './drivers.service';
@@ -16,7 +17,14 @@ import { StorageModule } from '../storage/storage.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([DriverProfile, DriverDocument, DriverAvailabilityLog, Ride, RideOffer]),
+    TypeOrmModule.forFeature([
+      DriverProfile,
+      DriverDocument,
+      DriverAvailabilityLog,
+      DriverServiceCapability,
+      Ride,
+      RideOffer,
+    ]),
     FraudModule,
     PassengersModule,
     StorageModule,

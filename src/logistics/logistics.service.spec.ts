@@ -3,6 +3,7 @@ import { LogisticsService } from './logistics.service';
 import { DeliveryOrder, DeliveryStatus, DeliveryVehicleType, DeliveryCategory } from './entities/delivery-order.entity';
 import { PaymentMethod } from '../common/enums/ride.enum';
 import { DriverApprovalStatus, DriverAvailability } from '../common/enums/driver-status.enum';
+import { DriverService } from '../common/enums/driver-service.enum';
 import { VehicleCategory } from '../common/enums/vehicle.enum';
 import { DispatchDomain } from '../candidate-search/candidate-search.types';
 
@@ -252,7 +253,7 @@ describe('LogisticsService — courier matching via the shared pipeline', () => 
         driversService: {
           findByUserId: jest.fn().mockResolvedValue({
             approvalStatus: DriverApprovalStatus.APPROVED,
-            availability: DriverAvailability.ONLINE,
+            availability: DriverAvailability.ONLINE_FOR_DELIVERIES,
             activeVehicleId: 'vehicle-1',
           }),
           reserveOnlineDriverForTrip: jest.fn().mockResolvedValue({
@@ -275,7 +276,7 @@ describe('LogisticsService — courier matching via the shared pipeline', () => 
 
       const result = await service.acceptDelivery('order-1', 'driver-1');
 
-      expect(deps.driversService.reserveOnlineDriverForTrip).toHaveBeenCalledWith(manager, 'driver-1');
+      expect(deps.driversService.reserveOnlineDriverForTrip).toHaveBeenCalledWith(manager, 'driver-1', DriverService.DELIVERY);
       expect(deps.driversService.emitReservedForTrip).toHaveBeenCalledTimes(1);
       expect(result.status).toBe(DeliveryStatus.ACCEPTED);
     });
@@ -297,7 +298,7 @@ describe('LogisticsService — courier matching via the shared pipeline', () => 
       const deps = baseDeps(manager);
       deps.driversService.findByUserId = jest.fn().mockResolvedValue({
         approvalStatus: DriverApprovalStatus.PENDING,
-        availability: DriverAvailability.ONLINE,
+        availability: DriverAvailability.ONLINE_FOR_DELIVERIES,
         activeVehicleId: 'vehicle-1',
       });
 
@@ -355,7 +356,7 @@ describe('LogisticsService — courier matching via the shared pipeline', () => 
       const sharedDriversService = {
         findByUserId: jest.fn().mockResolvedValue({
           approvalStatus: DriverApprovalStatus.APPROVED,
-          availability: DriverAvailability.ONLINE,
+          availability: DriverAvailability.ONLINE_FOR_DELIVERIES,
           activeVehicleId: 'vehicle-1',
         }),
         reserveOnlineDriverForTrip,

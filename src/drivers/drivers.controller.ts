@@ -11,7 +11,9 @@ import { DriverDocumentsService } from './driver-documents.service';
 import { OnboardDriverDto } from './dto/onboard-driver.dto';
 import { UpdateLocationDto } from './dto/update-location.dto';
 import { UploadDocumentDto, ReviewDocumentDto } from './dto/driver-document.dto';
+import { ReviewServiceCapabilityDto } from './dto/review-service-capability.dto';
 import { DriverAvailability, DriverApprovalStatus } from '../common/enums/driver-status.enum';
+import { DriverService, ServiceApprovalStatus } from '../common/enums/driver-service.enum';
 import { Audit } from '../audit/decorators/audit.decorator';
 import { RequirePermission } from '../common/permissions/require-permission.decorator';
 import { PermissionsGuard } from '../common/permissions/permissions.guard';
@@ -72,6 +74,20 @@ export class DriversController {
     return this.driversService.findByUserId(user.id);
   }
 
+  /**
+   * The driver's own requested/approved service capabilities — backs
+   * the "Your services" dashboard section and the go-online screen's
+   * decision about whether to ask "What are you available for?" at
+   * all (only asked when more than one service is APPROVED).
+   */
+  @Get('me/services')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.DRIVER)
+  async myServices(@CurrentUser() user: User) {
+    const profile = await this.driversService.findByUserId(user.id);
+    return this.driversService.listServiceCapabilities(profile.id);
+  }
+
   @Patch('availability/:status')
   @UseGuards(RolesGuard)
   @Roles(UserRole.DRIVER)
@@ -99,6 +115,35 @@ export class DriversController {
     @Param('status') status: DriverApprovalStatus,
   ) {
     return this.driversService.setApprovalStatus(driverId, status);
+  }
+
+  /**
+   * Per-service approval — distinct from the overall
+   * PATCH :driverId/approval/:status above. A driver requesting RIDE +
+   * DELIVERY at registration does NOT auto-approve either one; this is
+   * the only endpoint that can move a capability to APPROVED, and it's
+   * gated by the same DRIVERS_APPROVE permission and document checks
+   * as overall approval (see DriversService.decideServiceCapability()).
+   */
+  @Patch(':driverId/services/:service/:status')
+  @UseGuards(RolesGuard, PermissionsGuard)
+  @Roles(UserRole.ADMIN, UserRole.COUNTRY_ADMIN, UserRole.CITY_MANAGER, UserRole.SUPER_ADMIN)
+  @RequirePermission(Permission.DRIVERS_APPROVE)
+  @Audit('driver.service_capability.change')
+  decideServiceCapability(
+    @CurrentUser() user: User,
+    @Param('driverId') driverId: string,
+    @Param('service') service: DriverService,
+    @Param('status') status: ServiceApprovalStatus.APPROVED | ServiceApprovalStatus.REJECTED,
+    @Body() dto: ReviewServiceCapabilityDto,
+  ) {
+    return this.driversService.decideServiceCapability(
+      driverId,
+      service,
+      status,
+      user.id,
+      dto.rejectionReason,
+    );
   }
 
   @Get('admin/list')

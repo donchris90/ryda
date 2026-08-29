@@ -6,7 +6,11 @@ import {
   IsString,
   Min,
 } from 'class-validator';
-import { DeliveryCategory, DeliveryVehicleType } from '../entities/delivery-order.entity';
+import {
+  DeliveryCategory,
+  DeliveryVehicleType,
+  DeliveryDispatchMode,
+} from '../entities/delivery-order.entity';
 import { PaymentMethod } from '../../common/enums/ride.enum';
 
 export class EstimateDeliveryDto {
@@ -82,6 +86,12 @@ export class RequestDeliveryDto extends EstimateDeliveryDto {
   @IsOptional()
   @IsEnum(PaymentMethod)
   paymentMethod?: PaymentMethod;
+
+  // Defaults to AUTO in the service layer, not here, so existing
+  // callers that never send this field keep today's behavior exactly.
+  @IsOptional()
+  @IsEnum(DeliveryDispatchMode)
+  dispatchMode?: DeliveryDispatchMode;
 }
 
 export class CancelDeliveryDto {

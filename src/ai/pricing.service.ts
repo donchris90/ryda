@@ -1,10 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { Ride } from '../rides/entities/ride.entity';
 import { DriverProfile } from '../drivers/entities/driver-profile.entity';
 import { RideStatus } from '../common/enums/ride.enum';
-import { DriverApprovalStatus, DriverAvailability } from '../common/enums/driver-status.enum';
+import { DriverApprovalStatus } from '../common/enums/driver-status.enum';
+import { DriverService, onlineAvailabilitiesForService } from '../common/enums/driver-service.enum';
 
 export interface SurgeResult {
   multiplier: number;
@@ -34,7 +35,12 @@ export class PricingService {
   async calculateSurge(city?: string): Promise<SurgeResult> {
     const rideWhere: Record<string, unknown> = { status: RideStatus.SEARCHING };
     const driverWhere: Record<string, unknown> = {
-      availability: DriverAvailability.ONLINE,
+      // Surge is a ride-demand/ride-supply signal, so "available
+      // supply" here means drivers currently online for RIDES
+      // specifically (ONLINE_FOR_RIDES or ONLINE_FOR_BOTH) — a
+      // delivery-only driver shouldn't count as ride supply and
+      // dampen ride surge pricing.
+      availability: In(onlineAvailabilitiesForService(DriverService.RIDE)),
       approvalStatus: DriverApprovalStatus.APPROVED,
     };
     if (city) {

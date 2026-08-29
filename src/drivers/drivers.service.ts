@@ -4,14 +4,21 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, IsNull, EntityManager } from 'typeorm';
+import { Repository, IsNull, EntityManager, In } from 'typeorm';
 import { DriverProfile } from './entities/driver-profile.entity';
 import { DriverAvailabilityLog } from './entities/driver-availability-log.entity';
+import { DriverServiceCapability } from './entities/driver-service-capability.entity';
 import { DriverLevel } from '../common/enums/driver-level.enum';
 import {
   DriverApprovalStatus,
   DriverAvailability,
+  isOnlineAvailability,
 } from '../common/enums/driver-status.enum';
+import {
+  DriverService,
+  ServiceApprovalStatus,
+  onlineAvailabilitiesForService,
+} from '../common/enums/driver-service.enum';
 import { OnboardDriverDto } from './dto/onboard-driver.dto';
 import { haversineDistanceKm } from '../common/utils/geo.util';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -46,6 +53,8 @@ export class DriversService {
     private readonly driversRepo: Repository<DriverProfile>,
     @InjectRepository(DriverAvailabilityLog)
     private readonly availabilityLogRepo: Repository<DriverAvailabilityLog>,
+    @InjectRepository(DriverServiceCapability)
+    private readonly capabilitiesRepo: Repository<DriverServiceCapability>,
     private readonly events: EventEmitter2,
     private readonly fraudService: FraudService,
     private readonly documentsService: DriverDocumentsService,
@@ -60,7 +69,103 @@ export class DriversService {
       licenseNumber: dto.licenseNumber,
       city: dto.city ?? null,
     });
-    return this.driversRepo.save(profile);
+    const saved = await this.driversRepo.save(profile);
+    // Registration means "driver requested this" — never auto-approved.
+    // See requestServices() / decideServiceCapability().
+    await this.requestServices(saved.id, dto.services);
+    return saved;
+  }
+
+  /**
+   * Creates or refreshes PENDING capability rows for the services a
+   * driver has requested. Never touches an already-decided (approved
+   * or rejected) row — re-requesting a service you were already
+   * rejected for should go through a real re-application/appeal path,
+   * not silently flip back to pending here.
+   */
+  async requestServices(driverProfileId: string, services: DriverService[]): Promise<DriverServiceCapability[]> {
+    if (!services.length) {
+      throw new BadRequestException('Select at least one service (Rides and/or Deliveries).');
+    }
+    const existing = await this.capabilitiesRepo.find({ where: { driverProfileId } });
+    const existingByService = new Map(existing.map((c) => [c.service, c]));
+
+    const results: DriverServiceCapability[] = [];
+    for (const service of services) {
+      const current = existingByService.get(service);
+      if (current) {
+        results.push(current);
+        continue;
+      }
+      const created = this.capabilitiesRepo.create({
+        driverProfileId,
+        service,
+        status: ServiceApprovalStatus.PENDING,
+      });
+      results.push(await this.capabilitiesRepo.save(created));
+    }
+    return results;
+  }
+
+  async listServiceCapabilities(driverProfileId: string): Promise<DriverServiceCapability[]> {
+    return this.capabilitiesRepo.find({ where: { driverProfileId } });
+  }
+
+  /** The set of services this driver is currently authorized (APPROVED) to provide. */
+  async getApprovedServices(driverProfileId: string): Promise<DriverService[]> {
+    const rows = await this.capabilitiesRepo.find({
+      where: { driverProfileId, status: ServiceApprovalStatus.APPROVED },
+    });
+    return rows.map((r) => r.service);
+  }
+
+  /**
+   * Admin decision on a single (driver, service) capability. This is
+   * the ONLY path that can move a capability to APPROVED — a driver
+   * can request a service (requestServices, above) but can never
+   * approve themselves; every write here requires the caller to be an
+   * admin (enforced by the controller's guards, same as
+   * setApprovalStatus()).
+   */
+  async decideServiceCapability(
+    driverProfileId: string,
+    service: DriverService,
+    status: ServiceApprovalStatus.APPROVED | ServiceApprovalStatus.REJECTED,
+    decidedByUserId: string,
+    rejectionReason?: string,
+  ): Promise<DriverServiceCapability> {
+    let capability = await this.capabilitiesRepo.findOne({ where: { driverProfileId, service } });
+    if (!capability) {
+      // An admin approving a service the driver never explicitly
+      // requested is still meaningful (e.g. correcting a missed
+      // request) — create the row rather than failing, but it still
+      // requires an explicit admin decision either way.
+      capability = this.capabilitiesRepo.create({ driverProfileId, service, status: ServiceApprovalStatus.PENDING });
+    }
+
+    if (status === ServiceApprovalStatus.APPROVED) {
+      const profile = await this.findById(driverProfileId);
+      const documentsApproved = await this.documentsService.hasAllRequiredApproved(profile.id);
+      if (!documentsApproved) {
+        throw new BadRequestException(
+          "This driver can't be approved for this service yet — their license, insurance, and roadworthiness documents all need to be uploaded and approved first.",
+        );
+      }
+    }
+
+    capability.status = status;
+    capability.decidedAt = new Date();
+    capability.decidedByUserId = decidedByUserId;
+    capability.rejectionReason = status === ServiceApprovalStatus.REJECTED ? rejectionReason ?? null : null;
+    const saved = await this.capabilitiesRepo.save(capability);
+
+    this.events.emit('driver.service_capability.changed', {
+      driverProfileId,
+      service,
+      status,
+    });
+
+    return saved;
   }
 
   async findByUserId(userId: string): Promise<DriverProfile> {
@@ -146,7 +251,30 @@ export class DriversService {
       qb.where('driver.approvalStatus = :status', { status: filter.approvalStatus });
     }
 
-    return qb.getRawMany();
+    const rows = await qb.getRawMany();
+    if (rows.length === 0) return rows;
+
+    // One extra query for all capability rows of the drivers on this
+    // page, rather than N+1 — same bounded-batch pattern
+    // CandidateSearchService uses for vehicles/profiles.
+    const capabilities = await this.capabilitiesRepo.find({
+      where: { driverProfileId: In(rows.map((r) => r.id)) },
+    });
+    const capsByDriverId = new Map<string, DriverServiceCapability[]>();
+    for (const cap of capabilities) {
+      const list = capsByDriverId.get(cap.driverProfileId) ?? [];
+      list.push(cap);
+      capsByDriverId.set(cap.driverProfileId, list);
+    }
+
+    return rows.map((row) => ({
+      ...row,
+      services: (capsByDriverId.get(row.id) ?? []).map((c) => ({
+        service: c.service,
+        status: c.status,
+        rejectionReason: c.rejectionReason,
+      })),
+    }));
   }
 
   async setAvailability(
@@ -157,7 +285,19 @@ export class DriversService {
     if (profile.approvalStatus !== DriverApprovalStatus.APPROVED) {
       throw new BadRequestException('Driver is not approved to go online');
     }
-    if (availability === DriverAvailability.ONLINE || availability === DriverAvailability.BREAK) {
+
+    // A driver mid-trip must finish or have the trip cancelled through
+    // the normal ride/delivery flow before their availability can
+    // change directly — otherwise this would silently overwrite
+    // ON_TRIP (the atomic reservation state) and could let them appear
+    // as a dispatch candidate again while still actually on a trip.
+    if (profile.availability === DriverAvailability.ON_TRIP) {
+      throw new BadRequestException(
+        'You have an active trip — finish or cancel it before changing your availability.',
+      );
+    }
+
+    if (isOnlineAvailability(availability) || availability === DriverAvailability.BREAK) {
       const documentsApproved = await this.documentsService.hasAllRequiredApproved(profile.id);
       if (!documentsApproved) {
         throw new BadRequestException(
@@ -165,59 +305,33 @@ export class DriversService {
         );
       }
     }
-    const previous = profile.availability;
-    profile.availability = availability;
-    const saved = await this.driversRepo.save(profile);
 
-    if (previous !== availability) {
-      // Close whatever period was open, then start a new one — this is
-      // the entire tracking mechanism online-hours/shift/break history
-      // is built on. ON_TRIP transitions also get logged here (driven
-      // by ride acceptance/completion elsewhere, not this endpoint
-      // directly, but still a real availability change worth tracking).
-      const open = await this.availabilityLogRepo.findOne({
-        where: { driverUserId: userId, endedAt: IsNull() },
-        order: { startedAt: 'DESC' },
-      });
-      if (open) {
-        open.endedAt = new Date();
-        await this.availabilityLogRepo.save(open);
+    if (isOnlineAvailability(availability)) {
+      // Server-side re-check of approved services — never trust the
+      // client's requested availability value on its own. A driver
+      // approved for RIDE only can never end up ONLINE_FOR_DELIVERIES
+      // or ONLINE_FOR_BOTH, no matter what the app sends.
+      const approvedServices = new Set(await this.getApprovedServices(profile.id));
+      const requiresRide =
+        availability === DriverAvailability.ONLINE_FOR_RIDES || availability === DriverAvailability.ONLINE_FOR_BOTH;
+      const requiresDelivery =
+        availability === DriverAvailability.ONLINE_FOR_DELIVERIES ||
+        availability === DriverAvailability.ONLINE_FOR_BOTH;
+      if (requiresRide && !approvedServices.has(DriverService.RIDE)) {
+        throw new BadRequestException('You are not approved for rides yet.');
       }
-      await this.availabilityLogRepo.save(
-        this.availabilityLogRepo.create({ driverUserId: userId, status: availability }),
-      );
-
-      if (availability === DriverAvailability.ONLINE) {
-        this.events.emit('driver.online', { driverUserId: userId });
-      } else if (availability === DriverAvailability.OFFLINE) {
-        this.events.emit('driver.offline', { driverUserId: userId });
+      if (requiresDelivery && !approvedServices.has(DriverService.DELIVERY)) {
+        throw new BadRequestException('You are not approved for deliveries yet.');
       }
-
-      // Generic transition event, additive alongside the two above
-      // (which webhooks.service.ts dispatches externally and shouldn't
-      // be touched). This is what the live-driver index listens to —
-      // it needs every transition, not just online/offline, since
-      // ON_TRIP and BREAK also need to pull a driver out of the
-      // dispatch-candidate pool.
-      this.events.emit('driver.availability.changed', {
-        driverUserId: userId,
-        driverProfileId: saved.id,
-        previous,
-        availability,
-        vehicleId: saved.activeVehicleId,
-        lat: saved.currentLat,
-        lng: saved.currentLng,
-        locationUpdatedAt: saved.locationUpdatedAt,
-      });
     }
 
-    return saved;
+    return this.setAvailabilityInternal(profile, availability);
   }
 
   /**
-   * Atomically transitions a driver from ONLINE to ON_TRIP, scoped to the
-   * given transaction manager. This is the actual driver-level lock: the
-   * WHERE clause on `availability = ONLINE` means that if two concurrent
+   * Atomically transitions a driver from an "online for X" state to
+   * ON_TRIP, scoped to the given transaction manager. This is the actual
+   * driver-level lock: the WHERE clause on `availability IN (...)` means that if two concurrent
    * bookings (two rides, or a ride and a delivery) both try to claim the
    * same driver, only one UPDATE can match — the other gets `affected: 0`
    * and must fail its booking rather than silently proceeding. Without
@@ -234,13 +348,24 @@ export class DriversService {
    * Deliberately does not emit `driver.availability.changed` — see
    * emitReservedForTrip() below.
    */
-  async reserveOnlineDriverForTrip(manager: EntityManager, userId: string): Promise<DriverProfile> {
+  async reserveOnlineDriverForTrip(
+    manager: EntityManager,
+    userId: string,
+    service: DriverService,
+  ): Promise<DriverProfile> {
+    // Which "online" values count as claimable for this service — e.g.
+    // a RIDE reservation may claim ONLINE_FOR_RIDES or ONLINE_FOR_BOTH,
+    // but must NOT claim a driver who is ONLINE_FOR_DELIVERIES only.
+    // The WHERE clause itself is still the single shared lock on this
+    // column: whichever domain's UPDATE lands first wins, regardless of
+    // which online state it was.
+    const claimableStates = onlineAvailabilitiesForService(service);
     const result = await manager
       .createQueryBuilder()
       .update(DriverProfile)
       .set({ availability: DriverAvailability.ON_TRIP })
       .where('userId = :userId', { userId })
-      .andWhere('availability = :online', { online: DriverAvailability.ONLINE })
+      .andWhere('availability IN (:...claimableStates)', { claimableStates })
       .execute();
 
     if (result.affected !== 1) {
@@ -284,13 +409,111 @@ export class DriversService {
     this.events.emit('driver.availability.changed', {
       driverUserId: profile.userId,
       driverProfileId: profile.id,
-      previous: DriverAvailability.ONLINE,
+      // The state it was actually reserved *from* — could be any of
+      // the three online states now, not always the same one, so this
+      // reads lastOnlineAvailability rather than assuming a single
+      // constant like the old single-ONLINE model could.
+      previous: profile.lastOnlineAvailability ?? DriverAvailability.ONLINE_FOR_BOTH,
       availability: DriverAvailability.ON_TRIP,
       vehicleId: profile.activeVehicleId,
       lat: profile.currentLat,
       lng: profile.currentLng,
       locationUpdatedAt: profile.locationUpdatedAt,
     });
+  }
+
+  /**
+   * Brings a driver back from ON_TRIP once a trip/delivery ends
+   * (completed or cancelled), restoring whichever specific "online for
+   * X" state they were in before being reserved — not a hardcoded
+   * single ONLINE value, since that no longer exists. Falls back
+   * sensibly if their approved services changed while they were on the
+   * trip (e.g. a service was revoked): downgrades to whichever
+   * approved service(s) their prior state still covers, or takes them
+   * OFFLINE if none are approved any more, rather than throwing and
+   * leaving them stuck ON_TRIP forever.
+   *
+   * Replaces every previous call site's `setAvailability(id, ONLINE)`
+   * after a ride/delivery completes or is cancelled.
+   */
+  async restoreAvailabilityAfterTrip(userId: string): Promise<DriverProfile> {
+    const profile = await this.findByUserId(userId);
+    if (profile.availability !== DriverAvailability.ON_TRIP) {
+      // Nothing to restore from — already handled elsewhere (or was
+      // never actually reserved through this mechanism). Return as-is
+      // rather than forcing a transition that isn't ours to make.
+      return profile;
+    }
+
+    const approvedServices = new Set(await this.getApprovedServices(profile.id));
+    const wanted = profile.lastOnlineAvailability ?? DriverAvailability.ONLINE_FOR_BOTH;
+    const wantsRide =
+      wanted === DriverAvailability.ONLINE_FOR_RIDES || wanted === DriverAvailability.ONLINE_FOR_BOTH;
+    const wantsDelivery =
+      wanted === DriverAvailability.ONLINE_FOR_DELIVERIES || wanted === DriverAvailability.ONLINE_FOR_BOTH;
+
+    const canRide = wantsRide && approvedServices.has(DriverService.RIDE);
+    const canDeliver = wantsDelivery && approvedServices.has(DriverService.DELIVERY);
+
+    let restored: DriverAvailability;
+    if (canRide && canDeliver) restored = DriverAvailability.ONLINE_FOR_BOTH;
+    else if (canRide) restored = DriverAvailability.ONLINE_FOR_RIDES;
+    else if (canDeliver) restored = DriverAvailability.ONLINE_FOR_DELIVERIES;
+    else restored = DriverAvailability.OFFLINE;
+
+    return this.setAvailabilityInternal(profile, restored);
+  }
+
+  /**
+   * Shared tail of setAvailability(), factored out so
+   * restoreAvailabilityAfterTrip() can reuse the exact same
+   * bookkeeping/events without re-running the "not currently ON_TRIP"
+   * guard that would otherwise reject its own transition out of
+   * ON_TRIP.
+   */
+  private async setAvailabilityInternal(
+    profile: DriverProfile,
+    availability: DriverAvailability,
+  ): Promise<DriverProfile> {
+    const previous = profile.availability;
+    profile.availability = availability;
+    if (isOnlineAvailability(availability)) {
+      profile.lastOnlineAvailability = availability;
+    }
+    const saved = await this.driversRepo.save(profile);
+
+    if (previous !== availability) {
+      const open = await this.availabilityLogRepo.findOne({
+        where: { driverUserId: saved.userId, endedAt: IsNull() },
+        order: { startedAt: 'DESC' },
+      });
+      if (open) {
+        open.endedAt = new Date();
+        await this.availabilityLogRepo.save(open);
+      }
+      await this.availabilityLogRepo.save(
+        this.availabilityLogRepo.create({ driverUserId: saved.userId, status: availability }),
+      );
+
+      if (isOnlineAvailability(availability)) {
+        this.events.emit('driver.online', { driverUserId: saved.userId });
+      } else if (availability === DriverAvailability.OFFLINE) {
+        this.events.emit('driver.offline', { driverUserId: saved.userId });
+      }
+
+      this.events.emit('driver.availability.changed', {
+        driverUserId: saved.userId,
+        driverProfileId: saved.id,
+        previous,
+        availability,
+        vehicleId: saved.activeVehicleId,
+        lat: saved.currentLat,
+        lng: saved.currentLng,
+        locationUpdatedAt: saved.locationUpdatedAt,
+      });
+    }
+
+    return saved;
   }
 
   async setActiveVehicle(userId: string, vehicleId: string): Promise<DriverProfile> {
@@ -398,10 +621,21 @@ export class DriversService {
 
     const STALE_LOCATION_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes - generous relative to the driver app's 15s reporting interval, tolerates a few missed pings without letting a genuinely offline driver linger indefinitely
 
+    // Legacy ride-only lookup (used by the manual/AI dispatch offer
+    // flow and the dispatch console's "nearby drivers" view) — kept
+    // scoped to RIDE: online-for-rides AND RIDE-approved, same as
+    // CandidateSearchService's RIDE domain enforces for the newer
+    // shared search path. Not used for deliveries anywhere.
     const qb = this.driversRepo
       .createQueryBuilder('driver')
-      .where('driver.availability = :availability', { availability: DriverAvailability.ONLINE })
+      .where('driver.availability IN (:...onlineStates)', {
+        onlineStates: onlineAvailabilitiesForService(DriverService.RIDE),
+      })
       .andWhere('driver.approvalStatus = :status', { status: DriverApprovalStatus.APPROVED })
+      .andWhere(
+        `driver.id IN (SELECT "driverProfileId" FROM driver_service_capabilities WHERE service = :rideService AND status = :approvedStatus)`,
+        { rideService: DriverService.RIDE, approvedStatus: ServiceApprovalStatus.APPROVED },
+      )
       .andWhere('driver.currentLat IS NOT NULL')
       .andWhere('driver.currentLng IS NOT NULL')
       // Real bug this fixes: locationUpdatedAt was already being set

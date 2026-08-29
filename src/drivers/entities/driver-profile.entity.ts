@@ -49,6 +49,20 @@ export class DriverProfile {
   })
   availability: DriverAvailability;
 
+  // Remembers which "online for X" state the driver was in immediately
+  // before being reserved for a trip (ON_TRIP). Needed because ON_TRIP
+  // overwrites `availability` with a domain-agnostic busy state — once
+  // the trip/delivery ends, this is what the driver is restored to
+  // (see DriversService.restoreAvailabilityAfterTrip()) instead of a
+  // hardcoded single "online" value. Null until the driver has gone
+  // online for the first time.
+  @Column({
+    type: 'enum',
+    enum: DriverAvailability,
+    nullable: true,
+  })
+  lastOnlineAvailability: DriverAvailability | null;
+
   @Column({ type: 'varchar', nullable: true })
   city: string | null;
 

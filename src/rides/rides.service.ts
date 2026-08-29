@@ -61,9 +61,9 @@ const STAFF_ROLES = [
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { TransactionCategory } from '../common/enums/transaction.enum';
 import {
-  DriverAvailability,
   DriverApprovalStatus,
 } from '../common/enums/driver-status.enum';
+import { DriverService, isOnlineForService } from '../common/enums/driver-service.enum';
 import { doesVehicleMatchRideCategory } from '../common/ride-vehicle-match.util';
 
 export interface SelectableDriverResult {
@@ -276,7 +276,7 @@ export class RidesService {
     const terminalStatuses = [RideStatus.CANCELLED, RideStatus.COMPLETED];
     if (terminalStatuses.includes(status) && ride.driverId) {
       await this.driversService
-        .setAvailability(ride.driverId, DriverAvailability.ONLINE)
+        .restoreAvailabilityAfterTrip(ride.driverId)
         .catch(() => undefined);
     }
 
@@ -907,8 +907,8 @@ export class RidesService {
     if (driverProfile.approvalStatus !== DriverApprovalStatus.APPROVED) {
       throw new ForbiddenException('Driver is not approved');
     }
-    if (driverProfile.availability !== DriverAvailability.ONLINE) {
-      throw new BadRequestException('Driver must be online to accept rides');
+    if (!isOnlineForService(driverProfile.availability, DriverService.RIDE)) {
+      throw new BadRequestException('Driver must be online for rides to accept rides');
     }
 
     // Defense in depth, not just the filtered selectable-drivers list -
@@ -970,7 +970,11 @@ export class RidesService {
     // rolls back entirely — including the ride claim — rather than
     // leaving a half-succeeded booking.
     const { saved, reservedProfile } = await this.ridesRepo.manager.transaction(async (manager) => {
-      const reservedProfile = await this.driversService.reserveOnlineDriverForTrip(manager, driverUserId);
+      const reservedProfile = await this.driversService.reserveOnlineDriverForTrip(
+        manager,
+        driverUserId,
+        DriverService.RIDE,
+      );
 
       const updateResult = await manager
         .createQueryBuilder()
@@ -1280,10 +1284,7 @@ export class RidesService {
     }
 
     await this.driversService.recordTripOutcome(driverProfile.id, 'completed');
-    await this.driversService.setAvailability(
-      driverUserId,
-      DriverAvailability.ONLINE,
-    );
+    await this.driversService.restoreAvailabilityAfterTrip(driverUserId);
     await this.passengersService.recordTripOutcome(
       ride.passengerId,
       'completed',
@@ -1515,10 +1516,7 @@ export class RidesService {
         driverProfile.id,
         'cancelled',
       );
-      await this.driversService.setAvailability(
-        ride.driverId,
-        DriverAvailability.ONLINE,
-      );
+      await this.driversService.restoreAvailabilityAfterTrip(ride.driverId);
     }
     await this.passengersService.recordTripOutcome(
       ride.passengerId,

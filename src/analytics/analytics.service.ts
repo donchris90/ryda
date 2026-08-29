@@ -1,12 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { Ride } from '../rides/entities/ride.entity';
 import { User } from '../users/entities/user.entity';
 import { DriverProfile } from '../drivers/entities/driver-profile.entity';
 import { UserRole } from '../common/enums/user-role.enum';
 import { RideStatus } from '../common/enums/ride.enum';
-import { DriverAvailability } from '../common/enums/driver-status.enum';
+import { ONLINE_AVAILABILITIES } from '../common/enums/driver-status.enum';
 
 export interface DashboardOverview {
   totalUsers: number;
@@ -40,7 +40,10 @@ export class AnalyticsService {
       this.usersRepo.count(),
       this.usersRepo.count({ where: { role: UserRole.PASSENGER } }),
       this.usersRepo.count({ where: { role: UserRole.DRIVER } }),
-      this.driversRepo.count({ where: { availability: DriverAvailability.ONLINE } }),
+      // "Online" for this admin overview metric means online for
+      // anything (rides, deliveries, or both) — it's a general
+      // dashboard headline number, not a per-service breakdown.
+      this.driversRepo.count({ where: { availability: In(ONLINE_AVAILABILITIES) } }),
     ]);
 
     const [totalRides, completedRides, cancelledRides] = await Promise.all([

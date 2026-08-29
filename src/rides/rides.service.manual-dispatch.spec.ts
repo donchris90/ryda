@@ -1,6 +1,7 @@
 import { RidesService } from './rides.service';
 import { RideStatus, PaymentMethod, RideCategory } from '../common/enums/ride.enum';
 import { DriverApprovalStatus, DriverAvailability } from '../common/enums/driver-status.enum';
+import { DriverService } from '../common/enums/driver-service.enum';
 import { DriverLevel } from '../common/enums/driver-level.enum';
 import { VehicleCategory } from '../common/enums/vehicle.enum';
 import { DispatchMode } from '../candidate-search/candidate-search.types';
@@ -280,7 +281,7 @@ describe('RidesService — acceptRide atomic driver reservation', () => {
       driversService: {
         findByUserId: jest.fn().mockResolvedValue({
           approvalStatus: DriverApprovalStatus.APPROVED,
-          availability: DriverAvailability.ONLINE,
+          availability: DriverAvailability.ONLINE_FOR_RIDES,
           activeVehicleId: 'vehicle-1',
         }),
         reserveOnlineDriverForTrip: jest.fn().mockResolvedValue({
@@ -303,7 +304,7 @@ describe('RidesService — acceptRide atomic driver reservation', () => {
 
     const result = await service.acceptRide('ride-1', 'driver-1');
 
-    expect(deps.driversService.reserveOnlineDriverForTrip).toHaveBeenCalledWith(manager, 'driver-1');
+    expect(deps.driversService.reserveOnlineDriverForTrip).toHaveBeenCalledWith(manager, 'driver-1', DriverService.RIDE);
     expect(manager.__queryBuilder.execute).toHaveBeenCalled();
     expect(deps.driversService.emitReservedForTrip).toHaveBeenCalledTimes(1);
     expect(result.status).toBe(RideStatus.ACCEPTED);
@@ -385,7 +386,7 @@ describe('RidesService — acceptRide atomic driver reservation', () => {
       driversService: {
         findByUserId: jest.fn().mockResolvedValue({
           approvalStatus: DriverApprovalStatus.APPROVED,
-          availability: DriverAvailability.ONLINE,
+          availability: DriverAvailability.ONLINE_FOR_RIDES,
           activeVehicleId: 'vehicle-1',
         }),
         reserveOnlineDriverForTrip,
@@ -400,7 +401,7 @@ describe('RidesService — acceptRide atomic driver reservation', () => {
       driversService: {
         findByUserId: jest.fn().mockResolvedValue({
           approvalStatus: DriverApprovalStatus.APPROVED,
-          availability: DriverAvailability.ONLINE,
+          availability: DriverAvailability.ONLINE_FOR_RIDES,
           activeVehicleId: 'vehicle-1',
         }),
         reserveOnlineDriverForTrip,

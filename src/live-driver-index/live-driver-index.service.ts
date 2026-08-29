@@ -4,7 +4,11 @@ import { OnEvent } from '@nestjs/event-emitter';
 import Redis from 'ioredis';
 import { LIVE_DRIVER_REDIS_CLIENT } from './live-driver-redis.provider';
 import { RydaRedisKeys } from './redis-keys';
-import { DriverAvailability, DriverApprovalStatus } from '../common/enums/driver-status.enum';
+import {
+  DriverAvailability,
+  DriverApprovalStatus,
+  isOnlineAvailability,
+} from '../common/enums/driver-status.enum';
 import { MetricsService } from '../observability/metrics.service';
 
 export interface LiveDriverUpsertInput {
@@ -80,7 +84,8 @@ export class LiveDriverIndexService {
     private readonly config: ConfigService,
     private readonly metrics: MetricsService,
   ) {
-    const staleSeconds = this.config.get<number>('driverLocation.staleSeconds') ?? 120;
+    const staleSeconds =
+      this.config.get<number>('driverLocation.staleSeconds') ?? 120;
     this.staleMs = staleSeconds * 1000;
   }
 
@@ -96,20 +101,29 @@ export class LiveDriverIndexService {
       const count = await this.redis.zcard(RydaRedisKeys.liveDriverGeoIndex());
       this.metrics.availableDriverCount.set(count);
     } catch (err) {
-      this.logger.error(`Failed to sample available-driver count: ${(err as Error).message}`);
+      this.logger.error(
+        `Failed to sample available-driver count: ${(err as Error).message}`,
+      );
     }
   }
 
   /** Add or refresh a driver's position in the live index. */
   async upsert(entry: LiveDriverUpsertInput): Promise<void> {
     if (!this.isFiniteCoordinate(entry.lat, entry.lng)) {
-      this.logger.warn(`Refusing to index non-finite coordinate for driver ${entry.driverUserId}`);
+      this.logger.warn(
+        `Refusing to index non-finite coordinate for driver ${entry.driverUserId}`,
+      );
       return;
     }
     const updatedAt = entry.updatedAt ?? Date.now();
     try {
       const pipeline = this.redis.pipeline();
-      pipeline.geoadd(RydaRedisKeys.liveDriverGeoIndex(), entry.lng, entry.lat, entry.driverUserId);
+      pipeline.geoadd(
+        RydaRedisKeys.liveDriverGeoIndex(),
+        entry.lng,
+        entry.lat,
+        entry.driverUserId,
+      );
       pipeline.hset(RydaRedisKeys.liveDriverMeta(entry.driverUserId), {
         driverProfileId: entry.driverProfileId,
         vehicleId: entry.vehicleId ?? '',
@@ -173,7 +187,9 @@ export class LiveDriverIndexService {
         'WITHDIST',
       )) as unknown as Array<[string, string, [string, string]]>;
     } catch (err) {
-      this.logger.error(`Live-driver GEOSEARCH failed, returning no candidates: ${(err as Error).message}`);
+      this.logger.error(
+        `Live-driver GEOSEARCH failed, returning no candidates: ${(err as Error).message}`,
+      );
       return [];
     }
 
@@ -187,7 +203,9 @@ export class LiveDriverIndexService {
       }
       metaResults = (await pipeline.exec()) ?? [];
     } catch (err) {
-      this.logger.error(`Failed to fetch live-driver metadata, returning no candidates: ${(err as Error).message}`);
+      this.logger.error(
+        `Failed to fetch live-driver metadata, returning no candidates: ${(err as Error).message}`,
+      );
       return [];
     }
 
@@ -204,7 +222,8 @@ export class LiveDriverIndexService {
       if (!metaHash || !metaHash.updatedAt) return;
 
       const updatedAtMs = parseInt(metaHash.updatedAt, 10);
-      if (!Number.isFinite(updatedAtMs) || now - updatedAtMs > this.staleMs) return;
+      if (!Number.isFinite(updatedAtMs) || now - updatedAtMs > this.staleMs)
+        return;
 
       candidates.push({
         driverUserId,
@@ -235,7 +254,7 @@ export class LiveDriverIndexService {
     // that happened to be from an online, approved driver.
     this.metrics.driverLocationUpdatesTotal.inc();
 
-    if (payload.availability !== DriverAvailability.ONLINE) return;
+    if (!isOnlineAvailability(payload.availability)) return;
     if (payload.approvalStatus !== DriverApprovalStatus.APPROVED) return;
     if (!payload.driverProfileId) return;
 
@@ -250,18 +269,23 @@ export class LiveDriverIndexService {
   }
 
   /**
-   * ONLINE/OFFLINE/ON_TRIP/BREAK transition. ONLINE (including a driver
-   * reconnecting after being offline) adds them using whatever location
-   * is already on file, provided it isn't itself stale — a driver who
-   * goes online with a location last reported 10 minutes ago shouldn't
-   * appear as a candidate until their next real GPS ping arrives via
+   * Availability transition (any of the online-for-X states, OFFLINE,
+   * ON_TRIP, or BREAK). Going online (including a driver reconnecting
+   * after being offline) adds them using whatever location is already
+   * on file, provided it isn't itself stale — a driver who goes online
+   * with a location last reported 10 minutes ago shouldn't appear as a
+   * candidate until their next real GPS ping arrives via
    * onLocationUpdated() above. Every other state removes them: on-trip
    * and break drivers should not be dispatch candidates, same as
-   * offline ones.
+   * offline ones. Which *service* they're online for is deliberately
+   * not filtered here — that's CandidateSearchService's job; this
+   * index only knows "reachable at all" vs not.
    */
   @OnEvent('driver.availability.changed')
-  async onAvailabilityChanged(payload: DriverAvailabilityChangedEvent): Promise<void> {
-    if (payload.availability !== DriverAvailability.ONLINE) {
+  async onAvailabilityChanged(
+    payload: DriverAvailabilityChangedEvent,
+  ): Promise<void> {
+    if (!isOnlineAvailability(payload.availability)) {
       await this.remove(payload.driverUserId);
       return;
     }
@@ -290,5 +314,62 @@ export class LiveDriverIndexService {
 
   private isFiniteCoordinate(lat: number, lng: number): boolean {
     return Number.isFinite(lat) && Number.isFinite(lng);
+  }
+
+  /**
+   * Single-driver raw index lookup — used only by the admin dispatch
+   * diagnostic endpoint (requirement: "Why is driver X not available
+   * for courier matching at pickup Y?"). Deliberately separate from
+   * searchNearby(): that method silently drops a driver whose GPS is
+   * stale or whose metadata is missing, which is exactly the
+   * information a diagnostic needs to surface rather than hide.
+   */
+  async getEntry(driverUserId: string): Promise<{
+    indexed: boolean;
+    lat: number | null;
+    lng: number | null;
+    updatedAtMs: number | null;
+    gpsFreshMs: number | null;
+    isFresh: boolean;
+    vehicleId: string | null;
+  }> {
+    try {
+      const [meta, position] = await Promise.all([
+        this.redis.hgetall(RydaRedisKeys.liveDriverMeta(driverUserId)),
+        this.redis.geopos(RydaRedisKeys.liveDriverGeoIndex(), driverUserId),
+      ]);
+
+      const hasMeta = meta && Object.keys(meta).length > 0;
+      const coords = position?.[0];
+      const updatedAtMs =
+        hasMeta && meta.updatedAt ? parseInt(meta.updatedAt, 10) : null;
+      const gpsFreshMs =
+        updatedAtMs != null && Number.isFinite(updatedAtMs)
+          ? Date.now() - updatedAtMs
+          : null;
+
+      return {
+        indexed: !!hasMeta && !!coords,
+        lat: coords ? parseFloat(coords[1]) : null,
+        lng: coords ? parseFloat(coords[0]) : null,
+        updatedAtMs,
+        gpsFreshMs,
+        isFresh: gpsFreshMs != null && gpsFreshMs <= this.staleMs,
+        vehicleId: hasMeta ? meta.vehicleId || null : null,
+      };
+    } catch (err) {
+      this.logger.error(
+        `Failed to read live-driver index entry for ${driverUserId}: ${(err as Error).message}`,
+      );
+      return {
+        indexed: false,
+        lat: null,
+        lng: null,
+        updatedAtMs: null,
+        gpsFreshMs: null,
+        isFresh: false,
+        vehicleId: null,
+      };
+    }
   }
 }
