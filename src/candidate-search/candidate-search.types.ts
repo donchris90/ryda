@@ -63,3 +63,29 @@ export interface CandidateSearchOutcome {
   /** How many progressive-expansion rounds were attempted. */
   roundsAttempted: number;
 }
+
+/**
+ * Internal-only breakdown of where candidates fell out of the pipeline,
+ * used solely for the zero-result debug log in CandidateSearchService
+ * (requirement NINTH) — never part of the public search contract.
+ * rejectionReasons is keyed by driverUserId (already an internal
+ * identifier, not PII) and holds one of the safe reason codes.
+ */
+export interface EligibilityDiagnostics {
+  redisCandidateCount: number;
+  approvedCandidateCount: number;
+  // Online specifically for the service this search is for (e.g.
+  // ONLINE_FOR_RIDES or ONLINE_FOR_BOTH for a RIDE search) — not just
+  // "online for something".
+  onlineCandidateCount: number;
+  // Online for the RIGHT service (e.g. ONLINE_FOR_RIDES for a RIDE
+  // search) AND holding an APPROVED capability row for it — see
+  // DriverServiceCapability. Tracked as one combined stage rather than
+  // two separate counters since both conditions gate on the exact same
+  // "is this driver even a candidate for this domain" question.
+  serviceApprovedCandidateCount: number;
+  activeVehicleCandidateCount: number;
+  activeVehicleStatusCandidateCount: number;
+  compatibleVehicleCandidateCount: number;
+  rejectionReasons: Record<string, string>;
+}

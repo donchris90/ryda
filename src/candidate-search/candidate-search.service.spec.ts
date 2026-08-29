@@ -1,11 +1,13 @@
 import { CandidateSearchService } from './candidate-search.service';
 import { DispatchDomain, DispatchMode } from './candidate-search.types';
 import { DriverApprovalStatus, DriverAvailability } from '../common/enums/driver-status.enum';
+import { DriverService, ServiceApprovalStatus } from '../common/enums/driver-service.enum';
 import { VehicleCategory, VehicleStatus } from '../common/enums/vehicle.enum';
 import { DriverLevel } from '../common/enums/driver-level.enum';
 import { RideCategory } from '../common/enums/ride.enum';
 import { DeliveryVehicleType } from '../logistics/entities/delivery-order.entity';
 import { DriverProfile } from '../drivers/entities/driver-profile.entity';
+import { DriverServiceCapability } from '../drivers/entities/driver-service-capability.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 
 const LAGOS = { lat: 6.5244, lng: 3.3792 };
@@ -15,7 +17,7 @@ function profile(overrides: Partial<DriverProfile> = {}): DriverProfile {
     id: `profile-${overrides.userId ?? 'x'}`,
     userId: 'driver-x',
     approvalStatus: DriverApprovalStatus.APPROVED,
-    availability: DriverAvailability.ONLINE,
+    availability: DriverAvailability.ONLINE_FOR_BOTH,
     activeVehicleId: 'vehicle-x',
     rating: '4.80',
     level: DriverLevel.STANDARD,
@@ -31,6 +33,10 @@ function vehicle(overrides: Partial<Vehicle> = {}): Vehicle {
     approvedRideCategories: null,
     ...overrides,
   } as Vehicle;
+}
+
+function capability(driverProfileId: string, service: DriverService, status = ServiceApprovalStatus.APPROVED) {
+  return { driverProfileId, service, status } as DriverServiceCapability;
 }
 
 /** In-memory fake mirroring the LiveDriverIndexService.searchNearby() surface. */
@@ -53,15 +59,18 @@ class FakeLiveDriverIndex {
   }
 }
 
-/** Minimal fake TypeORM repository — just the `.find({ where: { X: In([...]) } })` shape this service uses. */
-class FakeRepo<T extends { id?: string; userId?: string }> {
+/** Minimal fake TypeORM repository — supports the `.find({ where: {...} })` shapes this service uses, including multiple simultaneous conditions (some plain, some wrapped in In()). */
+class FakeRepo<T extends Record<string, any>> {
   rows: T[] = [];
 
   async find({ where }: { where: Record<string, any> }) {
-    const key = Object.keys(where)[0];
-    const inClause = where[key];
-    const values: string[] = inClause?._value ?? inClause?.value ?? inClause;
-    return this.rows.filter((r) => values.includes((r as any)[key]));
+    return this.rows.filter((row) =>
+      Object.entries(where).every(([key, condition]) => {
+        const values = condition?._value ?? condition?.value;
+        if (values) return values.includes(row[key]);
+        return row[key] === condition;
+      }),
+    );
   }
 }
 
@@ -100,22 +109,31 @@ describe('CandidateSearchService', () => {
   let liveDriverIndex: FakeLiveDriverIndex;
   let driversRepo: FakeRepo<DriverProfile>;
   let vehiclesRepo: FakeRepo<Vehicle>;
+  let capabilitiesRepo: FakeRepo<DriverServiceCapability>;
   let service: CandidateSearchService;
 
   beforeEach(() => {
     liveDriverIndex = new FakeLiveDriverIndex();
     driversRepo = new FakeRepo<DriverProfile>();
     vehiclesRepo = new FakeRepo<Vehicle>();
+    capabilitiesRepo = new FakeRepo<DriverServiceCapability>();
     service = new CandidateSearchService(
       liveDriverIndex as any,
       driversRepo as any,
       vehiclesRepo as any,
+      capabilitiesRepo as any,
       fakeConfig(),
       fakeMetrics(),
     );
   });
 
-  function addOnlineDriver(userId: string, distanceKm: number, opts: Partial<DriverProfile & Vehicle> = {}) {
+  function addOnlineDriver(
+    userId: string,
+    distanceKm: number,
+    opts: Partial<DriverProfile & Vehicle> & {
+      services?: Array<{ service: DriverService; status: ServiceApprovalStatus }>;
+    } = {},
+  ) {
     liveDriverIndex.entries.push({ driverUserId: userId, distanceKm, vehicleId: `veh-${userId}` });
     driversRepo.rows.push(
       profile({
@@ -123,7 +141,7 @@ describe('CandidateSearchService', () => {
         id: `profile-${userId}`,
         activeVehicleId: `veh-${userId}`,
         approvalStatus: opts.approvalStatus ?? DriverApprovalStatus.APPROVED,
-        availability: opts.availability ?? DriverAvailability.ONLINE,
+        availability: opts.availability ?? DriverAvailability.ONLINE_FOR_BOTH,
         rating: opts.rating ?? '4.80',
         level: opts.level ?? DriverLevel.STANDARD,
       }),
@@ -136,6 +154,15 @@ describe('CandidateSearchService', () => {
         approvedRideCategories: opts.approvedRideCategories ?? null,
       }),
     );
+    // Default: approved for both services, unless the test says otherwise —
+    // matches the "existing driver migrated to both" backward-compat default.
+    const services = opts.services ?? [
+      { service: DriverService.RIDE, status: ServiceApprovalStatus.APPROVED },
+      { service: DriverService.DELIVERY, status: ServiceApprovalStatus.APPROVED },
+    ];
+    for (const s of services) {
+      capabilitiesRepo.rows.push(capability(`profile-${userId}`, s.service, s.status));
+    }
   }
 
   const rideInput = (overrides: Partial<Parameters<CandidateSearchService['search']>[0]> = {}) => ({
@@ -195,7 +222,7 @@ describe('CandidateSearchService', () => {
     expect(result.candidates.map((c) => c.driverUserId)).toEqual(['at-10km']);
   });
 
-  it('excludes a driver that is not ONLINE in Postgres (defense in depth against a stale index entry)', async () => {
+  it('excludes a driver that is not online for RIDE in Postgres (defense in depth against a stale index entry)', async () => {
     addOnlineDriver('went-on-trip', 3, { availability: DriverAvailability.ON_TRIP });
 
     const result = await service.search(rideInput());
@@ -314,6 +341,126 @@ describe('CandidateSearchService', () => {
 
     expect(result.candidates.map((c) => c.driverUserId)).not.toContain('unrelated-online-driver');
   });
+
+  // ---- Service-capability gating (approved services vs current availability) ----
+
+  it('a RIDE-approved driver appears for a ride search', async () => {
+    addOnlineDriver('ride-only', 3, {
+      availability: DriverAvailability.ONLINE_FOR_RIDES,
+      services: [{ service: DriverService.RIDE, status: ServiceApprovalStatus.APPROVED }],
+    });
+
+    const result = await service.search(rideInput());
+
+    expect(result.candidates.map((c) => c.driverUserId)).toEqual(['ride-only']);
+  });
+
+  it('a DELIVERY-approved driver appears for a courier search', async () => {
+    addOnlineDriver('delivery-only', 3, {
+      availability: DriverAvailability.ONLINE_FOR_DELIVERIES,
+      services: [{ service: DriverService.DELIVERY, status: ServiceApprovalStatus.APPROVED }],
+    });
+
+    const result = await service.search({
+      pickup: LAGOS,
+      domain: DispatchDomain.COURIER,
+      mode: DispatchMode.AUTO,
+      deliveryVehicleType: DeliveryVehicleType.BIKE,
+    });
+
+    expect(result.candidates.map((c) => c.driverUserId)).toEqual(['delivery-only']);
+  });
+
+  it('a RIDE-only approved driver never appears for a courier search, even if somehow online for deliveries', async () => {
+    addOnlineDriver('ride-only-driver', 3, {
+      availability: DriverAvailability.ONLINE_FOR_BOTH,
+      services: [{ service: DriverService.RIDE, status: ServiceApprovalStatus.APPROVED }],
+    });
+
+    const result = await service.search({
+      pickup: LAGOS,
+      domain: DispatchDomain.COURIER,
+      mode: DispatchMode.AUTO,
+      deliveryVehicleType: DeliveryVehicleType.BIKE,
+    });
+
+    expect(result.candidates).toHaveLength(0);
+  });
+
+  it('a DELIVERY-only approved driver never appears for a ride search', async () => {
+    addOnlineDriver('delivery-only-driver', 3, {
+      availability: DriverAvailability.ONLINE_FOR_BOTH,
+      services: [{ service: DriverService.DELIVERY, status: ServiceApprovalStatus.APPROVED }],
+    });
+
+    const result = await service.search(rideInput());
+
+    expect(result.candidates).toHaveLength(0);
+  });
+
+  it('a both-approved driver online for BOTH appears for both a ride and a courier search', async () => {
+    addOnlineDriver('both-driver', 3, { availability: DriverAvailability.ONLINE_FOR_BOTH });
+
+    const rideResult = await service.search(rideInput());
+    const courierResult = await service.search({
+      pickup: LAGOS,
+      domain: DispatchDomain.COURIER,
+      mode: DispatchMode.AUTO,
+      deliveryVehicleType: DeliveryVehicleType.BIKE,
+    });
+
+    expect(rideResult.candidates.map((c) => c.driverUserId)).toEqual(['both-driver']);
+    expect(courierResult.candidates.map((c) => c.driverUserId)).toEqual(['both-driver']);
+  });
+
+  it('a both-approved driver currently online for RIDES ONLY appears for ride search but not courier search', async () => {
+    addOnlineDriver('rides-now', 3, { availability: DriverAvailability.ONLINE_FOR_RIDES });
+
+    const rideResult = await service.search(rideInput());
+    const courierResult = await service.search({
+      pickup: LAGOS,
+      domain: DispatchDomain.COURIER,
+      mode: DispatchMode.AUTO,
+      deliveryVehicleType: DeliveryVehicleType.BIKE,
+    });
+
+    expect(rideResult.candidates.map((c) => c.driverUserId)).toEqual(['rides-now']);
+    expect(courierResult.candidates).toHaveLength(0);
+  });
+
+  it('a both-approved driver currently online for DELIVERIES ONLY appears for courier search but not ride search', async () => {
+    addOnlineDriver('deliveries-now', 3, { availability: DriverAvailability.ONLINE_FOR_DELIVERIES });
+
+    const rideResult = await service.search(rideInput());
+    const courierResult = await service.search({
+      pickup: LAGOS,
+      domain: DispatchDomain.COURIER,
+      mode: DispatchMode.AUTO,
+      deliveryVehicleType: DeliveryVehicleType.BIKE,
+    });
+
+    expect(rideResult.candidates).toHaveLength(0);
+    expect(courierResult.candidates.map((c) => c.driverUserId)).toEqual(['deliveries-now']);
+  });
+
+  it('a driver approved for RIDE but only requested (PENDING) DELIVERY does not appear for courier search', async () => {
+    addOnlineDriver('pending-delivery', 3, {
+      availability: DriverAvailability.ONLINE_FOR_BOTH,
+      services: [
+        { service: DriverService.RIDE, status: ServiceApprovalStatus.APPROVED },
+        { service: DriverService.DELIVERY, status: ServiceApprovalStatus.PENDING },
+      ],
+    });
+
+    const result = await service.search({
+      pickup: LAGOS,
+      domain: DispatchDomain.COURIER,
+      mode: DispatchMode.AUTO,
+      deliveryVehicleType: DeliveryVehicleType.BIKE,
+    });
+
+    expect(result.candidates).toHaveLength(0);
+  });
 });
 
 describe('CandidateSearchService observability (batch 9)', () => {
@@ -321,11 +468,13 @@ describe('CandidateSearchService observability (batch 9)', () => {
     const liveDriverIndex = new FakeLiveDriverIndex();
     const driversRepo = new FakeRepo<DriverProfile>();
     const vehiclesRepo = new FakeRepo<Vehicle>();
+    const capabilitiesRepo = new FakeRepo<DriverServiceCapability>();
     const metrics = fakeMetrics();
     const service = new CandidateSearchService(
       liveDriverIndex as any,
       driversRepo as any,
       vehiclesRepo as any,
+      capabilitiesRepo as any,
       fakeConfig(),
       metrics,
     );
@@ -357,6 +506,8 @@ describe('CandidateSearchService observability (batch 9)', () => {
       profile({ userId: 'close-driver', id: 'profile-close-driver', activeVehicleId: 'veh-close-driver' }),
     );
     vehiclesRepo.rows.push(vehicle({ id: 'veh-close-driver' }));
+    capabilitiesRepo.rows.push(capability('profile-close-driver', DriverService.RIDE));
+    capabilitiesRepo.rows.push(capability('profile-close-driver', DriverService.DELIVERY));
 
     // Found within the initial round this time -> no expansion recorded.
     await service.search({

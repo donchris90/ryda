@@ -14,12 +14,20 @@ import {
   DeliveryCancelledBy,
   DeliveryStatus,
   DeliveryVehicleType,
+  DeliveryDispatchMode,
 } from './entities/delivery-order.entity';
-import { EstimateDeliveryDto, RequestDeliveryDto, CancelDeliveryDto } from './dto/logistics.dto';
+import {
+  EstimateDeliveryDto,
+  RequestDeliveryDto,
+  CancelDeliveryDto,
+} from './dto/logistics.dto';
 import { RateDeliveryDto } from './dto/rate-delivery.dto';
 import { PaymentMethod } from '../common/enums/ride.enum';
 import { TransactionCategory } from '../common/enums/transaction.enum';
-import { DriverApprovalStatus, DriverAvailability } from '../common/enums/driver-status.enum';
+import {
+  DriverApprovalStatus,
+} from '../common/enums/driver-status.enum';
+import { DriverService, isOnlineForService } from '../common/enums/driver-service.enum';
 import { haversineDistanceKm } from '../common/utils/geo.util';
 import { DriversService } from '../drivers/drivers.service';
 import { VehiclesService } from '../vehicles/vehicles.service';
@@ -31,11 +39,17 @@ import { UsersService } from '../users/users.service';
 import { PaymentsService } from '../payments/payments.service';
 import { PaymentStatus } from '../payments/entities/payment-record.entity';
 import { ReconciliationService } from '../reconciliation/reconciliation.service';
-import { SystemSettingsService, SETTING_KEYS } from '../settings/settings.service';
+import {
+  SystemSettingsService,
+  SETTING_KEYS,
+} from '../settings/settings.service';
 import { DeliveryVehicleTypesService } from './delivery-vehicle-types.service';
 import { canVehicleCoverDelivery } from '../common/vehicle-capacity-match.util';
 import { CandidateSearchService } from '../candidate-search/candidate-search.service';
-import { DispatchDomain, DispatchMode } from '../candidate-search/candidate-search.types';
+import {
+  DispatchDomain,
+  DispatchMode,
+} from '../candidate-search/candidate-search.types';
 import { DriverRankingService } from '../ranking/ranking.service';
 import { MetricsService } from '../observability/metrics.service';
 
@@ -46,6 +60,27 @@ export interface DeliveryFareBreakdown {
   totalFare: number;
   estimatedDistanceKm: number;
   currency: string;
+}
+
+/**
+ * Passenger-safe courier candidate shape for OPTION B's candidate list
+ * — deliberately excludes internal driver database ids, phone numbers,
+ * documents, and Redis internals. `id` is the driver's userId, already
+ * treated as public-ish elsewhere (Ride/DeliveryOrder.driverId).
+ */
+export interface CourierCandidateResult {
+  id: string;
+  firstName: string;
+  profilePhoto: string | null;
+  rating: number;
+  vehicle: {
+    category: string;
+    make: string | null;
+    model: string | null;
+    color: string | null;
+  };
+  etaMinutes: number;
+  distanceKm: number;
 }
 
 @Injectable()
@@ -74,7 +109,12 @@ export class LogisticsService {
   ) {}
 
   async estimateFare(dto: EstimateDeliveryDto): Promise<DeliveryFareBreakdown> {
-    const distanceKm = haversineDistanceKm(dto.pickupLat, dto.pickupLng, dto.dropoffLat, dto.dropoffLng);
+    const distanceKm = haversineDistanceKm(
+      dto.pickupLat,
+      dto.pickupLng,
+      dto.dropoffLat,
+      dto.dropoffLng,
+    );
 
     let baseFare: number;
     let perKm: number;
@@ -87,7 +127,9 @@ export class LogisticsService {
     // type is given keeps any existing caller that predates this
     // feature working exactly as before, rather than breaking it.
     if (dto.vehicleType) {
-      const vehicleConfig = await this.vehicleTypesService.getByType(dto.vehicleType);
+      const vehicleConfig = await this.vehicleTypesService.getByType(
+        dto.vehicleType,
+      );
       const maxWeightKg = parseFloat(vehicleConfig.maxWeightKg);
       if (dto.weightKg && dto.weightKg > maxWeightKg) {
         throw new BadRequestException(
@@ -120,7 +162,10 @@ export class LogisticsService {
     const currency = this.config.get<string>('pricing.currency')!;
     const distanceFare = distanceKm * perKm;
     const weightFare = (dto.weightKg ?? 0) * perKg;
-    const totalFare = Math.max(baseFare + distanceFare + weightFare, minimumFare);
+    const totalFare = Math.max(
+      baseFare + distanceFare + weightFare,
+      minimumFare,
+    );
 
     return {
       baseFare: this.round(baseFare),
@@ -132,24 +177,34 @@ export class LogisticsService {
     };
   }
 
-  async requestDelivery(customerId: string, dto: RequestDeliveryDto): Promise<DeliveryOrder> {
+  async requestDelivery(
+    customerId: string,
+    dto: RequestDeliveryDto,
+  ): Promise<DeliveryOrder> {
     const breakdown = await this.estimateFare(dto);
     const paymentMethod = dto.paymentMethod ?? PaymentMethod.CASH;
+    const dispatchMode = dto.dispatchMode ?? DeliveryDispatchMode.AUTO;
 
     if (paymentMethod === PaymentMethod.CORPORATE) {
-      const account = await this.corporateService.getAccountForEmployee(customerId);
+      const account =
+        await this.corporateService.getAccountForEmployee(customerId);
       if (!account) {
-        throw new BadRequestException('You are not linked to an active corporate account');
+        throw new BadRequestException(
+          'You are not linked to an active corporate account',
+        );
       }
     }
     if (dto.isCod && paymentMethod !== PaymentMethod.CASH) {
-      throw new BadRequestException('Cash on delivery requires paymentMethod=cash');
+      throw new BadRequestException(
+        'Cash on delivery requires paymentMethod=cash',
+      );
     }
 
     const order = this.ordersRepo.create({
       customerId,
       category: dto.category,
       vehicleType: dto.vehicleType ?? DeliveryVehicleType.CAR,
+      dispatchMode,
       status: DeliveryStatus.SEARCHING,
       pickupLat: dto.pickupLat,
       pickupLng: dto.pickupLng,
@@ -178,6 +233,20 @@ export class LogisticsService {
 
     const saved = await this.ordersRepo.save(order);
 
+    // MANUAL ("choose a courier") deliberately does NOT broadcast here —
+    // notifying every eligible driver the moment the order exists would
+    // let any of them accept before the passenger ever sees a candidate
+    // list, defeating the entire point of choosing. The passenger instead
+    // calls findSelectableCouriers()/selectCourier() below, and only the
+    // driver they pick is ever told a delivery exists.
+    if (dispatchMode === DeliveryDispatchMode.MANUAL) {
+      this.logger.log(
+        `COURIER request: deliveryId=${saved.id} dispatchMode=manual pickup=(${dto.pickupLat.toFixed(4)},${dto.pickupLng.toFixed(4)}) ` +
+          `— awaiting passenger to select a courier, no broadcast sent`,
+      );
+      return saved;
+    }
+
     // Real gap found while checking notification coverage against the
     // full requested trigger list — deliveries use an open,
     // any-driver-can-accept model (no targeted offer like rides have),
@@ -194,11 +263,9 @@ export class LogisticsService {
     // canVehicleCoverDelivery() check internally, so there's no separate
     // filtering step left to duplicate.
     //
-    // `mode` doesn't map cleanly onto courier's broadcast-and-first-
-    // accept-wins model (there's no passenger driver-picking step the
-    // way MANUAL rides have) — AUTO is used since, like AUTO rides,
-    // nothing here waits for a human to choose a specific driver before
-    // notifying.
+    // AUTO here mirrors AUTO rides — nothing waits for a human to choose
+    // a specific driver before notifying. MANUAL orders take the early
+    // return above instead.
     const searchOutcome = await this.candidateSearchService.search({
       pickup: { lat: dto.pickupLat, lng: dto.pickupLng },
       domain: DispatchDomain.COURIER,
@@ -248,6 +315,142 @@ export class LogisticsService {
     return saved;
   }
 
+  /**
+   * The passenger-facing candidate list for OPTION B ("choose a
+   * courier"), mirroring rides.service.ts's findSelectableDrivers() —
+   * same shared CandidateSearchService + DriverRankingService pipeline,
+   * never a second search implementation. Returns only passenger-safe
+   * fields; `id` here is the driver's userId, which is already the
+   * identifier the rest of this app treats as public-ish (it's what
+   * Ride/DeliveryOrder.driverId holds once assigned) rather than an
+   * internal database row id.
+   */
+  async findSelectableCouriers(
+    orderId: string,
+    customerId: string,
+  ): Promise<CourierCandidateResult[]> {
+    const order = await this.findById(orderId);
+    if (order.customerId !== customerId)
+      throw new ForbiddenException('This is not your delivery');
+    if (
+      order.status !== DeliveryStatus.SEARCHING &&
+      order.status !== DeliveryStatus.REQUESTED
+    ) {
+      return [];
+    }
+
+    const searchOutcome = await this.candidateSearchService.search({
+      pickup: { lat: order.pickupLat, lng: order.pickupLng },
+      domain: DispatchDomain.COURIER,
+      mode: DispatchMode.MANUAL,
+      deliveryVehicleType: order.vehicleType,
+      // A passenger picking manually wants a real list, not just the
+      // first courier found — same reasoning as rides' MANUAL list.
+      minCandidates: 3,
+      limit: 10,
+    });
+
+    if (searchOutcome.candidates.length === 0) return [];
+
+    const rankingOutcome = await this.driverRankingService.rank(
+      { lat: order.pickupLat, lng: order.pickupLng },
+      searchOutcome.candidates,
+    );
+
+    const userIds = rankingOutcome.ranked.map((c) => c.driverUserId);
+    const vehicleIds = rankingOutcome.ranked.map((c) => c.vehicleId);
+    const [users, vehicles] = await Promise.all([
+      this.usersService.findByIds(userIds),
+      Promise.all(
+        vehicleIds.map((id) =>
+          this.vehiclesService.findById(id).catch(() => null),
+        ),
+      ),
+    ]);
+    const userById = new Map(users.map((u) => [u.id, u]));
+    const vehicleById = new Map(
+      vehicles
+        .filter((v): v is NonNullable<typeof v> => !!v)
+        .map((v) => [v.id, v]),
+    );
+
+    return rankingOutcome.ranked.map((c) => {
+      const user = userById.get(c.driverUserId);
+      const vehicle = vehicleById.get(c.vehicleId);
+      return {
+        id: c.driverUserId,
+        firstName: user?.firstName ?? 'Courier',
+        profilePhoto: user?.profilePhotoUrl ?? null,
+        rating: c.rating,
+        vehicle: {
+          category: vehicle?.category ?? c.vehicleCategory,
+          make: vehicle?.make ?? null,
+          model: vehicle?.model ?? null,
+          color: vehicle?.color ?? null,
+        },
+        etaMinutes: c.etaMinutes,
+        distanceKm: c.distanceKm,
+      };
+    });
+  }
+
+  /**
+   * The passenger's explicit pick for OPTION B. Deliberately does NOT
+   * introduce a separate targeted-offer-with-driver-decline step the
+   * way rides' selectDriver()/offerToSpecificDriver() do — courier
+   * already treats "accept" as the moment of assignment (broadcast,
+   * first-to-call-acceptDelivery()-wins, see requestDelivery() above),
+   * and building full offer/timeout infra for courier too is real,
+   * separate scope. Instead this re-validates the driver is still
+   * eligible right now (same membership check rides' selectDriver()
+   * does) and then reserves them through the exact same atomic
+   * transaction acceptDelivery() uses — so a driver who went offline,
+   * on-trip, or lost vehicle compatibility between the passenger
+   * loading the list and tapping a name is rejected here, and two
+   * passengers (or a passenger and a broadcast accept) racing for the
+   * same driver still only ever produce one winner.
+   */
+  async selectCourier(
+    orderId: string,
+    customerId: string,
+    driverUserId: string,
+  ): Promise<DeliveryOrder> {
+    const order = await this.findById(orderId);
+    if (order.customerId !== customerId)
+      throw new ForbiddenException('This is not your delivery');
+    if (
+      order.status !== DeliveryStatus.SEARCHING &&
+      order.status !== DeliveryStatus.REQUESTED
+    ) {
+      throw new BadRequestException(
+        `Cannot select a courier while the delivery is ${order.status}`,
+      );
+    }
+
+    const searchOutcome = await this.candidateSearchService.search({
+      pickup: { lat: order.pickupLat, lng: order.pickupLng },
+      domain: DispatchDomain.COURIER,
+      mode: DispatchMode.MANUAL,
+      deliveryVehicleType: order.vehicleType,
+      // Only need to confirm this one driver is still eligible, not
+      // build a fresh list — see rides.service.ts's selectDriver() for
+      // why minCandidates is set high rather than searching for one.
+      minCandidates: 20,
+      limit: 50,
+    });
+
+    const stillEligible = searchOutcome.candidates.some(
+      (c) => c.driverUserId === driverUserId,
+    );
+    if (!stillEligible) {
+      throw new BadRequestException(
+        'That courier is no longer available — please refresh and pick another.',
+      );
+    }
+
+    return this.acceptDelivery(orderId, driverUserId);
+  }
+
   async findById(id: string): Promise<DeliveryOrder> {
     const order = await this.ordersRepo.findOne({ where: { id } });
     if (!order) throw new NotFoundException('Delivery order not found');
@@ -255,11 +458,17 @@ export class LogisticsService {
   }
 
   async findForCustomer(customerId: string): Promise<DeliveryOrder[]> {
-    return this.ordersRepo.find({ where: { customerId }, order: { createdAt: 'DESC' } });
+    return this.ordersRepo.find({
+      where: { customerId },
+      order: { createdAt: 'DESC' },
+    });
   }
 
   async findForDriver(driverId: string): Promise<DeliveryOrder[]> {
-    return this.ordersRepo.find({ where: { driverId }, order: { createdAt: 'DESC' } });
+    return this.ordersRepo.find({
+      where: { driverId },
+      order: { createdAt: 'DESC' },
+    });
   }
 
   /**
@@ -270,22 +479,30 @@ export class LogisticsService {
    * across both rides and deliveries, not two separate scores, since
    * both reflect the same person's actual service quality.
    */
-  async rateDriver(orderId: string, customerId: string, dto: RateDeliveryDto): Promise<DeliveryOrder> {
+  async rateDriver(
+    orderId: string,
+    customerId: string,
+    dto: RateDeliveryDto,
+  ): Promise<DeliveryOrder> {
     const order = await this.findById(orderId);
-    if (order.customerId !== customerId) throw new ForbiddenException('Not your delivery');
+    if (order.customerId !== customerId)
+      throw new ForbiddenException('Not your delivery');
     if (order.status !== DeliveryStatus.DELIVERED) {
       throw new BadRequestException('Can only rate a completed delivery');
     }
     if (order.driverRating != null) {
       throw new BadRequestException('This delivery has already been rated');
     }
-    if (!order.driverId) throw new BadRequestException('This delivery has no driver to rate');
+    if (!order.driverId)
+      throw new BadRequestException('This delivery has no driver to rate');
 
     order.driverRating = dto.rating;
     order.driverRatingComment = dto.comment ?? null;
     await this.ordersRepo.save(order);
 
-    const driverProfile = await this.driversService.findByUserId(order.driverId);
+    const driverProfile = await this.driversService.findByUserId(
+      order.driverId,
+    );
     await this.driversService.applyRating(driverProfile.id, dto.rating);
 
     return order;
@@ -309,10 +526,18 @@ export class LogisticsService {
    * there's only one lock, shared by both domains, not two separate ones
    * that could each think they'd won.
    */
-  async acceptDelivery(orderId: string, driverUserId: string): Promise<DeliveryOrder> {
+  async acceptDelivery(
+    orderId: string,
+    driverUserId: string,
+  ): Promise<DeliveryOrder> {
     const order = await this.findById(orderId);
-    if (order.status !== DeliveryStatus.SEARCHING && order.status !== DeliveryStatus.REQUESTED) {
-      throw new BadRequestException(`Delivery cannot be accepted from status ${order.status}`);
+    if (
+      order.status !== DeliveryStatus.SEARCHING &&
+      order.status !== DeliveryStatus.REQUESTED
+    ) {
+      throw new BadRequestException(
+        `Delivery cannot be accepted from status ${order.status}`,
+      );
     }
 
     // Read-only pre-checks for a clear, specific error message before
@@ -323,47 +548,63 @@ export class LogisticsService {
     if (driverProfile.approvalStatus !== DriverApprovalStatus.APPROVED) {
       throw new ForbiddenException('Driver is not approved');
     }
-    if (driverProfile.availability !== DriverAvailability.ONLINE) {
-      throw new BadRequestException('Driver must be online to accept deliveries');
+    if (!isOnlineForService(driverProfile.availability, DriverService.DELIVERY)) {
+      throw new BadRequestException(
+        'Driver must be online for deliveries to accept deliveries',
+      );
     }
     if (!driverProfile.activeVehicleId) {
-      throw new BadRequestException('You need an active vehicle on file to accept deliveries');
+      throw new BadRequestException(
+        'You need an active vehicle on file to accept deliveries',
+      );
     }
-    const vehicle = await this.vehiclesService.findById(driverProfile.activeVehicleId);
+    const vehicle = await this.vehiclesService.findById(
+      driverProfile.activeVehicleId,
+    );
     if (!canVehicleCoverDelivery(vehicle.category, order.vehicleType)) {
       throw new BadRequestException(
         `Your registered vehicle can't cover a ${order.vehicleType} delivery. A larger vehicle is required.`,
       );
     }
 
-    const { saved, reservedProfile } = await this.ordersRepo.manager.transaction(async (manager) => {
-      const reservedProfile = await this.driversService.reserveOnlineDriverForTrip(manager, driverUserId);
+    const { saved, reservedProfile } =
+      await this.ordersRepo.manager.transaction(async (manager) => {
+        const reservedProfile =
+          await this.driversService.reserveOnlineDriverForTrip(
+            manager,
+            driverUserId,
+            DriverService.DELIVERY,
+          );
 
-      const updateResult = await manager
-        .createQueryBuilder()
-        .update(DeliveryOrder)
-        .set({
-          driverId: driverUserId,
-          vehicleId: reservedProfile.activeVehicleId,
-          status: DeliveryStatus.ACCEPTED,
-          acceptedAt: new Date(),
-        })
-        .where('id = :id', { id: orderId })
-        .andWhere('status IN (:...statuses)', {
-          statuses: [DeliveryStatus.SEARCHING, DeliveryStatus.REQUESTED],
-        })
-        .execute();
+        const updateResult = await manager
+          .createQueryBuilder()
+          .update(DeliveryOrder)
+          .set({
+            driverId: driverUserId,
+            vehicleId: reservedProfile.activeVehicleId,
+            status: DeliveryStatus.ACCEPTED,
+            acceptedAt: new Date(),
+          })
+          .where('id = :id', { id: orderId })
+          .andWhere('status IN (:...statuses)', {
+            statuses: [DeliveryStatus.SEARCHING, DeliveryStatus.REQUESTED],
+          })
+          .execute();
 
-      if (updateResult.affected !== 1) {
-        // Rolls back reserveOnlineDriverForTrip()'s UPDATE too — the
-        // driver goes right back to ONLINE, exactly as if this call had
-        // never happened.
-        throw new BadRequestException('This delivery was just accepted by another driver.');
-      }
+        if (updateResult.affected !== 1) {
+          // Rolls back reserveOnlineDriverForTrip()'s UPDATE too — the
+          // driver goes right back to ONLINE, exactly as if this call had
+          // never happened.
+          throw new BadRequestException(
+            'This delivery was just accepted by another driver.',
+          );
+        }
 
-      const savedOrder = await manager.findOneOrFail(DeliveryOrder, { where: { id: orderId } });
-      return { saved: savedOrder, reservedProfile };
-    });
+        const savedOrder = await manager.findOneOrFail(DeliveryOrder, {
+          where: { id: orderId },
+        });
+        return { saved: savedOrder, reservedProfile };
+      });
 
     // Only after the transaction actually commits — see
     // reserveOnlineDriverForTrip()'s doc comment in drivers.service.ts
@@ -373,29 +614,47 @@ export class LogisticsService {
     return saved;
   }
 
-  async markPickupArrived(orderId: string, driverUserId: string): Promise<DeliveryOrder> {
+  async markPickupArrived(
+    orderId: string,
+    driverUserId: string,
+  ): Promise<DeliveryOrder> {
     const order = await this.getOwnedByDriver(orderId, driverUserId);
     if (order.status !== DeliveryStatus.ACCEPTED) {
-      throw new BadRequestException('Delivery must be accepted before marking pickup arrival');
+      throw new BadRequestException(
+        'Delivery must be accepted before marking pickup arrival',
+      );
     }
     order.status = DeliveryStatus.PICKUP_ARRIVED;
     return this.ordersRepo.save(order);
   }
 
-  async markPickedUp(orderId: string, driverUserId: string): Promise<DeliveryOrder> {
+  async markPickedUp(
+    orderId: string,
+    driverUserId: string,
+  ): Promise<DeliveryOrder> {
     const order = await this.getOwnedByDriver(orderId, driverUserId);
-    if (order.status !== DeliveryStatus.PICKUP_ARRIVED && order.status !== DeliveryStatus.ACCEPTED) {
-      throw new BadRequestException('Delivery must be accepted/at pickup before marking picked up');
+    if (
+      order.status !== DeliveryStatus.PICKUP_ARRIVED &&
+      order.status !== DeliveryStatus.ACCEPTED
+    ) {
+      throw new BadRequestException(
+        'Delivery must be accepted/at pickup before marking picked up',
+      );
     }
     order.status = DeliveryStatus.PICKED_UP;
     order.pickedUpAt = new Date();
     return this.ordersRepo.save(order);
   }
 
-  async markInTransit(orderId: string, driverUserId: string): Promise<DeliveryOrder> {
+  async markInTransit(
+    orderId: string,
+    driverUserId: string,
+  ): Promise<DeliveryOrder> {
     const order = await this.getOwnedByDriver(orderId, driverUserId);
     if (order.status !== DeliveryStatus.PICKED_UP) {
-      throw new BadRequestException('Delivery must be picked up before marking in transit');
+      throw new BadRequestException(
+        'Delivery must be picked up before marking in transit',
+      );
     }
     order.status = DeliveryStatus.IN_TRANSIT;
     return this.ordersRepo.save(order);
@@ -407,15 +666,24 @@ export class LogisticsService {
    * COD is a variant of cash (customer pays driver directly, driver owes
    * platform commission out of their own wallet/fleet wallet).
    */
-  async markDelivered(orderId: string, driverUserId: string): Promise<DeliveryOrder> {
+  async markDelivered(
+    orderId: string,
+    driverUserId: string,
+  ): Promise<DeliveryOrder> {
     const order = await this.getOwnedByDriver(orderId, driverUserId);
-    if (order.status !== DeliveryStatus.IN_TRANSIT && order.status !== DeliveryStatus.PICKED_UP) {
-      throw new BadRequestException('Delivery must be picked up/in transit to complete');
+    if (
+      order.status !== DeliveryStatus.IN_TRANSIT &&
+      order.status !== DeliveryStatus.PICKED_UP
+    ) {
+      throw new BadRequestException(
+        'Delivery must be picked up/in transit to complete',
+      );
     }
 
     const driverProfile = await this.driversService.findByUserId(driverUserId);
     const vehicleCategory = driverProfile.activeVehicleId
-      ? (await this.vehiclesService.findById(driverProfile.activeVehicleId)).category
+      ? (await this.vehiclesService.findById(driverProfile.activeVehicleId))
+          .category
       : undefined;
 
     const commissionPercent =
@@ -439,7 +707,9 @@ export class LogisticsService {
     await this.ordersRepo.save(order);
 
     if (order.paymentMethod === PaymentMethod.WALLET) {
-      const customerWallet = await this.walletsService.getByUserId(order.customerId);
+      const customerWallet = await this.walletsService.getByUserId(
+        order.customerId,
+      );
       await this.walletsService.debit(
         customerWallet.id,
         totalFare,
@@ -447,7 +717,12 @@ export class LogisticsService {
         order.id,
         `Delivery payment for order ${order.id}`,
       );
-      await this.creditDriverEarnings(order, driverProfile, driverEarnings, commissionPercent);
+      await this.creditDriverEarnings(
+        order,
+        driverProfile,
+        driverEarnings,
+        commissionPercent,
+      );
     } else if (order.paymentMethod === PaymentMethod.CASH) {
       // COD or plain cash — either way the driver collected cash directly,
       // so only the commission owed is debited from them (or their fleet).
@@ -456,12 +731,22 @@ export class LogisticsService {
       // the balance can't cover it right now — same pattern as rides.
       if (driverProfile.fleetCompanyId) {
         try {
-          await this.fleetService.debitFleetCommission(driverProfile.fleetCompanyId, commissionAmount, order.id);
+          await this.fleetService.debitFleetCommission(
+            driverProfile.fleetCompanyId,
+            commissionAmount,
+            order.id,
+          );
         } catch {
-          await this.reconciliationService.recordDebt(null, driverProfile.fleetCompanyId, order.id, commissionAmount);
+          await this.reconciliationService.recordDebt(
+            null,
+            driverProfile.fleetCompanyId,
+            order.id,
+            commissionAmount,
+          );
         }
       } else {
-        const driverWallet = await this.walletsService.getByUserId(driverUserId);
+        const driverWallet =
+          await this.walletsService.getByUserId(driverUserId);
         try {
           await this.walletsService.debit(
             driverWallet.id,
@@ -471,7 +756,12 @@ export class LogisticsService {
             `Commission owed on delivery ${order.id} (${commissionPercent}%)`,
           );
         } catch {
-          await this.reconciliationService.recordDebt(driverUserId, null, order.id, commissionAmount);
+          await this.reconciliationService.recordDebt(
+            driverUserId,
+            null,
+            order.id,
+            commissionAmount,
+          );
         }
       }
       order.earningsSettled = true;
@@ -479,7 +769,9 @@ export class LogisticsService {
     } else if (order.paymentMethod === PaymentMethod.CARD) {
       const customer = await this.usersService.findById(order.customerId);
       if (!customer.email) {
-        throw new BadRequestException('Add an email to your account before paying by card');
+        throw new BadRequestException(
+          'Add an email to your account before paying by card',
+        );
       }
       const payment = await this.paymentsService.chargeSavedCard(
         order.id,
@@ -488,18 +780,35 @@ export class LogisticsService {
         totalFare,
       );
       if (payment.status !== PaymentStatus.SUCCESS) {
-        throw new BadRequestException(payment.failureReason ?? 'Card payment failed');
+        throw new BadRequestException(
+          payment.failureReason ?? 'Card payment failed',
+        );
       }
-      await this.creditDriverEarnings(order, driverProfile, driverEarnings, commissionPercent);
+      await this.creditDriverEarnings(
+        order,
+        driverProfile,
+        driverEarnings,
+        commissionPercent,
+      );
     } else if (order.paymentMethod === PaymentMethod.CORPORATE) {
-      const account = await this.corporateService.getAccountForEmployee(order.customerId);
-      if (!account) throw new BadRequestException('Customer is not linked to a corporate account');
+      const account = await this.corporateService.getAccountForEmployee(
+        order.customerId,
+      );
+      if (!account)
+        throw new BadRequestException(
+          'Customer is not linked to a corporate account',
+        );
       await this.corporateService.debitForRide(account.id, totalFare, order.id);
-      await this.creditDriverEarnings(order, driverProfile, driverEarnings, commissionPercent);
+      await this.creditDriverEarnings(
+        order,
+        driverProfile,
+        driverEarnings,
+        commissionPercent,
+      );
     }
 
     await this.driversService.recordTripOutcome(driverProfile.id, 'completed');
-    await this.driversService.setAvailability(driverUserId, DriverAvailability.ONLINE);
+    await this.driversService.restoreAvailabilityAfterTrip(driverUserId);
 
     this.events.emit('delivery.delivered', {
       customerId: order.customerId,
@@ -518,14 +827,25 @@ export class LogisticsService {
   ): Promise<DeliveryOrder> {
     const order = await this.findById(orderId);
 
-    if (cancelledBy === DeliveryCancelledBy.CUSTOMER && order.customerId !== actorUserId) {
+    if (
+      cancelledBy === DeliveryCancelledBy.CUSTOMER &&
+      order.customerId !== actorUserId
+    ) {
       throw new ForbiddenException('Not your delivery');
     }
-    if (cancelledBy === DeliveryCancelledBy.DRIVER && order.driverId !== actorUserId) {
+    if (
+      cancelledBy === DeliveryCancelledBy.DRIVER &&
+      order.driverId !== actorUserId
+    ) {
       throw new ForbiddenException('Not your delivery');
     }
-    if (order.status === DeliveryStatus.DELIVERED || order.status === DeliveryStatus.CANCELLED) {
-      throw new BadRequestException(`Delivery cannot be cancelled from status ${order.status}`);
+    if (
+      order.status === DeliveryStatus.DELIVERED ||
+      order.status === DeliveryStatus.CANCELLED
+    ) {
+      throw new BadRequestException(
+        `Delivery cannot be cancelled from status ${order.status}`,
+      );
     }
 
     // Same lost-update risk cancelRide() had, and the same fix: claim the
@@ -562,15 +882,25 @@ export class LogisticsService {
     order.cancelReason = dto.reason ?? null;
 
     if (order.driverId) {
-      const driverProfile = await this.driversService.findByUserId(order.driverId);
-      await this.driversService.recordTripOutcome(driverProfile.id, 'cancelled');
-      await this.driversService.setAvailability(order.driverId, DriverAvailability.ONLINE);
+      const driverProfile = await this.driversService.findByUserId(
+        order.driverId,
+      );
+      await this.driversService.recordTripOutcome(
+        driverProfile.id,
+        'cancelled',
+      );
+      await this.driversService.restoreAvailabilityAfterTrip(order.driverId);
     }
 
     const notifyUserId =
-      cancelledBy === DeliveryCancelledBy.CUSTOMER ? order.driverId : order.customerId;
+      cancelledBy === DeliveryCancelledBy.CUSTOMER
+        ? order.driverId
+        : order.customerId;
     if (notifyUserId) {
-      this.events.emit('delivery.cancelled', { notifyUserId, reason: order.cancelReason });
+      this.events.emit('delivery.cancelled', {
+        notifyUserId,
+        reason: order.cancelReason,
+      });
     }
 
     return order;
@@ -583,9 +913,15 @@ export class LogisticsService {
     commissionPercent: number,
   ): Promise<void> {
     if (driverProfile.fleetCompanyId) {
-      await this.fleetService.creditForRideEarning(driverProfile.fleetCompanyId, driverEarnings, order.id);
+      await this.fleetService.creditForRideEarning(
+        driverProfile.fleetCompanyId,
+        driverEarnings,
+        order.id,
+      );
     } else {
-      const driverWallet = await this.walletsService.getByUserId(driverProfile.userId);
+      const driverWallet = await this.walletsService.getByUserId(
+        driverProfile.userId,
+      );
       await this.walletsService.credit(
         driverWallet.id,
         driverEarnings,
@@ -598,7 +934,10 @@ export class LogisticsService {
     await this.ordersRepo.save(order);
   }
 
-  private async getOwnedByDriver(orderId: string, driverUserId: string): Promise<DeliveryOrder> {
+  private async getOwnedByDriver(
+    orderId: string,
+    driverUserId: string,
+  ): Promise<DeliveryOrder> {
     const order = await this.findById(orderId);
     if (order.driverId !== driverUserId) {
       throw new ForbiddenException('Not your delivery');

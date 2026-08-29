@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, IsNull } from 'typeorm';
 import { DriverAvailabilityLog } from './entities/driver-availability-log.entity';
-import { DriverAvailability } from '../common/enums/driver-status.enum';
+import { DriverAvailability, ONLINE_AVAILABILITIES } from '../common/enums/driver-status.enum';
 import { DriverProfile } from './entities/driver-profile.entity';
 import { Ride } from '../rides/entities/ride.entity';
 import { RideStatus, CancelledBy } from '../common/enums/ride.enum';
@@ -142,7 +142,12 @@ export class DriverAnalyticsService {
     );
     const acceptedOffers = relevantOffers.filter((o) => o.status === RideOfferStatus.ACCEPTED);
 
-    const logs = await this.logsRepo.find({ where: { driverUserId, status: DriverAvailability.ONLINE } });
+    // Total online-hours = time in ANY online-for-X status, not just
+    // one specific service — a driver's total earning-availability
+    // time doesn't distinguish which service they were online for.
+    const logs = await this.logsRepo.find({
+      where: { driverUserId, status: In(ONLINE_AVAILABILITIES) },
+    });
     const relevantLogs = logs.filter((l) => inRange(l.startedAt));
     const onlineMs = relevantLogs.reduce((sum, l) => {
       const end = l.endedAt ?? new Date();

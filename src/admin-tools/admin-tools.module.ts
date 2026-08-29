@@ -4,6 +4,7 @@ import { AdminToolsService } from './admin-tools.service';
 import { AdminToolsController } from './admin-tools.controller';
 import { SettingsModule } from '../settings/settings.module';
 import { FeatureFlagsModule } from '../feature-flags/feature-flags.module';
+import { CandidateSearchModule } from '../candidate-search/candidate-search.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { FeatureFlagsModule } from '../feature-flags/feature-flags.module';
     ),
     SettingsModule,
     FeatureFlagsModule,
+    CandidateSearchModule,
   ],
   providers: [AdminToolsService],
   controllers: [AdminToolsController],

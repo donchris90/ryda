@@ -179,7 +179,7 @@ describe('LiveDriverIndexService', () => {
       await service.onAvailabilityChanged({
         ...baseline,
         previous: DriverAvailability.OFFLINE,
-        availability: DriverAvailability.ONLINE,
+        availability: DriverAvailability.ONLINE_FOR_BOTH,
       });
 
       expect(redis.geo.has('driver-1')).toBe(true);
@@ -192,7 +192,7 @@ describe('LiveDriverIndexService', () => {
         lng: null,
         locationUpdatedAt: null,
         previous: DriverAvailability.OFFLINE,
-        availability: DriverAvailability.ONLINE,
+        availability: DriverAvailability.ONLINE_FOR_BOTH,
       });
 
       expect(redis.geo.has('driver-1')).toBe(false);
@@ -203,7 +203,7 @@ describe('LiveDriverIndexService', () => {
         ...baseline,
         locationUpdatedAt: new Date(Date.now() - 10 * 60 * 1000), // 10 min old
         previous: DriverAvailability.OFFLINE,
-        availability: DriverAvailability.ONLINE,
+        availability: DriverAvailability.ONLINE_FOR_BOTH,
       });
 
       expect(redis.geo.has('driver-1')).toBe(false);
@@ -220,7 +220,7 @@ describe('LiveDriverIndexService', () => {
 
       await service.onAvailabilityChanged({
         ...baseline,
-        previous: DriverAvailability.ONLINE,
+        previous: DriverAvailability.ONLINE_FOR_BOTH,
         availability: DriverAvailability.OFFLINE,
       });
 
@@ -238,7 +238,7 @@ describe('LiveDriverIndexService', () => {
 
       await service.onAvailabilityChanged({
         ...baseline,
-        previous: DriverAvailability.ONLINE,
+        previous: DriverAvailability.ONLINE_FOR_BOTH,
         availability: DriverAvailability.ON_TRIP,
       });
 
@@ -256,7 +256,7 @@ describe('LiveDriverIndexService', () => {
 
       await service.onAvailabilityChanged({
         ...baseline,
-        previous: DriverAvailability.ONLINE,
+        previous: DriverAvailability.ONLINE_FOR_BOTH,
         availability: DriverAvailability.BREAK,
       });
 
@@ -274,7 +274,7 @@ describe('LiveDriverIndexService', () => {
       await service.onAvailabilityChanged({
         ...baseline,
         previous: DriverAvailability.OFFLINE,
-        availability: DriverAvailability.ONLINE,
+        availability: DriverAvailability.ONLINE_FOR_BOTH,
       });
       expect(redis.geo.has('driver-1')).toBe(true);
     });
@@ -287,7 +287,7 @@ describe('LiveDriverIndexService', () => {
         lat: LAGOS.lat,
         lng: LAGOS.lng,
         at: new Date(),
-        availability: DriverAvailability.ONLINE,
+        availability: DriverAvailability.ONLINE_FOR_BOTH,
         approvalStatus: DriverApprovalStatus.APPROVED,
         driverProfileId: 'profile-1',
         vehicleId: 'vehicle-1',
@@ -332,7 +332,7 @@ describe('LiveDriverIndexService', () => {
         lat: LAGOS.lat,
         lng: LAGOS.lng,
         at: new Date(),
-        availability: DriverAvailability.ONLINE,
+        availability: DriverAvailability.ONLINE_FOR_BOTH,
         approvalStatus: DriverApprovalStatus.PENDING,
         driverProfileId: 'profile-1',
         vehicleId: 'vehicle-1',
@@ -349,7 +349,7 @@ describe('LiveDriverIndexService', () => {
         lat: LAGOS.lat,
         lng: LAGOS.lng,
         locationUpdatedAt: new Date(),
-        previous: DriverAvailability.ONLINE,
+        previous: DriverAvailability.ONLINE_FOR_BOTH,
         availability: DriverAvailability.OFFLINE,
       });
       expect(redis.geo.has('driver-1')).toBe(false);
@@ -359,7 +359,7 @@ describe('LiveDriverIndexService', () => {
         lat: LAGOS.lat + 0.01,
         lng: LAGOS.lng + 0.01,
         at: new Date(),
-        availability: DriverAvailability.ONLINE,
+        availability: DriverAvailability.ONLINE_FOR_BOTH,
         approvalStatus: DriverApprovalStatus.APPROVED,
         driverProfileId: 'profile-1',
         vehicleId: 'vehicle-1',

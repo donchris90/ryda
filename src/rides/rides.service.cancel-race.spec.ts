@@ -46,6 +46,7 @@ function buildService(overrides: Record<string, any> = {}) {
       findByUserId: jest.fn().mockResolvedValue({ id: 'profile-1', fleetCompanyId: null }),
       recordTripOutcome: jest.fn(),
       setAvailability: jest.fn(),
+      restoreAvailabilityAfterTrip: jest.fn(),
       ...overrides.driversService,
     },
     vehiclesService: {},
@@ -205,8 +206,8 @@ describe('RidesService.cancelRide — atomic cancellation claim (batch 9)', () =
     ).rejects.toThrow('This ride just changed status');
 
     // Confirms this really is the fix for the lost-update bug: the driver
-    // that acceptRide() just reserved ON_TRIP is never silently put back
-    // ONLINE by this losing cancel attempt.
-    expect(deps.driversService.setAvailability).not.toHaveBeenCalledWith('driver-1', DriverAvailability.ONLINE);
+    // that acceptRide() just reserved ON_TRIP is never silently restored
+    // to online by this losing cancel attempt.
+    expect(deps.driversService.restoreAvailabilityAfterTrip).not.toHaveBeenCalled();
   });
 });

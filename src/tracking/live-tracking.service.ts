@@ -4,7 +4,7 @@ import { In, Repository } from 'typeorm';
 import { Ride } from '../rides/entities/ride.entity';
 import { RideStatus } from '../common/enums/ride.enum';
 import { DriverProfile } from '../drivers/entities/driver-profile.entity';
-import { DriverAvailability } from '../common/enums/driver-status.enum';
+import { DriverAvailability, ONLINE_AVAILABILITIES } from '../common/enums/driver-status.enum';
 import { User } from '../users/entities/user.entity';
 
 const ACTIVE_RIDE_STATUSES = [
@@ -120,10 +120,10 @@ export class LiveTrackingService {
 
     const onlineProfiles = await this.driverProfilesRepo.find({
       where: {
-        availability: In([
-          DriverAvailability.ONLINE,
-          DriverAvailability.ON_TRIP,
-        ]),
+        // Live map view: any driver currently reachable at all — every
+        // online-for-X state, plus ON_TRIP so an in-progress trip's
+        // driver doesn't vanish from the map mid-ride.
+        availability: In([...ONLINE_AVAILABILITIES, DriverAvailability.ON_TRIP]),
         ...(city ? { city } : {}),
       },
       relations: { user: true },
