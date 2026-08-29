@@ -2992,6 +2992,24 @@ at the API layer. Rejecting that same driver still succeeds regardless.
 After uploading and approving all three required documents, approval
 now succeeds. Full regression clean.
 
+## Availability endpoint - unrecognized values no longer crash the server
+
+Real robustness gap found while investigating a live bug report: `PATCH
+/drivers/availability/:status` never validated the route param against
+the actual DriverAvailability enum - it was just a TypeScript type
+annotation, not a runtime check. An unrecognized value (found via the
+project's own outdated e2e-test.sh, still sending the pre-multi-service
+'online' value that no longer exists) reached the database layer
+unchecked and crashed with a raw Postgres invalid-enum error surfacing
+as a generic, unhelpful 500 - the same class of issue as the earlier
+ride-category enum shrink bug.
+
+Fixed with ParseEnumPipe at the API boundary, where this kind of
+mismatch belongs - now returns a clean 400 for any unrecognized value
+instead of an unhandled crash. Protects against any future caller
+(an outdated app build, a bug elsewhere) sending a stale or wrong
+value, not just this one specific historical case.
+
 ## Multi-role accounts, two-tier ride categories, and tiered time-based fares
 
 Three related product changes, made together:

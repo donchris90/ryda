@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, InternalServerErrorException, Param, Patch, Post, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Body, Controller, Delete, Get, InternalServerErrorException, ParseEnumPipe, Param, Patch, Post, Query, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -93,7 +93,7 @@ export class DriversController {
   @Roles(UserRole.DRIVER)
   setAvailability(
     @CurrentUser() user: User,
-    @Param('status') status: DriverAvailability,
+    @Param('status', new ParseEnumPipe(DriverAvailability)) status: DriverAvailability,
   ) {
     return this.driversService.setAvailability(user.id, status);
   }

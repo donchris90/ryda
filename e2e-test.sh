@@ -29,7 +29,7 @@ echo "driver id: $DRIVER_ID"
 echo
 echo "== 3. Onboard driver =="
 ONBOARD=$(curl -s -X POST $BASE/drivers/onboard -H "Content-Type: application/json" -H "Authorization: Bearer $DRIVER_TOKEN" -d '{
-  "licenseNumber": "LAG-DR-00123", "city": "Lagos"
+  "licenseNumber": "LAG-DR-00123", "city": "Lagos", "services": ["ride", "delivery"]
 }')
 echo "$ONBOARD"
 DRIVER_PROFILE_ID=$(echo "$ONBOARD" | jget id)
@@ -60,7 +60,7 @@ VALUES
 
 echo
 echo "== 6. Driver goes online =="
-ONLINE=$(curl -s -X PATCH $BASE/drivers/availability/online -H "Authorization: Bearer $DRIVER_TOKEN")
+ONLINE=$(curl -s -X PATCH $BASE/drivers/availability/online_for_both -H "Authorization: Bearer $DRIVER_TOKEN")
 echo "$ONLINE"
 
 echo
