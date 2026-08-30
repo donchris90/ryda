@@ -1299,6 +1299,16 @@ export class RidesService {
       ride.passengerId,
     );
     await this.promotionsService.grantReferralBonusIfEligible(ride.passengerId);
+    // Driver-app's Referral Centre promises a bonus "when they complete
+    // their first trip" (driver-to-driver referrals), but this call was
+    // missing entirely - grantReferralBonusIfEligible was only ever
+    // invoked for the passenger side, so a driver's referredByCode could
+    // never be honored no matter how many trips they completed. The
+    // function is already idempotent per refereeUserId (unique
+    // constraint on ReferralGrant.refereeUserId), so calling it here too
+    // is safe even if this same user account somehow also completed a
+    // ride as a passenger.
+    await this.promotionsService.grantReferralBonusIfEligible(driverUserId);
 
     this.events.emit('ride.completed', {
       passengerId: ride.passengerId,
