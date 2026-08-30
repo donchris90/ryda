@@ -9,6 +9,7 @@ import { UsersService } from '../users/users.service';
 import { WalletsService } from './wallets.service';
 import { AdminCreditWalletDto } from './dto/admin-credit-wallet.dto';
 import { TransactionCategory } from '../common/enums/transaction.enum';
+import { Audit } from '../audit/decorators/audit.decorator';
 
 @Controller('admin/wallets')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -39,6 +40,7 @@ export class AdminWalletsController {
   }
 
   @Post('credit')
+  @Audit('wallet.admin_credit')
   async credit(@CurrentUser() admin: User, @Body() dto: AdminCreditWalletDto) {
     const user = await this.usersService.findByEmail(dto.email);
     if (!user) throw new NotFoundException('No Ryda account found with that email address');

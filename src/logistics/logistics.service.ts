@@ -701,6 +701,7 @@ export class LogisticsService {
     const commissionAmount = this.round(totalFare * (commissionPercent / 100));
     const driverEarnings = this.round(totalFare - commissionAmount);
 
+    const previousStatus = order.status;
     order.status = DeliveryStatus.DELIVERED;
     order.deliveredAt = new Date();
     order.commissionPercent = commissionPercent.toFixed(2);
@@ -708,105 +709,121 @@ export class LogisticsService {
     order.driverEarnings = driverEarnings.toFixed(2);
     await this.ordersRepo.save(order);
 
-    if (order.paymentMethod === PaymentMethod.WALLET) {
-      const customerWallet = await this.walletsService.getByUserId(
-        order.customerId,
-      );
-      await this.walletsService.debit(
-        customerWallet.id,
-        totalFare,
-        TransactionCategory.DELIVERY_PAYMENT,
-        order.id,
-        `Delivery payment for order ${order.id}`,
-      );
-      await this.creditDriverEarnings(
-        order,
-        driverProfile,
-        driverEarnings,
-        commissionPercent,
-      );
-    } else if (order.paymentMethod === PaymentMethod.CASH) {
-      // COD or plain cash — either way the driver collected cash directly,
-      // so only the commission owed is debited from them (or their fleet).
-      // Falls back to a tracked reconciliation debt (auto-settles on the
-      // next wallet credit) rather than blocking delivery completion if
-      // the balance can't cover it right now — same pattern as rides.
-      if (driverProfile.fleetCompanyId) {
-        try {
-          await this.fleetService.debitFleetCommission(
-            driverProfile.fleetCompanyId,
-            commissionAmount,
-            order.id,
-          );
-        } catch {
-          await this.reconciliationService.recordDebt(
-            null,
-            driverProfile.fleetCompanyId,
-            order.id,
-            commissionAmount,
+    try {
+      if (order.paymentMethod === PaymentMethod.WALLET) {
+        const customerWallet = await this.walletsService.getByUserId(
+          order.customerId,
+        );
+        await this.walletsService.debit(
+          customerWallet.id,
+          totalFare,
+          TransactionCategory.DELIVERY_PAYMENT,
+          order.id,
+          `Delivery payment for order ${order.id}`,
+        );
+        await this.settleDriverEarningsAfterPayerCharged(
+          order,
+          driverProfile,
+          driverEarnings,
+          commissionPercent,
+        );
+      } else if (order.paymentMethod === PaymentMethod.CASH) {
+        // COD or plain cash — either way the driver collected cash directly,
+        // so only the commission owed is debited from them (or their fleet).
+        // Falls back to a tracked reconciliation debt (auto-settles on the
+        // next wallet credit) rather than blocking delivery completion if
+        // the balance can't cover it right now — same pattern as rides.
+        if (driverProfile.fleetCompanyId) {
+          try {
+            await this.fleetService.debitFleetCommission(
+              driverProfile.fleetCompanyId,
+              commissionAmount,
+              order.id,
+            );
+          } catch {
+            await this.reconciliationService.recordDebt(
+              null,
+              driverProfile.fleetCompanyId,
+              order.id,
+              commissionAmount,
+            );
+          }
+        } else {
+          const driverWallet =
+            await this.walletsService.getByUserId(driverUserId);
+          try {
+            await this.walletsService.debit(
+              driverWallet.id,
+              commissionAmount,
+              TransactionCategory.COMMISSION,
+              order.id,
+              `Commission owed on delivery ${order.id} (${commissionPercent}%)`,
+            );
+          } catch {
+            await this.reconciliationService.recordDebt(
+              driverUserId,
+              null,
+              order.id,
+              commissionAmount,
+            );
+          }
+        }
+        order.earningsSettled = true;
+        await this.ordersRepo.save(order);
+      } else if (order.paymentMethod === PaymentMethod.CARD) {
+        const customer = await this.usersService.findById(order.customerId);
+        if (!customer.email) {
+          throw new BadRequestException(
+            'Add an email to your account before paying by card',
           );
         }
-      } else {
-        const driverWallet =
-          await this.walletsService.getByUserId(driverUserId);
-        try {
-          await this.walletsService.debit(
-            driverWallet.id,
-            commissionAmount,
-            TransactionCategory.COMMISSION,
-            order.id,
-            `Commission owed on delivery ${order.id} (${commissionPercent}%)`,
-          );
-        } catch {
-          await this.reconciliationService.recordDebt(
-            driverUserId,
-            null,
-            order.id,
-            commissionAmount,
+        const payment = await this.paymentsService.chargeSavedCard(
+          order.id,
+          order.customerId,
+          customer.email,
+          totalFare,
+        );
+        if (payment.status !== PaymentStatus.SUCCESS) {
+          throw new BadRequestException(
+            payment.failureReason ?? 'Card payment failed',
           );
         }
+        await this.settleDriverEarningsAfterPayerCharged(
+          order,
+          driverProfile,
+          driverEarnings,
+          commissionPercent,
+        );
+      } else if (order.paymentMethod === PaymentMethod.CORPORATE) {
+        const account = await this.corporateService.getAccountForEmployee(
+          order.customerId,
+        );
+        if (!account)
+          throw new BadRequestException(
+            'Customer is not linked to a corporate account',
+          );
+        await this.corporateService.debitForRide(account.id, totalFare, order.id);
+        await this.settleDriverEarningsAfterPayerCharged(
+          order,
+          driverProfile,
+          driverEarnings,
+          commissionPercent,
+        );
       }
-      order.earningsSettled = true;
+    } catch (err) {
+      // Same failure mode rides.service.ts's completeRide() was fixed for:
+      // without this, a payment failure here (e.g. insufficient wallet
+      // balance, declined card, no email on file) left the order
+      // permanently stuck marked DELIVERED with no payment ever taken.
+      // Reverting puts the order back in a genuinely consistent,
+      // retryable state rather than needing a manual database fix.
+      order.status = previousStatus;
+      order.deliveredAt = null;
+      order.commissionPercent = null;
+      order.commissionAmount = null;
+      order.driverEarnings = null;
       await this.ordersRepo.save(order);
-    } else if (order.paymentMethod === PaymentMethod.CARD) {
-      const customer = await this.usersService.findById(order.customerId);
-      if (!customer.email) {
-        throw new BadRequestException(
-          'Add an email to your account before paying by card',
-        );
-      }
-      const payment = await this.paymentsService.chargeSavedCard(
-        order.id,
-        order.customerId,
-        customer.email,
-        totalFare,
-      );
-      if (payment.status !== PaymentStatus.SUCCESS) {
-        throw new BadRequestException(
-          payment.failureReason ?? 'Card payment failed',
-        );
-      }
-      await this.creditDriverEarnings(
-        order,
-        driverProfile,
-        driverEarnings,
-        commissionPercent,
-      );
-    } else if (order.paymentMethod === PaymentMethod.CORPORATE) {
-      const account = await this.corporateService.getAccountForEmployee(
-        order.customerId,
-      );
-      if (!account)
-        throw new BadRequestException(
-          'Customer is not linked to a corporate account',
-        );
-      await this.corporateService.debitForRide(account.id, totalFare, order.id);
-      await this.creditDriverEarnings(
-        order,
-        driverProfile,
-        driverEarnings,
-        commissionPercent,
-      );
+      throw err;
     }
 
     await this.driversService.recordTripOutcome(driverProfile.id, 'completed');
@@ -914,6 +931,29 @@ export class LogisticsService {
     }
 
     return order;
+  }
+
+  private async settleDriverEarningsAfterPayerCharged(
+    order: DeliveryOrder,
+    driverProfile: { userId: string; fleetCompanyId: string | null },
+    driverEarnings: number,
+    commissionPercent: number,
+  ): Promise<void> {
+    try {
+      await this.creditDriverEarnings(
+        order,
+        driverProfile,
+        driverEarnings,
+        commissionPercent,
+      );
+    } catch (err) {
+      this.events.emit('driver_earnings.credit_failed', {
+        orderId: order.id,
+        driverId: driverProfile.userId,
+        amount: driverEarnings,
+        reason: err instanceof Error ? err.message : 'Unknown error crediting driver earnings',
+      });
+    }
   }
 
   private async creditDriverEarnings(

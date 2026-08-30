@@ -149,29 +149,50 @@ export class WithdrawalsService {
    * transfer.failed / transfer.reversed. A failed/reversed transfer
    * refunds the wallet — the driver's money was only ever debited on
    * the assumption the transfer would actually go through.
+   *
+   * The PROCESSING → terminal-status transition happens under a row
+   * lock inside one DB transaction, the same pattern PaymentsService
+   * uses for charge.success/refund webhooks — Paystack documents
+   * webhook retries and duplicate delivery as expected behaviour, so
+   * two near-simultaneous deliveries of the same event (e.g. a
+   * retried transfer.failed) must not both observe PROCESSING and
+   * both refund the wallet.
    */
   async handleTransferWebhook(reference: string, succeeded: boolean, failureReason?: string): Promise<void> {
-    const request = await this.withdrawalsRepo.findOne({ where: { reference } });
-    if (!request || request.status !== WithdrawalStatus.PROCESSING) return; // already settled, or not a withdrawal we know about
+    const outcome = await this.withdrawalsRepo.manager.transaction(async (manager) => {
+      const request = await manager.findOne(WithdrawalRequest, {
+        where: { reference },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!request || request.status !== WithdrawalStatus.PROCESSING) {
+        return null; // unknown reference, or already settled by an earlier delivery
+      }
+
+      if (succeeded) {
+        request.status = WithdrawalStatus.COMPLETED;
+        request.completedAt = new Date();
+      } else {
+        request.status = WithdrawalStatus.FAILED;
+        request.failureReason = failureReason ?? 'Paystack reported the transfer failed';
+      }
+      const saved = await manager.save(request);
+      return { request: saved };
+    });
+
+    if (!outcome) return;
 
     if (succeeded) {
-      request.status = WithdrawalStatus.COMPLETED;
-      request.completedAt = new Date();
-      await this.withdrawalsRepo.save(request);
-      this.events.emit('withdrawal.completed', { userId: request.userId, amount: request.amount });
+      this.events.emit('withdrawal.completed', { userId: outcome.request.userId, amount: outcome.request.amount });
     } else {
-      const wallet = await this.walletsService.getByUserId(request.userId);
+      const wallet = await this.walletsService.getByUserId(outcome.request.userId);
       await this.walletsService.credit(
         wallet.id,
-        parseFloat(request.amount),
+        parseFloat(outcome.request.amount),
         TransactionCategory.WITHDRAWAL,
-        request.reference,
+        outcome.request.reference,
         'Withdrawal reversed — transfer failed',
       );
-      request.status = WithdrawalStatus.FAILED;
-      request.failureReason = failureReason ?? 'Paystack reported the transfer failed';
-      await this.withdrawalsRepo.save(request);
-      this.events.emit('withdrawal.failed', { userId: request.userId, amount: request.amount });
+      this.events.emit('withdrawal.failed', { userId: outcome.request.userId, amount: outcome.request.amount });
     }
   }
 }

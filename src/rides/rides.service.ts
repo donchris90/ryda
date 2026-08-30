@@ -1105,6 +1105,43 @@ export class RidesService {
    *    full fare instead of a personal wallet; driver earnings settle the
    *    same way.
    */
+  /**
+   * Wraps creditDriverEarnings() for the three payment methods where the
+   * payer side (passenger wallet debit, card charge, or corporate account
+   * debit) has already succeeded by the time this runs. That charge is
+   * real and already happened — so unlike a failure earlier in the same
+   * branch, a failure here must NOT propagate up to completeRide()'s
+   * outer catch, which reverts the ride to IN_PROGRESS specifically so
+   * the driver's app can safely retry completion. Retrying after the
+   * payer has already been charged would charge them a second time for
+   * the same trip. The ride stays COMPLETED with earningsSettled left
+   * false — the same signal the bank_transfer path already relies on to
+   * mark a ride as awaiting driver settlement — and ops can follow up,
+   * rather than the passenger paying twice for one ride.
+   */
+  private async settleDriverEarningsAfterPayerCharged(
+    ride: Ride,
+    driverProfile: DriverProfile,
+    driverEarnings: number,
+    commissionPercent: number,
+  ): Promise<void> {
+    try {
+      await this.creditDriverEarnings(
+        ride,
+        driverProfile,
+        driverEarnings,
+        commissionPercent,
+      );
+    } catch (err) {
+      this.events.emit('driver_earnings.credit_failed', {
+        rideId: ride.id,
+        driverId: driverProfile.userId,
+        amount: driverEarnings,
+        reason: err instanceof Error ? err.message : 'Unknown error crediting driver earnings',
+      });
+    }
+  }
+
   async completeRide(rideId: string, driverUserId: string): Promise<Ride> {
     const ride = await this.getOwnedByDriver(rideId, driverUserId);
     if (ride.status !== RideStatus.IN_PROGRESS) {
@@ -1149,7 +1186,7 @@ export class RidesService {
           ride.id,
           `Ride payment for trip ${ride.id}`,
         );
-        await this.creditDriverEarnings(
+        await this.settleDriverEarningsAfterPayerCharged(
           ride,
           driverProfile,
           driverEarnings,
@@ -1224,7 +1261,7 @@ export class RidesService {
           throw new BadRequestException(reason);
         }
         // Synchronous charge — settle immediately, same as wallet.
-        await this.creditDriverEarnings(
+        await this.settleDriverEarningsAfterPayerCharged(
           ride,
           driverProfile,
           driverEarnings,
@@ -1260,7 +1297,7 @@ export class RidesService {
           totalFare,
           ride.id,
         );
-        await this.creditDriverEarnings(
+        await this.settleDriverEarningsAfterPayerCharged(
           ride,
           driverProfile,
           driverEarnings,
