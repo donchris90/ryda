@@ -200,8 +200,17 @@ export class AuthService {
   }
 
   async sendOtp(dto: SendOtpDto, purpose: OtpPurpose = OtpPurpose.PHONE_VERIFICATION) {
-    const { devOnlyCode, expiresInSeconds } = await this.otpService.send(dto.phone, purpose);
-    return { message: 'OTP sent', devOnlyCode, expiresInSeconds };
+    const { devOnlyCode, expiresInSeconds, smsSent } = await this.otpService.send(dto.phone, purpose);
+    // Once the code has genuinely been delivered by SMS, echoing it back
+    // in the API response would defeat the point of sending it out of
+    // band at all - only ever include it here when it wasn't actually
+    // sent (no SMS provider configured), so local/dev testing without
+    // real credentials keeps working.
+    return {
+      message: smsSent ? 'OTP sent' : 'OTP sent (dev mode - no SMS provider configured)',
+      ...(smsSent ? {} : { devOnlyCode }),
+      expiresInSeconds,
+    };
   }
 
   async verifyOtp(dto: VerifyOtpDto, purpose: OtpPurpose = OtpPurpose.PHONE_VERIFICATION) {
