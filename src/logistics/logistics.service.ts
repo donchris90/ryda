@@ -52,6 +52,7 @@ import {
 } from '../candidate-search/candidate-search.types';
 import { DriverRankingService } from '../ranking/ranking.service';
 import { MetricsService } from '../observability/metrics.service';
+import { PromotionsService } from '../promotions/promotions.service';
 
 export interface DeliveryFareBreakdown {
   baseFare: number;
@@ -106,6 +107,7 @@ export class LogisticsService {
     private readonly driverRankingService: DriverRankingService,
     private readonly events: EventEmitter2,
     private readonly metrics: MetricsService,
+    private readonly promotionsService: PromotionsService,
   ) {}
 
   async estimateFare(dto: EstimateDeliveryDto): Promise<DeliveryFareBreakdown> {
@@ -809,6 +811,14 @@ export class LogisticsService {
 
     await this.driversService.recordTripOutcome(driverProfile.id, 'completed');
     await this.driversService.restoreAvailabilityAfterTrip(driverUserId);
+    // Same gap as rides.service.ts's completeRide() had before it was
+    // fixed: grantReferralBonusIfEligible() is generic per user account,
+    // not ride-specific, but nothing on the delivery side ever called
+    // it for either party. Covering both here for parity with rides -
+    // a courier-only customer or driver account should get the same
+    // "your first completed trip" referral honor a rider/driver does.
+    await this.promotionsService.grantReferralBonusIfEligible(order.customerId);
+    await this.promotionsService.grantReferralBonusIfEligible(driverUserId);
 
     this.events.emit('delivery.delivered', {
       customerId: order.customerId,

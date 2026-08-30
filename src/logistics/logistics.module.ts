@@ -19,6 +19,7 @@ import { ReconciliationModule } from '../reconciliation/reconciliation.module';
 import { SettingsModule } from '../settings/settings.module';
 import { CandidateSearchModule } from '../candidate-search/candidate-search.module';
 import { RankingModule } from '../ranking/ranking.module';
+import { PromotionsModule } from '../promotions/promotions.module';
 import { ObservabilityModule } from '../observability/observability.module';
 
 @Module({
@@ -44,6 +45,14 @@ import { ObservabilityModule } from '../observability/observability.module';
     CandidateSearchModule,
     RankingModule,
     ObservabilityModule,
+    // Referral bonuses on first-completed-activity are generic per user
+    // account (see PromotionsService.grantReferralBonusIfEligible) - not
+    // ride-specific despite the doc comment there. RidesService already
+    // calls it for both the passenger and the driver; markDelivered()
+    // below does the same for the delivery customer and driver, closing
+    // a gap where a courier-only account's referral code could never
+    // be honored no matter how many deliveries they completed.
+    PromotionsModule,
   ],
   providers: [LogisticsService, DeliveryVehicleTypesService],
   controllers: [LogisticsController, DeliveryVehicleTypesController, AdminDeliveryVehicleTypesController],

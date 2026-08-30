@@ -92,6 +92,10 @@ function buildService(overrides: Record<string, any> = {}) {
       courierDispatchNoDriverFoundTotal: { inc: jest.fn() },
       ...overrides.metrics,
     },
+    promotionsService: {
+      grantReferralBonusIfEligible: jest.fn(),
+      ...overrides.promotionsService,
+    },
   };
 
   const service = new LogisticsService(
@@ -112,6 +116,7 @@ function buildService(overrides: Record<string, any> = {}) {
     deps.driverRankingService as any,
     deps.events as any,
     deps.metrics as any,
+    deps.promotionsService as any,
   );
 
   return { service, deps };
