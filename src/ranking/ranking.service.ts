@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { GoogleMapsService, DirectionsResult } from '../maps/google-maps.service';
+import { GoogleMapsService, DistanceMatrixElement } from '../maps/google-maps.service';
 import { MetricsService } from '../observability/metrics.service';
 import { CandidateResult } from '../candidate-search/candidate-search.types';
 import { EtaSource, RankedCandidate, RankingOutcome } from './ranking.types';
@@ -52,47 +52,60 @@ export class DriverRankingService {
     const shortlisted = candidates.slice(0, etaCandidateLimit);
     const skipped = candidates.slice(etaCandidateLimit);
 
+    // Single Distance Matrix call for the whole shortlist (many
+    // origins -> one destination) instead of one getDirections() call
+    // per candidate. routingCallsMade now counts underlying HTTP calls
+    // to Google (0 or 1 here), not candidates attempted — the
+    // candidate-level outcome is still fully captured by
+    // routingFailures/fallbackUsed below, and no caller of rank()
+    // reads routingCallsMade today (see RankingOutcome doc comment).
     let routingCallsMade = 0;
     let routingFailures = 0;
     let fallbackUsed = false;
 
-    const rankedShortlist: RankedCandidate[] = await Promise.all(
-      shortlisted.map(async (candidate) => {
-        routingCallsMade += 1;
-        const stopTimer = this.metrics.etaCalculationDurationSeconds.startTimer();
-        let directions: DirectionsResult | null = null;
-        try {
-          directions = await this.googleMaps.getDirections({ lat: candidate.lat, lng: candidate.lng }, pickup);
-        } catch (err) {
-          // GoogleMapsService.getDirections() already catches its own
-          // failures and resolves null — this catch is belt-and-braces
-          // in case that contract ever changes. Ranking must never throw
-          // because a routing call misbehaved.
-          this.logger.warn(
-            `Unexpected error calling routing API for driver ${candidate.driverUserId}: ${(err as Error).message}`,
-          );
-        } finally {
-          stopTimer();
-        }
+    const stopTimer = this.metrics.etaCalculationDurationSeconds.startTimer();
+    let matrixResults: DistanceMatrixElement[] | null = null;
+    try {
+      routingCallsMade += 1;
+      matrixResults = await this.googleMaps.getDistanceMatrix(
+        shortlisted.map((candidate) => ({ lat: candidate.lat, lng: candidate.lng })),
+        pickup,
+      );
+    } catch (err) {
+      // GoogleMapsService.getDistanceMatrix() already catches its own
+      // failures and resolves null — this catch is belt-and-braces in
+      // case that contract ever changes. Ranking must never throw
+      // because a routing call misbehaved.
+      this.logger.warn(`Unexpected error calling Distance Matrix: ${(err as Error).message}`);
+    } finally {
+      stopTimer();
+    }
 
-        if (directions) {
-          return { ...candidate, etaMinutes: directions.durationMin, etaSource: EtaSource.ROUTING };
-        }
+    const rankedShortlist: RankedCandidate[] = shortlisted.map((candidate, index) => {
+      // matrixResults is null when the WHOLE call failed (not
+      // configured, network error, top-level Google error status) -
+      // every candidate falls back in that case. Otherwise each index
+      // has its own element result/null per DistanceMatrixElement's
+      // per-origin failure contract.
+      const element = matrixResults?.[index] ?? null;
 
-        routingFailures += 1;
-        fallbackUsed = true;
-        this.metrics.rankingRoutingFailuresTotal.inc();
-        this.logger.warn(
-          `Routing ETA unavailable for driver ${candidate.driverUserId} — using distance-based fallback, not treating it as a real routing result`,
-        );
+      if (element) {
+        return { ...candidate, etaMinutes: element.durationMin, etaSource: EtaSource.ROUTING };
+      }
 
-        return {
-          ...candidate,
-          etaMinutes: this.fallbackEtaMinutes(candidate.distanceKm),
-          etaSource: EtaSource.FALLBACK_DISTANCE,
-        };
-      }),
-    );
+      routingFailures += 1;
+      fallbackUsed = true;
+      this.metrics.rankingRoutingFailuresTotal.inc();
+      this.logger.warn(
+        `Routing ETA unavailable for driver ${candidate.driverUserId} — using distance-based fallback, not treating it as a real routing result`,
+      );
+
+      return {
+        ...candidate,
+        etaMinutes: this.fallbackEtaMinutes(candidate.distanceKm),
+        etaSource: EtaSource.FALLBACK_DISTANCE,
+      };
+    });
 
     // Candidates beyond the ETA shortlist were never routed — they still
     // get a ranked entry (so a caller with a very small eligible pool
