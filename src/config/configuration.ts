@@ -132,6 +132,15 @@ export default () => ({
     fromNumber: process.env.TWILIO_FROM_NUMBER ?? '',
     whatsappFromNumber: process.env.TWILIO_WHATSAPP_FROM ?? '', // e.g. whatsapp:+14155238886
   },
+  africasTalking: {
+    // Used specifically for OTP SMS delivery — see OtpService /
+    // AfricasTalkingProvider. Independent of the Twilio config above,
+    // which backs general notifications.
+    apiKey: process.env.AFRICASTALKING_API_KEY ?? '',
+    username: process.env.AFRICASTALKING_USERNAME ?? '',
+    senderId: process.env.AFRICASTALKING_SENDER_ID ?? '', // optional shortcode/sender ID
+    baseUrl: process.env.AFRICASTALKING_BASE_URL ?? 'https://api.africastalking.com/version1',
+  },
   sendgrid: {
     apiKey: process.env.SENDGRID_API_KEY ?? '',
     fromEmail: process.env.SENDGRID_FROM_EMAIL ?? 'no-reply@ryda.example',
