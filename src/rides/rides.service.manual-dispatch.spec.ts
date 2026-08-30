@@ -151,7 +151,7 @@ describe('RidesService — manual driver selection', () => {
         fallbackUsed: false,
       });
       deps.usersService.findByIds.mockResolvedValue([
-        { id: 'driver-1', firstName: 'Ada', lastName: 'Okoye' },
+        { id: 'driver-1', firstName: 'Ada', lastName: 'Okoye', profilePhotoUrl: 'https://cdn.example.com/ada.jpg' },
       ]);
       deps.vehiclesService.findById.mockResolvedValue({
         id: 'vehicle-1',
@@ -159,6 +159,7 @@ describe('RidesService — manual driver selection', () => {
         model: 'Corolla',
         color: 'Black',
         plateNumber: 'ABC-123',
+        photoUrl: 'https://cdn.example.com/corolla.jpg',
       });
 
       const result = await service.findSelectableDrivers('ride-1');
@@ -172,10 +173,12 @@ describe('RidesService — manual driver selection', () => {
           level: DriverLevel.STANDARD,
           distanceKm: 2,
           etaMinutes: 6,
+          driverPhotoUrl: 'https://cdn.example.com/ada.jpg',
           vehicleMake: 'Toyota',
           vehicleModel: 'Corolla',
           vehicleColor: 'Black',
           vehiclePlateNumber: 'ABC-123',
+          vehiclePhotoUrl: 'https://cdn.example.com/corolla.jpg',
         },
       ]);
 

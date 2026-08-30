@@ -74,10 +74,12 @@ export interface SelectableDriverResult {
   level: DriverProfile['level'];
   distanceKm: number;
   etaMinutes: number;
+  driverPhotoUrl: string | null;
   vehicleMake: string | null;
   vehicleModel: string | null;
   vehicleColor: string | null;
   vehiclePlateNumber: string | null;
+  vehiclePhotoUrl: string | null;
 }
 
 @Injectable()
@@ -779,10 +781,12 @@ export class RidesService {
         level: c.level,
         distanceKm: c.distanceKm,
         etaMinutes: c.etaMinutes,
+        driverPhotoUrl: user?.profilePhotoUrl ?? null,
         vehicleMake: vehicle?.make ?? null,
         vehicleModel: vehicle?.model ?? null,
         vehicleColor: vehicle?.color ?? null,
         vehiclePlateNumber: vehicle?.plateNumber ?? null,
+        vehiclePhotoUrl: vehicle?.photoUrl ?? null,
       };
     });
   }
