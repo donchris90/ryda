@@ -27,6 +27,23 @@ export class UsersService {
     return this.usersRepo.find({ where: { id: In(ids) } });
   }
 
+  /**
+   * Every active user holding at least one of the given roles — used by
+   * the SOS escalation listener to find on-call staff (admin/support/
+   * dispatcher) to alert, rather than relying on someone to be actively
+   * polling the admin dashboard. `roles` is a Postgres array column, so
+   * this uses the overlap operator (`&&`) rather than `IN`, which only
+   * works against scalar columns.
+   */
+  async findActiveByAnyRole(roles: UserRole[]): Promise<User[]> {
+    if (roles.length === 0) return [];
+    return this.usersRepo
+      .createQueryBuilder('user')
+      .where('user.roles && ARRAY[:...roles]::users_role_enum[]', { roles })
+      .andWhere('user.isActive = true')
+      .getMany();
+  }
+
   async findByPhone(phone: string): Promise<User | null> {
     return this.usersRepo.findOne({ where: { phone } });
   }

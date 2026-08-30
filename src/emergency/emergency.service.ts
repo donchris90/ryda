@@ -79,6 +79,8 @@ export class EmergencyService {
       incidentId: incident.id,
       userId,
       rideId: rideId ?? null,
+      lat: lat ?? null,
+      lng: lng ?? null,
       emergencyContactPhones: emergencyContacts.map((c) => c.phone),
     });
 

@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { OtpCode, OtpPurpose } from './otp-code.entity';
-import { AfricasTalkingProvider } from './providers/africas-talking.provider';
+import { AfricasTalkingProvider } from '../notifications/providers/africas-talking.provider';
 
 const MAX_ATTEMPTS = 5;
 

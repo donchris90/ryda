@@ -14,8 +14,7 @@ import {
   ResolveIncidentDto,
 } from './dto/emergency.dto';
 import { Audit } from '../audit/decorators/audit.decorator';
-
-const RESPONDER_ROLES = [UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.SUPPORT_AGENT, UserRole.DISPATCHER];
+import { RESPONDER_ROLES } from '../common/constants/responder-roles';
 
 @ApiTags('emergency')
 @Controller()

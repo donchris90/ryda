@@ -7,10 +7,12 @@ import { Queue } from 'bullmq';
 import { Notification, NotificationChannel, NotificationCategory, NotificationStatus } from './entities/notification.entity';
 import { DeviceToken, DevicePlatform } from './entities/device-token.entity';
 import { TwilioProvider } from './providers/twilio.provider';
+import { AfricasTalkingProvider } from './providers/africas-talking.provider';
 import { SendGridProvider } from './providers/sendgrid.provider';
 import { FcmProvider } from './providers/fcm.provider';
 import { ExpoPushProvider } from './providers/expo-push.provider';
 import { UsersService } from '../users/users.service';
+import { RESPONDER_ROLES } from '../common/constants/responder-roles';
 
 @Injectable()
 export class NotificationsService {
@@ -22,6 +24,7 @@ export class NotificationsService {
     @InjectRepository(DeviceToken)
     private readonly deviceTokensRepo: Repository<DeviceToken>,
     private readonly twilio: TwilioProvider,
+    private readonly africasTalking: AfricasTalkingProvider,
     private readonly sendgrid: SendGridProvider,
     private readonly fcm: FcmProvider,
     private readonly expoPush: ExpoPushProvider,
@@ -54,6 +57,37 @@ export class NotificationsService {
 
     const result = await this.twilio.sendSms(phone, body);
     return this.applyResult(record, result);
+  }
+
+  /**
+   * SMS to a raw phone number with no backing User account - e.g. an
+   * emergency contact (name+phone only, see EmergencyContact entity),
+   * who can never go through sendSms() above since that requires a
+   * userId to attach a Notification record to. Deliberately doesn't
+   * create any Notification row - there's no user to own it, and
+   * "was an SOS alert delivered to this contact" isn't something the
+   * product needs to query later the way in-app notification history is.
+   *
+   * Uses Africa's Talking rather than Twilio - the only real SMS
+   * provider this project currently has live credentials for. Every
+   * other SMS path in this service still goes through Twilio; if/when
+   * Twilio is configured this method can move back to being provider-
+   * agnostic like the rest, but for now SOS escalation was switched
+   * over deliberately so it can actually deliver.
+   *
+   * Same "log, don't throw" failure handling as every other provider
+   * call in this service - a delivery problem here must never break the
+   * SOS flow itself.
+   */
+  async sendRawSms(phone: string, body: string): Promise<void> {
+    if (!this.africasTalking.isConfigured()) {
+      this.logger.warn(`SMS not configured - would have sent to ${phone}: ${body}`);
+      return;
+    }
+    const result = await this.africasTalking.sendSms(phone, body);
+    if (!result.success) {
+      this.logger.warn(`Raw SMS to ${phone} failed: ${result.error}`);
+    }
   }
 
   async sendWhatsapp(userId: string, phone: string, title: string, body: string, category?: NotificationCategory): Promise<Notification> {
@@ -416,20 +450,72 @@ export class NotificationsService {
   }
 
   @OnEvent('incident.sos_triggered')
-  async onSosTriggered(payload: { incidentId: string; userId: string; emergencyContactPhones: string[] }) {
-    // Confirms receipt to the reporter. Escalating to on-call admin/support
-    // staff and actually SMS-ing the reporter's emergency contacts (whose
-    // phone numbers aren't tied to a User account, so they can't go through
-    // the normal userId-keyed Notification model) is a real gap — see
-    // README. The Incident row itself is real and immediately visible on
-    // GET /admin/emergency/incidents/active for a human to act on.
+  async onSosTriggered(payload: {
+    incidentId: string;
+    userId: string;
+    rideId: string | null;
+    lat: number | null;
+    lng: number | null;
+    emergencyContactPhones: string[];
+  }) {
+    const reporter = await this.usersService.findById(payload.userId).catch(() => null);
+    const reporterName = reporter ? `${reporter.firstName} ${reporter.lastName}` : 'A user';
+    const locationText =
+      payload.lat != null && payload.lng != null
+        ? ` Last known location: https://maps.google.com/?q=${payload.lat},${payload.lng}`
+        : ' Location not available.';
+
+    // 1. Confirm receipt to the reporter. IN_APP/PUSH stay on the normal
+    // queued fan-out (provider-agnostic); SMS is sent directly via
+    // Africa's Talking below rather than through the SMS channel, which
+    // would otherwise go out via TwilioProvider - see sendRawSms() doc
+    // comment for why SOS specifically uses Africa's Talking.
     await this.safeNotify(
       payload.userId,
-      [NotificationChannel.IN_APP, NotificationChannel.PUSH, NotificationChannel.SMS],
+      [NotificationChannel.IN_APP, NotificationChannel.PUSH],
       'SOS received',
       'Your emergency alert has been received. Help is being notified.',
       undefined,
       NotificationCategory.SECURITY,
+    );
+    if (reporter?.phone) {
+      await this.sendRawSms(reporter.phone, 'Your emergency alert has been received. Help is being notified.');
+    }
+
+    // 2. Actively alert on-call staff instead of relying on someone to be
+    // polling GET /admin/emergency/incidents/active. Real gap this
+    // closes: the Incident row was always created correctly, but
+    // nothing pushed word of it to anyone - see README's former
+    // "Known gaps" entry on this.
+    const responders = await this.usersService.findActiveByAnyRole(RESPONDER_ROLES);
+    const staffBody =
+      `${reporterName} triggered SOS.` +
+      (payload.rideId ? ` Ride: ${payload.rideId}.` : '') +
+      locationText;
+    await Promise.all(
+      responders.map(async (responder) => {
+        await this.safeNotify(
+          responder.id,
+          [NotificationChannel.IN_APP, NotificationChannel.PUSH],
+          'SOS ALERT',
+          staffBody,
+          { incidentId: payload.incidentId },
+          NotificationCategory.SECURITY,
+        );
+        if (responder.phone) {
+          await this.sendRawSms(responder.phone, staffBody);
+        }
+      }),
+    );
+
+    // 3. SMS the reporter's own emergency contacts directly. These are
+    // name+phone records (see EmergencyContact entity) with no backing
+    // User account, so they can never go through the userId-keyed
+    // notify()/safeNotify() path above - sendRawSms() is the dedicated
+    // escape hatch for exactly this case.
+    const contactBody = `${reporterName} has triggered an emergency SOS alert on Ryda and may need help.${locationText}`;
+    await Promise.all(
+      payload.emergencyContactPhones.map((phone) => this.sendRawSms(phone, contactBody)),
     );
   }
 
