@@ -634,13 +634,35 @@ export class RidesService {
       ride.id,
       'Driver tip',
     );
-    await this.walletsService.credit(
-      driverWallet.id,
-      amount,
-      TransactionCategory.TIP_RECEIVED,
-      ride.id,
-      'Tip received',
-    );
+
+    // Bug fix: this used to credit the driver and set ride.tipAmount in
+    // one unguarded sequence. If the debit above succeeded but the
+    // credit below then failed (driver wallet not found, transient DB
+    // error, etc.), the exception propagated straight out — tipAmount
+    // was never set, so the "already tipped this trip" guard above
+    // never tripped, and a client retry after seeing that error would
+    // debit the passenger's wallet a second time for the same tip. Same
+    // charged-but-not-settled class of bug as completeRide()'s
+    // settleDriverEarningsAfterPayerCharged: once the payer has been
+    // charged, a downstream failure must not be silently retryable —
+    // it needs to fail closed (tipAmount set, so retries are blocked)
+    // and surface for ops to manually settle the driver's side.
+    try {
+      await this.walletsService.credit(
+        driverWallet.id,
+        amount,
+        TransactionCategory.TIP_RECEIVED,
+        ride.id,
+        'Tip received',
+      );
+    } catch (err) {
+      this.events.emit('tip_earnings.credit_failed', {
+        rideId: ride.id,
+        driverId: ride.driverId,
+        amount,
+        reason: err instanceof Error ? err.message : 'Unknown error crediting tip',
+      });
+    }
 
     ride.tipAmount = amount.toFixed(2);
     return this.ridesRepo.save(ride);

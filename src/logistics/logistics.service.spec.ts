@@ -67,13 +67,13 @@ function buildService(overrides: Record<string, any> = {}) {
       ...overrides.driversService,
     },
     vehiclesService: { findById: jest.fn(), ...overrides.vehiclesService },
-    walletsService: {},
-    commissionService: {},
-    corporateService: {},
-    fleetService: {},
-    usersService: {},
-    paymentsService: {},
-    reconciliationService: {},
+    walletsService: { ...overrides.walletsService },
+    commissionService: { ...overrides.commissionService },
+    corporateService: { ...overrides.corporateService },
+    fleetService: { ...overrides.fleetService },
+    usersService: { ...overrides.usersService },
+    paymentsService: { ...overrides.paymentsService },
+    reconciliationService: { ...overrides.reconciliationService },
     settingsService: { getNumber: jest.fn().mockResolvedValue(0) },
     vehicleTypesService: {
       getByType: jest.fn().mockResolvedValue({
@@ -500,6 +500,7 @@ describe('LogisticsService.markDelivered — payment settlement safety', () => {
   function buildForMarkDelivered(overrides: Record<string, any> = {}) {
     const order = fakeOrder({
       id: 'order-1',
+      driverId: 'driver-1', // must match the driverUserId passed to markDelivered() below, or getOwnedByDriver() rejects it
       status: DeliveryStatus.IN_TRANSIT,
       totalFare: '1000.00',
       paymentMethod: overrides.paymentMethod ?? PaymentMethod.WALLET,

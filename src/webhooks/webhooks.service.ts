@@ -4,8 +4,12 @@ import { Repository } from 'typeorm';
 import { randomBytes, createHmac } from 'crypto';
 import { OnEvent } from '@nestjs/event-emitter';
 import { WebhookSubscription } from './entities/webhook-subscription.entity';
-import { WebhookDeliveryLog, WebhookDeliveryStatus } from './entities/webhook-delivery-log.entity';
+import {
+  WebhookDeliveryLog,
+  WebhookDeliveryStatus,
+} from './entities/webhook-delivery-log.entity';
 import { CreateWebhookSubscriptionDto } from './dto/webhook.dto';
+import { assertPublicUrl } from './assert-public-url';
 
 /** Every domain event a partner can subscribe to. */
 export const WEBHOOK_EVENTS = [
@@ -33,7 +37,10 @@ export class WebhooksService {
     private readonly logsRepo: Repository<WebhookDeliveryLog>,
   ) {}
 
-  async subscribe(dto: CreateWebhookSubscriptionDto): Promise<{ subscription: WebhookSubscription; secret: string }> {
+  async subscribe(
+    dto: CreateWebhookSubscriptionDto,
+  ): Promise<{ subscription: WebhookSubscription; secret: string }> {
+    await assertPublicUrl(dto.url);
     const secret = randomBytes(24).toString('hex');
     const subscription = await this.subscriptionsRepo.save(
       this.subscriptionsRepo.create({ ...dto, secret }),
@@ -47,19 +54,32 @@ export class WebhooksService {
 
   async setActive(id: string, isActive: boolean): Promise<WebhookSubscription> {
     await this.subscriptionsRepo.update(id, { isActive });
-    return this.subscriptionsRepo.findOne({ where: { id } }) as Promise<WebhookSubscription>;
+    return this.subscriptionsRepo.findOne({
+      where: { id },
+    }) as Promise<WebhookSubscription>;
   }
 
   async getLogs(subscriptionId: string): Promise<WebhookDeliveryLog[]> {
-    return this.logsRepo.find({ where: { subscriptionId }, order: { createdAt: 'DESC' }, take: 50 });
+    return this.logsRepo.find({
+      where: { subscriptionId },
+      order: { createdAt: 'DESC' },
+      take: 50,
+    });
   }
 
   /** Fans an event out to every active subscription that's opted into it. */
-  private async dispatch(event: string, payload: Record<string, unknown>): Promise<void> {
-    const subscriptions = await this.subscriptionsRepo.find({ where: { isActive: true } });
+  private async dispatch(
+    event: string,
+    payload: Record<string, unknown>,
+  ): Promise<void> {
+    const subscriptions = await this.subscriptionsRepo.find({
+      where: { isActive: true },
+    });
     const interested = subscriptions.filter((s) => s.events.includes(event));
 
-    await Promise.all(interested.map((sub) => this.deliver(sub, event, payload)));
+    await Promise.all(
+      interested.map((sub) => this.deliver(sub, event, payload)),
+    );
   }
 
   private async deliver(
@@ -67,10 +87,20 @@ export class WebhooksService {
     event: string,
     payload: Record<string, unknown>,
   ): Promise<void> {
-    const body = JSON.stringify({ event, data: payload, timestamp: new Date().toISOString() });
-    const signature = createHmac('sha256', subscription.secret).update(body).digest('hex');
+    const body = JSON.stringify({
+      event,
+      data: payload,
+      timestamp: new Date().toISOString(),
+    });
+    const signature = createHmac('sha256', subscription.secret)
+      .update(body)
+      .digest('hex');
 
     try {
+      // Re-checked here, not just at subscribe() time: a subscription's URL
+      // was validated once when it was created, but this is the actual
+      // point requests leave the server, and it's the one that matters.
+      await assertPublicUrl(subscription.url);
       const response = await fetch(subscription.url, {
         method: 'POST',
         headers: {
@@ -86,12 +116,16 @@ export class WebhooksService {
           subscriptionId: subscription.id,
           event,
           payload,
-          status: response.ok ? WebhookDeliveryStatus.SUCCESS : WebhookDeliveryStatus.FAILED,
+          status: response.ok
+            ? WebhookDeliveryStatus.SUCCESS
+            : WebhookDeliveryStatus.FAILED,
           responseCode: response.status,
         }),
       );
     } catch (err) {
-      this.logger.warn(`Webhook delivery to ${subscription.url} failed: ${(err as Error).message}`);
+      this.logger.warn(
+        `Webhook delivery to ${subscription.url} failed: ${(err as Error).message}`,
+      );
       await this.logsRepo.save(
         this.logsRepo.create({
           subscriptionId: subscription.id,

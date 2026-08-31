@@ -16,6 +16,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../common/enums/user-role.enum';
 import { ApiKeysService } from './api-keys.service';
 import { ApiKeyGuard } from './api-key.guard';
+import { RequireScope } from './require-scope.decorator';
 import { CreateApiKeyDto } from './dto/api-key.dto';
 import { Audit } from '../audit/decorators/audit.decorator';
 import { Ride } from '../rides/entities/ride.entity';
@@ -57,7 +58,15 @@ export class PartnerController {
     private readonly ridesRepo: Repository<Ride>,
   ) {}
 
+  // Requires the 'rides:read' scope — previously any active key, regardless
+  // of what scopes it was issued with, could look up the status of ANY ride
+  // on the platform (fare included) by guessing/enumerating ride IDs, since
+  // nothing checked ApiKey.scopes at all. totalFare is also dropped from the
+  // response: a partner checking trip status doesn't need the passenger's
+  // fare amount, and every field returned here is one more thing exposed to
+  // whichever partner holds the key.
   @Get('rides/:id/status')
+  @RequireScope('rides:read')
   async rideStatus(@Param('id') id: string) {
     const ride = await this.ridesRepo.findOne({ where: { id } });
     if (!ride) throw new NotFoundException('Ride not found');
@@ -66,7 +75,6 @@ export class PartnerController {
       status: ride.status,
       pickupAddress: ride.pickupAddress,
       dropoffAddress: ride.dropoffAddress,
-      totalFare: ride.totalFare,
       createdAt: ride.createdAt,
     };
   }
