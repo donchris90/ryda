@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -25,6 +25,13 @@ export class ReconciliationController {
     return { summary, items };
   }
 
+  @Get('admin/reconciliation/summary')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCE)
+  summary() {
+    return this.reconciliationService.getSummary();
+  }
+
   @Get('admin/reconciliation/pending')
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCE)
@@ -49,5 +56,21 @@ export class ReconciliationController {
   @Audit('reconciliation.write_off')
   writeOff(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: WriteOffDto) {
     return this.reconciliationService.writeOff(id, user.id, dto.reason);
+  }
+
+  /**
+   * Manually re-runs the same oldest-first settlement sweep that normally
+   * fires automatically off the `wallet.updated` event — useful when an
+   * admin wants to retry immediately after e.g. investigating a driver's
+   * balance, instead of waiting for their next wallet credit to trigger it.
+   * Reuses ReconciliationService.attemptSettle() directly; no new
+   * settlement logic here.
+   */
+  @Post('admin/reconciliation/driver/:driverId/attempt-settle')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCE)
+  @Audit('reconciliation.attempt_settle')
+  attemptSettle(@Param('driverId') driverId: string) {
+    return this.reconciliationService.attemptSettle(driverId);
   }
 }

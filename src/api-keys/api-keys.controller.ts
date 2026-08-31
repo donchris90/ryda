@@ -43,6 +43,12 @@ export class ApiKeysController {
   revoke(@Param('id') id: string) {
     return this.apiKeysService.revoke(id);
   }
+
+  @Post(':id/rotate')
+  @Audit('api_key.rotate')
+  rotate(@Param('id') id: string) {
+    return this.apiKeysService.rotate(id);
+  }
 }
 
 /**

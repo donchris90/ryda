@@ -55,6 +55,32 @@ export class IncentivesService {
     return this.progressRepo.find({ where: { driverId: profile.id }, order: { updatedAt: 'DESC' } });
   }
 
+  /**
+   * Admin-facing rollup for a single incentive: how many drivers are
+   * participating, how far along they are, and how many have actually been
+   * paid out. `driverId` on DriverIncentiveProgress is the driver PROFILE
+   * id, not the user id — this module never needed to resolve that back to
+   * a displayable name before, so this only returns raw ids/progress; the
+   * admin UI resolves names itself via the existing driver list.
+   */
+  async getProgressForIncentive(incentiveId: string): Promise<{
+    participantCount: number;
+    completedCount: number;
+    rewardedCount: number;
+    items: DriverIncentiveProgress[];
+  }> {
+    const items = await this.progressRepo.find({
+      where: { incentiveId },
+      order: { updatedAt: 'DESC' },
+    });
+    return {
+      participantCount: items.length,
+      completedCount: items.filter((p) => p.status !== IncentiveProgressStatus.IN_PROGRESS).length,
+      rewardedCount: items.filter((p) => p.status === IncentiveProgressStatus.REWARDED).length,
+      items,
+    };
+  }
+
   // ---- Event-driven processing ----
 
   @OnEvent('ride.completed')

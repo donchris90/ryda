@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { randomBytes, createHmac } from 'crypto';
@@ -57,6 +57,67 @@ export class WebhooksService {
     return this.subscriptionsRepo.findOne({
       where: { id },
     }) as Promise<WebhookSubscription>;
+  }
+
+  /** Partner name, URL, and event selection are all editable post-creation — only the signing secret is fixed for a subscription's lifetime. */
+  async update(
+    id: string,
+    dto: { partnerName?: string; url?: string; events?: string[] },
+  ): Promise<WebhookSubscription> {
+    const subscription = await this.subscriptionsRepo.findOne({ where: { id } });
+    if (!subscription) throw new NotFoundException('Webhook subscription not found');
+
+    if (dto.url && dto.url !== subscription.url) {
+      await assertPublicUrl(dto.url);
+      subscription.url = dto.url;
+    }
+    if (dto.partnerName) subscription.partnerName = dto.partnerName;
+    if (dto.events) subscription.events = dto.events;
+
+    return this.subscriptionsRepo.save(subscription);
+  }
+
+  /**
+   * Sends a synthetic event to the subscription's real URL right now, so an
+   * admin can confirm a partner's endpoint is actually reachable and
+   * correctly verifying the HMAC signature before relying on it for live
+   * traffic. Reuses `deliver()` — this is not a separate delivery path,
+   * just a manually-triggered one, and it's logged exactly like a real
+   * delivery so it shows up in the subscription's history.
+   */
+  async sendTestEvent(id: string): Promise<WebhookDeliveryLog> {
+    const subscription = await this.subscriptionsRepo.findOne({ where: { id } });
+    if (!subscription) throw new NotFoundException('Webhook subscription not found');
+
+    await this.deliver(subscription, 'webhook.test', {
+      message: 'This is a test delivery triggered from the Ryda admin dashboard.',
+      triggeredAt: new Date().toISOString(),
+    });
+
+    const [latest] = await this.logsRepo.find({
+      where: { subscriptionId: id, event: 'webhook.test' },
+      order: { createdAt: 'DESC' },
+      take: 1,
+    });
+    return latest;
+  }
+
+  /** Re-sends the exact event/payload from a previously failed (or successful) delivery log, e.g. after a partner fixes their endpoint. */
+  async retryDelivery(logId: string): Promise<WebhookDeliveryLog> {
+    const log = await this.logsRepo.findOne({ where: { id: logId } });
+    if (!log) throw new NotFoundException('Delivery log not found');
+
+    const subscription = await this.subscriptionsRepo.findOne({ where: { id: log.subscriptionId } });
+    if (!subscription) throw new NotFoundException('Webhook subscription not found');
+
+    await this.deliver(subscription, log.event, log.payload);
+
+    const [latest] = await this.logsRepo.find({
+      where: { subscriptionId: subscription.id, event: log.event },
+      order: { createdAt: 'DESC' },
+      take: 1,
+    });
+    return latest;
   }
 
   async getLogs(subscriptionId: string): Promise<WebhookDeliveryLog[]> {

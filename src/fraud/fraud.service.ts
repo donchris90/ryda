@@ -140,6 +140,64 @@ export class FraudService {
     );
   }
 
+  /**
+   * Aggregate counts for the admin fraud dashboard. Kept as simple grouped
+   * counts rather than a computed "risk score" — nothing upstream of this
+   * module currently produces a scored/weighted risk value per user, so a
+   * fabricated score here would just be decoration, not signal.
+   */
+  async getSummary(): Promise<{
+    totalFlags: number;
+    openCount: number;
+    escalatedCount: number;
+    reviewedCount: number;
+    dismissedCount: number;
+    highSeverityOpenCount: number;
+    byType: Record<string, number>;
+    recent: FraudFlag[];
+  }> {
+    const [
+      totalFlags,
+      openCount,
+      escalatedCount,
+      reviewedCount,
+      dismissedCount,
+      highSeverityOpenCount,
+      byTypeRows,
+      recent,
+    ] = await Promise.all([
+      this.flagsRepo.count(),
+      this.flagsRepo.count({ where: { status: FraudFlagStatus.OPEN } }),
+      this.flagsRepo.count({ where: { status: FraudFlagStatus.ESCALATED } }),
+      this.flagsRepo.count({ where: { status: FraudFlagStatus.REVIEWED } }),
+      this.flagsRepo.count({ where: { status: FraudFlagStatus.DISMISSED } }),
+      this.flagsRepo.count({
+        where: { status: FraudFlagStatus.OPEN, severity: FraudFlagSeverity.HIGH },
+      }),
+      this.flagsRepo
+        .createQueryBuilder('flag')
+        .select('flag.type', 'type')
+        .addSelect('COUNT(*)', 'count')
+        .groupBy('flag.type')
+        .getRawMany<{ type: string; count: string }>(),
+      this.flagsRepo.find({ order: { createdAt: 'DESC' }, take: 10 }),
+    ]);
+
+    const byType: Record<string, number> = {};
+    for (const row of byTypeRows) byType[row.type] = parseInt(row.count, 10);
+
+    return {
+      totalFlags,
+      openCount,
+      escalatedCount,
+      reviewedCount,
+      dismissedCount,
+      highSeverityOpenCount,
+      byType,
+      recent,
+    };
+  }
+
   async listFlags(filters: FraudFlagFilters): Promise<{ data: FraudFlag[]; total: number; page: number; pageSize: number }> {
     const page = filters.page ?? 1;
     const pageSize = Math.min(filters.pageSize ?? 50, 200);

@@ -49,6 +49,45 @@ export class CreatePromotionDto {
   campaignId?: string;
 }
 
+export class UpdatePromotionDto {
+  @IsOptional()
+  @IsString()
+  description?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  value?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  maxDiscountAmount?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  minFareAmount?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  usageLimitTotal?: number;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  usageLimitPerUser?: number;
+
+  @IsOptional()
+  @IsDateString()
+  validFrom?: string;
+
+  @IsOptional()
+  @IsDateString()
+  validUntil?: string;
+}
+
 export class ValidatePromoDto {
   @IsString()
   code: string;
