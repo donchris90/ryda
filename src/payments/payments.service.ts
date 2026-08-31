@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { PaymentRecord, PaymentStatus } from './entities/payment-record.entity';
 import { SavedCard } from './entities/saved-card.entity';
@@ -151,6 +151,13 @@ export class PaymentsService {
    * anything in the webhook payload itself — the signature check
    * already prevents a tampered payload, but crediting from our own
    * record is the more robust pattern regardless.
+   */
+  /**
+   * Was called separately by the webhook controller after
+   * markSuccessFromWebhook() returned — kept as a thin wrapper (still
+   * used nowhere else) but no longer the actual crediting path for the
+   * webhook itself. See markSuccessFromWebhook()'s comment for why that
+   * split was a real bug.
    */
   async creditWalletFromTopUp(record: PaymentRecord): Promise<void> {
     const wallet = await this.walletsService.getByUserId(record.userId);
@@ -545,10 +552,35 @@ export class PaymentsService {
    * was a replay — every side effect (wallet credit, event emission,
    * card tokenization) must be skipped in that case.
    */
+  /**
+   * Marks a payment settled from Paystack's `charge.success` webhook, and —
+   * when `purpose === 'wallet_topup'` — credits the wallet in the SAME
+   * database transaction as that status flip, not as a separate step
+   * afterward.
+   *
+   * That used to be two transactions: this one flipped the payment to
+   * SUCCESS, and the controller called creditWalletFromTopUp() as a
+   * separate follow-up step once this one returned. If the process
+   * crashed, the wallet service was briefly down, or that second call
+   * simply threw, the payment was left permanently marked SUCCESS with
+   * the wallet never credited — real money charged by Paystack, gone
+   * from the passenger's perspective. Worse, it was unrecoverable:
+   * Paystack retries a webhook that didn't 200, but the retry's first
+   * step is this method, which would see status already SUCCESS and
+   * return `alreadyProcessed: true` — so the controller would skip
+   * crediting again on every subsequent retry, forever.
+   *
+   * Doing both in one transaction means the two outcomes are now
+   * genuinely coupled: if crediting throws, the whole transaction rolls
+   * back, the payment's status reverts to whatever it was before (not
+   * SUCCESS), and Paystack's retry actually gets another real attempt at
+   * both instead of silently losing the credit.
+   */
   async markSuccessFromWebhook(
     reference: string,
     gatewayReference: string,
-  ): Promise<{ record: PaymentRecord; alreadyProcessed: boolean } | null> {
+    purpose?: string,
+  ): Promise<{ record: PaymentRecord; alreadyProcessed: boolean; creditedWalletId?: string } | null> {
     const result = await this.paymentsRepo.manager.transaction(
       async (manager) => {
         const record = await manager.findOne(PaymentRecord, {
@@ -564,7 +596,13 @@ export class PaymentsService {
         record.status = PaymentStatus.SUCCESS;
         record.gatewayReference = gatewayReference;
         const saved = await manager.save(record);
-        return { record: saved, alreadyProcessed: false as const };
+
+        let creditedWalletId: string | undefined;
+        if (purpose === 'wallet_topup') {
+          creditedWalletId = await this.creditWalletFromTopUpWithManager(manager, saved);
+        }
+
+        return { record: saved, alreadyProcessed: false as const, creditedWalletId };
       },
     );
 
@@ -575,7 +613,44 @@ export class PaymentsService {
       });
     }
 
+    // wallet.updated fires here rather than inside creditWithManager()
+    // itself, on purpose — it should only go out once this outer
+    // transaction has actually committed, not from inside it (see
+    // WalletsService.creditWithManager()'s comment). NOTE: the
+    // walletTransactionsTotal Prometheus counter that credit() normally
+    // increments alongside this event is NOT incremented on this path —
+    // PaymentsService doesn't have MetricsService wired in, and adding
+    // it wasn't worth the extra module coupling just for this counter.
+    // A wallet-topup-via-webhook credit is real and correct either way;
+    // it just won't show up in that particular metric.
+    if (result && !result.alreadyProcessed && purpose === 'wallet_topup') {
+      this.events.emit('wallet.updated', {
+        walletId: result.creditedWalletId,
+        userId: result.record.userId,
+        direction: 'credit',
+        amount: parseFloat(result.record.amount),
+        category: TransactionCategory.TOPUP,
+      });
+    }
+
     return result;
+  }
+
+  /** The atomic-with-the-status-flip half of markSuccessFromWebhook() above. */
+  private async creditWalletFromTopUpWithManager(
+    manager: EntityManager,
+    record: PaymentRecord,
+  ): Promise<string> {
+    const wallet = await this.walletsService.getByUserId(record.userId);
+    await this.walletsService.creditWithManager(
+      manager,
+      wallet.id,
+      parseFloat(record.amount),
+      TransactionCategory.TOPUP,
+      record.reference,
+      'Wallet top-up',
+    );
+    return wallet.id;
   }
 
   async markFailedFromWebhook(

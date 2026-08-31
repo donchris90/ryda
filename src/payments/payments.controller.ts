@@ -167,27 +167,30 @@ export class PaymentsController {
     if (!reference) return { received: true };
 
     if (event.event === 'charge.success') {
+      const purpose: string | undefined = event.data.metadata?.purpose;
       const result = await this.paymentsService.markSuccessFromWebhook(
         reference,
         event.data.id?.toString() ?? reference,
+        purpose,
       );
 
       // A replayed/duplicate webhook delivery for an already-settled
       // payment — every side effect below (wallet credit, card save +
       // refund) must run at most once per payment, so skip them entirely
-      // on a replay rather than re-triggering them.
+      // on a replay rather than re-triggering them. Wallet crediting for
+      // purpose === 'wallet_topup' already happened inside
+      // markSuccessFromWebhook() itself, atomically with the status
+      // flip — nothing further to do for that case here.
       if (result?.alreadyProcessed) {
         return { received: true };
       }
 
       const record = result?.record ?? null;
-      const purpose = event.data.metadata?.purpose;
 
-      if (record && purpose === 'wallet_topup') {
-        await this.paymentsService.creditWalletFromTopUp(record);
-      } else if (
+      if (
         record &&
         record.rideId === null &&
+        purpose !== 'wallet_topup' &&
         event.data.authorization?.authorization_code
       ) {
         // Card-verification charges (not tied to a ride) tokenize the card
