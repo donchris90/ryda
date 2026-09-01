@@ -1,4 +1,4 @@
-import { doesVehicleMatchRideCategory } from './ride-vehicle-match.util';
+import { doesVehicleMatchRideCategory, isWheelchairAccessibleVehicle } from './ride-vehicle-match.util';
 import { RideCategory } from './enums/ride.enum';
 import { VehicleCategory } from './enums/vehicle.enum';
 
@@ -33,5 +33,22 @@ describe('doesVehicleMatchRideCategory', () => {
   it('never matches a non-car category (e.g. motorcycle) for Economy without explicit approval', () => {
     const motorcycle = { category: VehicleCategory.MOTORCYCLE, approvedRideCategories: null };
     expect(doesVehicleMatchRideCategory(motorcycle, RideCategory.ECONOMY)).toBe(false);
+  });
+});
+
+describe('isWheelchairAccessibleVehicle', () => {
+  it('is true only for a vehicle registered under WHEELCHAIR_ACCESSIBLE', () => {
+    expect(isWheelchairAccessibleVehicle({ category: VehicleCategory.WHEELCHAIR_ACCESSIBLE })).toBe(true);
+  });
+
+  it('is false for a plain car, even though a car could physically fit a passenger who uses a wheelchair', () => {
+    // Intentional: registration is what gates matching, not a guess about
+    // capability. A driver who wants to serve accessible rides registers
+    // the vehicle as such.
+    expect(isWheelchairAccessibleVehicle({ category: VehicleCategory.CAR })).toBe(false);
+  });
+
+  it('is false for other categories with no accessibility equivalent (e.g. motorcycle)', () => {
+    expect(isWheelchairAccessibleVehicle({ category: VehicleCategory.MOTORCYCLE })).toBe(false);
   });
 });

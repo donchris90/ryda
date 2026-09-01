@@ -64,3 +64,23 @@ export function doesVehicleMatchRideCategory(
   if (DEFAULT_ELIGIBLE_RIDE_CATEGORY_TO_VEHICLE_CATEGORY[rideCategory] === vehicle.category) return true;
   return !!vehicle.approvedRideCategories?.includes(rideCategory);
 }
+
+/**
+ * Whether a vehicle can serve a passenger's wheelchair-accessibility
+ * requirement. Deliberately NOT modeled as a third RideCategory (see the
+ * "deliberately kept to two tiers" note on RideCategory above) - a
+ * passenger who needs an accessible vehicle still wants Economy or
+ * Comfort pricing/experience, not a separate tier, and there's a single
+ * pool of VehicleCategory.WHEELCHAIR_ACCESSIBLE vehicles in this MVP
+ * rather than a distinct accessible fleet per tier. Callers that need an
+ * accessible vehicle should treat this as an additional hard filter on
+ * top of (not instead of) the ride category, except for the vehicle-
+ * category match itself - see isVehicleCompatible() in
+ * candidate-search.service.ts, which uses this in place of
+ * doesVehicleMatchRideCategory() when accessibility is required, since a
+ * WHEELCHAIR_ACCESSIBLE-registered vehicle would otherwise never satisfy
+ * Economy's CAR mapping or Comfort's approval gate.
+ */
+export function isWheelchairAccessibleVehicle(vehicle: { category: VehicleCategory }): boolean {
+  return vehicle.category === VehicleCategory.WHEELCHAIR_ACCESSIBLE;
+}

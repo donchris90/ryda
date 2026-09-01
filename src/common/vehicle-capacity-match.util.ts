@@ -41,6 +41,11 @@ const VEHICLE_CATEGORY_RANK: Record<VehicleCategory, number> = {
   [VehicleCategory.VAN]: DELIVERY_VEHICLE_RANK[DeliveryVehicleType.VAN],
   [VehicleCategory.BUS]: DELIVERY_VEHICLE_RANK[DeliveryVehicleType.VAN],
   [VehicleCategory.TRUCK]: DELIVERY_VEHICLE_RANK[DeliveryVehicleType.TRUCK],
+  // No delivery-capacity equivalent (this category is about passenger
+  // boarding, not cargo) - ranked like CAR, same treatment as taxi/
+  // luxury/ev above, so a driver registered under it isn't locked out
+  // of every delivery.
+  [VehicleCategory.WHEELCHAIR_ACCESSIBLE]: DELIVERY_VEHICLE_RANK[DeliveryVehicleType.CAR],
 };
 
 // Preemptive, not fixing a current bug - this file's Records are

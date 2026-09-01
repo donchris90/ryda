@@ -33,6 +33,13 @@ export interface CandidateSearchInput {
   mode: DispatchMode;
   /** Required when domain === RIDE. */
   rideCategory?: RideCategory;
+  /**
+   * RIDE-domain only. When true, only drivers registered under
+   * VehicleCategory.WHEELCHAIR_ACCESSIBLE are eligible, regardless of
+   * rideCategory's normal vehicle mapping - see
+   * isWheelchairAccessibleVehicle() in ride-vehicle-match.util.ts.
+   */
+  requiresAccessibleVehicle?: boolean;
   /** Required when domain === COURIER. */
   deliveryVehicleType?: DeliveryVehicleType;
   /** Drivers to skip regardless of eligibility — e.g. AUTO's already-declined/timed-out list. */

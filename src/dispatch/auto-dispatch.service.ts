@@ -115,6 +115,7 @@ export class AutoDispatchService {
       domain: DispatchDomain.RIDE,
       mode: DispatchMode.AUTO,
       rideCategory: ride.category,
+      requiresAccessibleVehicle: ride.requiresAccessibleVehicle,
       excludeDriverUserIds,
       minCandidates: 1,
       limit: candidateFetchLimit,

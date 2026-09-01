@@ -102,6 +102,8 @@ function buildService(overrides: Record<string, any> = {}) {
     googleMaps: {},
     candidateSearchService: { search: jest.fn(), ...overrides.candidateSearchService },
     driverRankingService: { rank: jest.fn(), ...overrides.driverRankingService },
+    poolMatchingService: { requestPool: jest.fn(), propagateDriverAssignment: jest.fn().mockResolvedValue(undefined), onRideCancelledBeforeMatch: jest.fn().mockResolvedValue(undefined), unpoolRide: jest.fn().mockResolvedValue(undefined) },
+    featureFlagsService: { isEnabled: jest.fn().mockResolvedValue(true) },
   };
 
   const service = new RidesService(
@@ -129,6 +131,8 @@ function buildService(overrides: Record<string, any> = {}) {
     deps.googleMaps as any,
     deps.candidateSearchService as any,
     deps.driverRankingService as any,
+    deps.poolMatchingService as any,
+    deps.featureFlagsService as any,
   );
 
   return { service, deps };

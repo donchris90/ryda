@@ -139,7 +139,9 @@ export default () => ({
     apiKey: process.env.AFRICASTALKING_API_KEY ?? '',
     username: process.env.AFRICASTALKING_USERNAME ?? '',
     senderId: process.env.AFRICASTALKING_SENDER_ID ?? '', // optional shortcode/sender ID
-    baseUrl: process.env.AFRICASTALKING_BASE_URL ?? 'https://api.africastalking.com/version1',
+    baseUrl:
+      process.env.AFRICASTALKING_BASE_URL ??
+      'https://api.africastalking.com/version1',
   },
   sendgrid: {
     apiKey: process.env.SENDGRID_API_KEY ?? '',
@@ -193,11 +195,42 @@ export default () => ({
     // before eligibility filtering. Bounds the PostgreSQL lookup in
     // CandidateSearchService.applyEligibility() to a small, fixed set —
     // never a full online-driver scan.
-    candidateFetchLimit: parseInt(process.env.DISPATCH_CANDIDATE_LIMIT ?? '50', 10),
+    candidateFetchLimit: parseInt(
+      process.env.DISPATCH_CANDIDATE_LIMIT ?? '50',
+      10,
+    ),
     // How many of the (already distance-sorted) eligible candidates get a
     // real routing-API call during ranking. Kept small on purpose — see
     // the cost requirement doc comment in DriverRankingService.rank().
-    etaCandidateLimit: parseInt(process.env.DISPATCH_ETA_CANDIDATE_LIMIT ?? '8', 10),
+    etaCandidateLimit: parseInt(
+      process.env.DISPATCH_ETA_CANDIDATE_LIMIT ?? '8',
+      10,
+    ),
+  },
+  pooling: {
+    // How long a pool request waits in POOL_MATCHING for a compatible
+    // partner before falling back to a normal solo dispatch. Matching is
+    // also attempted immediately on request (in case a partner is
+    // already waiting) — this window is only the outer bound, not a
+    // fixed wait every passenger experiences.
+    matchWindowMs: parseInt(process.env.POOL_MATCH_WINDOW_MS ?? '120000', 10),
+    // Two pool requests are only compatible if their pickups are within
+    // this straight-line distance of each other...
+    maxPickupDetourKm: parseFloat(process.env.POOL_MAX_PICKUP_DETOUR_KM ?? '2'),
+    // ...and if pairing them doesn't add more than this fraction of
+    // either rider's own solo trip distance (e.g. 0.35 = pairing can add
+    // at most 35% extra distance to either leg). Approximated with
+    // haversine distance between stops, same "good enough for matching,
+    // not for billing the meter" tradeoff geo.util.ts's doc comment
+    // already makes for fare estimates.
+    maxDetourFraction: parseFloat(
+      process.env.POOL_MAX_DETOUR_FRACTION ?? '0.35',
+    ),
+    // Flat discount applied to each rider's solo fare once pooled,
+    // regardless of how much overlap there actually was. A deliberate
+    // v1 simplification — see PoolMatchingService's class doc comment
+    // for the overlap-weighted pricing this should graduate to later.
+    discountFraction: parseFloat(process.env.POOL_DISCOUNT_FRACTION ?? '0.25'),
   },
   driverLocation: {
     // How old a driver's last GPS fix can be before the live-driver index
@@ -205,7 +238,10 @@ export default () => ({
     // DriversService.findNearby() already hardcodes (2 minutes), kept
     // here so the new index and the legacy Postgres scan agree until the
     // legacy path is retired.
-    staleSeconds: parseInt(process.env.DRIVER_LOCATION_STALE_SECONDS ?? '120', 10),
+    staleSeconds: parseInt(
+      process.env.DRIVER_LOCATION_STALE_SECONDS ?? '120',
+      10,
+    ),
   },
   logistics: {
     baseFare: parseFloat(process.env.LOGISTICS_BASE_FARE ?? '300'),

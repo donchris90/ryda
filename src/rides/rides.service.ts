@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, Not } from 'typeorm';
 import { Ride } from './entities/ride.entity';
 import { GoogleMapsService } from '../maps/google-maps.service';
 import { decodePolyline } from '../common/utils/polyline.util';
@@ -43,7 +43,10 @@ import {
 } from '../settings/settings.service';
 import { MetricsService } from '../observability/metrics.service';
 import { CandidateSearchService } from '../candidate-search/candidate-search.service';
-import { DispatchDomain, DispatchMode } from '../candidate-search/candidate-search.types';
+import {
+  DispatchDomain,
+  DispatchMode,
+} from '../candidate-search/candidate-search.types';
 import { DriverRankingService } from '../ranking/ranking.service';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectQueue } from '@nestjs/bullmq';
@@ -60,11 +63,18 @@ const STAFF_ROLES = [
 ];
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { TransactionCategory } from '../common/enums/transaction.enum';
+import { DriverApprovalStatus } from '../common/enums/driver-status.enum';
 import {
-  DriverApprovalStatus,
-} from '../common/enums/driver-status.enum';
-import { DriverService, isOnlineForService } from '../common/enums/driver-service.enum';
+  DriverService,
+  isOnlineForService,
+} from '../common/enums/driver-service.enum';
 import { doesVehicleMatchRideCategory } from '../common/ride-vehicle-match.util';
+import { PoolMatchingService } from '../pooling/pool-matching.service';
+import {
+  FeatureFlagsService,
+  FEATURE_KEYS,
+} from '../feature-flags/feature-flags.service';
+import { RideCategory } from '../common/enums/ride.enum';
 
 export interface SelectableDriverResult {
   driverUserId: string;
@@ -112,6 +122,8 @@ export class RidesService {
     private readonly googleMaps: GoogleMapsService,
     private readonly candidateSearchService: CandidateSearchService,
     private readonly driverRankingService: DriverRankingService,
+    private readonly poolMatchingService: PoolMatchingService,
+    private readonly featureFlagsService: FeatureFlagsService,
   ) {}
 
   async estimateFare(dto: FareEstimateDto) {
@@ -126,6 +138,31 @@ export class RidesService {
 
   async requestRide(passengerId: string, dto: RequestRideDto): Promise<Ride> {
     await this.passengersService.assertNotBlacklisted(passengerId);
+
+    if (dto.isPooled) {
+      if (dto.category !== RideCategory.ECONOMY) {
+        throw new BadRequestException(
+          'Pooled rides are only available on Economy',
+        );
+      }
+      if (dto.scheduledAt) {
+        throw new BadRequestException(
+          'Pooled rides cannot be scheduled ahead — request one when you actually need it',
+        );
+      }
+      if (dto.dispatchMode && dto.dispatchMode !== DispatchMode.AUTO) {
+        throw new BadRequestException(
+          'Pooled rides are always AUTO-dispatched',
+        );
+      }
+      if (
+        !(await this.featureFlagsService.isEnabled(FEATURE_KEYS.RIDE_SHARING))
+      ) {
+        throw new BadRequestException(
+          'Ride pooling is not available right now',
+        );
+      }
+    }
 
     const surge = await this.pricingService.calculateSurge(dto.city);
     const breakdown = await this.fareService.estimate(
@@ -165,8 +202,15 @@ export class RidesService {
     const ride = this.ridesRepo.create({
       passengerId,
       category: dto.category,
-      status: scheduledAt ? RideStatus.SCHEDULED : RideStatus.SEARCHING,
-      dispatchMode: dto.dispatchMode ?? DispatchMode.MANUAL,
+      status: scheduledAt
+        ? RideStatus.SCHEDULED
+        : dto.isPooled
+          ? RideStatus.POOL_MATCHING
+          : RideStatus.SEARCHING,
+      isPooled: !!dto.isPooled,
+      dispatchMode: dto.isPooled
+        ? DispatchMode.AUTO
+        : (dto.dispatchMode ?? DispatchMode.MANUAL),
       scheduledAt,
       pickupLat: dto.pickupLat,
       pickupLng: dto.pickupLng,
@@ -184,6 +228,7 @@ export class RidesService {
       nightMultiplierApplied: breakdown.nightMultiplierApplied.toFixed(2),
       airportFee: breakdown.airportFee.toFixed(2),
       isAirportTrip: !!dto.isAirportTrip,
+      requiresAccessibleVehicle: !!dto.requiresAccessibleVehicle,
       flightNumber: dto.flightNumber ?? null,
       usedRealRouting: breakdown.usedRealRouting,
       tollFare: breakdown.tollFare.toFixed(2),
@@ -249,7 +294,12 @@ export class RidesService {
     // tryOfferNextCandidate()), so a transient failure here can never
     // fail ride creation — the ride simply stays SEARCHING and the next
     // decline/timeout/retry gets another chance.
-    if (!scheduledAt && savedRide.dispatchMode === DispatchMode.AUTO) {
+    if (!scheduledAt && savedRide.isPooled) {
+      // Pooled rides never go straight to normal dispatch — they sit in
+      // the batch-matching window first. See PoolMatchingService's
+      // class doc comment for the full lifecycle.
+      void this.poolMatchingService.requestPool(savedRide.id);
+    } else if (!scheduledAt && savedRide.dispatchMode === DispatchMode.AUTO) {
       void this.autoDispatchService.startForRide(savedRide.id);
     }
 
@@ -602,8 +652,14 @@ export class RidesService {
       const driverProfile = await this.driversService
         .findByUserId(ride.driverId)
         .catch(() => null);
-      if (driverProfile?.currentLat != null && driverProfile?.currentLng != null) {
-        origin = { lat: driverProfile.currentLat, lng: driverProfile.currentLng };
+      if (
+        driverProfile?.currentLat != null &&
+        driverProfile?.currentLng != null
+      ) {
+        origin = {
+          lat: driverProfile.currentLat,
+          lng: driverProfile.currentLng,
+        };
       }
       // else: driver has no known location yet (rare — right after
       // acceptance, before their first location ping) — falls back to
@@ -617,7 +673,10 @@ export class RidesService {
     const directions = await this.googleMaps.getDirections(origin, destination);
     if (!directions?.polyline) return null;
 
-    return { points: decodePolyline(directions.polyline), leg: isPrePickup ? 'to_pickup' as const : 'to_dropoff' as const };
+    return {
+      points: decodePolyline(directions.polyline),
+      leg: isPrePickup ? ('to_pickup' as const) : ('to_dropoff' as const),
+    };
   }
 
   /**
@@ -711,7 +770,8 @@ export class RidesService {
         rideId: ride.id,
         driverId: ride.driverId,
         amount,
-        reason: err instanceof Error ? err.message : 'Unknown error crediting tip',
+        reason:
+          err instanceof Error ? err.message : 'Unknown error crediting tip',
       });
     }
 
@@ -814,6 +874,7 @@ export class RidesService {
       domain: DispatchDomain.RIDE,
       mode: DispatchMode.MANUAL,
       rideCategory: ride.category,
+      requiresAccessibleVehicle: ride.requiresAccessibleVehicle,
       // A passenger picking manually wants a real list to choose from,
       // not just "the first one found" — keep expanding until there's a
       // reasonable spread or the max radius is reached.
@@ -848,11 +909,17 @@ export class RidesService {
     const vehicleIds = rankingOutcome.ranked.map((c) => c.vehicleId);
     const [users, vehicles] = await Promise.all([
       this.usersService.findByIds(userIds),
-      Promise.all(vehicleIds.map((id) => this.vehiclesService.findById(id).catch(() => null))),
+      Promise.all(
+        vehicleIds.map((id) =>
+          this.vehiclesService.findById(id).catch(() => null),
+        ),
+      ),
     ]);
     const userById = new Map(users.map((u) => [u.id, u]));
     const vehicleById = new Map(
-      vehicles.filter((v): v is NonNullable<typeof v> => !!v).map((v) => [v.id, v]),
+      vehicles
+        .filter((v): v is NonNullable<typeof v> => !!v)
+        .map((v) => [v.id, v]),
     );
 
     return rankingOutcome.ranked.map((c) => {
@@ -914,6 +981,7 @@ export class RidesService {
       domain: DispatchDomain.RIDE,
       mode: DispatchMode.MANUAL,
       rideCategory: ride.category,
+      requiresAccessibleVehicle: ride.requiresAccessibleVehicle,
       // We only need to know whether this one specific driver is still
       // eligible, not build a full list — but the engine has no
       // "search for one driver" mode, so ask for a reasonably sized
@@ -924,14 +992,20 @@ export class RidesService {
       limit: 50,
     });
 
-    const stillEligible = searchOutcome.candidates.find((c) => c.driverUserId === driverUserId);
+    const stillEligible = searchOutcome.candidates.find(
+      (c) => c.driverUserId === driverUserId,
+    );
     if (!stillEligible) {
       throw new BadRequestException(
         'This driver is no longer available — please refresh and select another driver.',
       );
     }
 
-    await this.dispatchService.offerToSpecificDriver(rideId, driverUserId, stillEligible.distanceKm);
+    await this.dispatchService.offerToSpecificDriver(
+      rideId,
+      driverUserId,
+      stillEligible.distanceKm,
+    );
   }
 
   /**
@@ -997,7 +1071,9 @@ export class RidesService {
       throw new ForbiddenException('Driver is not approved');
     }
     if (!isOnlineForService(driverProfile.availability, DriverService.RIDE)) {
-      throw new BadRequestException('Driver must be online for rides to accept rides');
+      throw new BadRequestException(
+        'Driver must be online for rides to accept rides',
+      );
     }
 
     // Defense in depth, not just the filtered selectable-drivers list -
@@ -1058,45 +1134,66 @@ export class RidesService {
     // reservation UPDATE commits first wins, and the loser's transaction
     // rolls back entirely — including the ride claim — rather than
     // leaving a half-succeeded booking.
-    const { saved, reservedProfile } = await this.ridesRepo.manager.transaction(async (manager) => {
-      const reservedProfile = await this.driversService.reserveOnlineDriverForTrip(
-        manager,
-        driverUserId,
-        DriverService.RIDE,
-      );
+    const { saved, reservedProfile } = await this.ridesRepo.manager.transaction(
+      async (manager) => {
+        const reservedProfile =
+          await this.driversService.reserveOnlineDriverForTrip(
+            manager,
+            driverUserId,
+            DriverService.RIDE,
+          );
 
-      const updateResult = await manager
-        .createQueryBuilder()
-        .update(Ride)
-        .set({
-          driverId: driverUserId,
-          vehicleId: reservedProfile.activeVehicleId,
-          status: RideStatus.ACCEPTED,
-          acceptedAt: new Date(),
-        })
-        .where('id = :id', { id: rideId })
-        .andWhere('status IN (:...statuses)', {
-          statuses: [RideStatus.SEARCHING, RideStatus.REQUESTED],
-        })
-        .execute();
+        const updateResult = await manager
+          .createQueryBuilder()
+          .update(Ride)
+          .set({
+            driverId: driverUserId,
+            vehicleId: reservedProfile.activeVehicleId,
+            status: RideStatus.ACCEPTED,
+            acceptedAt: new Date(),
+          })
+          .where('id = :id', { id: rideId })
+          .andWhere('status IN (:...statuses)', {
+            statuses: [RideStatus.SEARCHING, RideStatus.REQUESTED],
+          })
+          .execute();
 
-      if (updateResult.affected !== 1) {
-        // Throwing here rolls back reserveOnlineDriverForTrip()'s UPDATE
-        // too, in the same transaction — the driver goes right back to
-        // ONLINE from PostgreSQL's perspective, exactly as if this whole
-        // call had never happened.
-        throw new BadRequestException('This ride was just accepted by another driver.');
-      }
+        if (updateResult.affected !== 1) {
+          // Throwing here rolls back reserveOnlineDriverForTrip()'s UPDATE
+          // too, in the same transaction — the driver goes right back to
+          // ONLINE from PostgreSQL's perspective, exactly as if this whole
+          // call had never happened.
+          throw new BadRequestException(
+            'This ride was just accepted by another driver.',
+          );
+        }
 
-      const savedRide = await manager.findOneOrFail(Ride, { where: { id: rideId } });
-      return { saved: savedRide, reservedProfile };
-    });
+        const savedRide = await manager.findOneOrFail(Ride, {
+          where: { id: rideId },
+        });
+        return { saved: savedRide, reservedProfile };
+      },
+    );
 
     // Only now, after the transaction has actually committed, tell the
     // rest of the system (the live-driver index, primarily) that this
     // driver left the available pool — see reserveOnlineDriverForTrip()'s
     // doc comment for why this can't happen any earlier.
     this.driversService.emitReservedForTrip(reservedProfile);
+
+    // Pooled ride: this driver was only ever dispatched for the "anchor"
+    // ride of the pair — propagate the same driver/vehicle onto the
+    // partner ride now rather than dispatching it a second time. See
+    // PoolMatchingService's class doc comment.
+    if (saved.poolGroupId) {
+      await this.poolMatchingService
+        .propagateDriverAssignment(saved)
+        .catch((err) => {
+          this.logger.error(
+            `Failed to propagate pool driver assignment for ride ${saved.id}: ${err}`,
+          );
+        });
+    }
 
     // auto_offer_accept_rate's numerator (batch 9) — divide against
     // autoDispatchOffersTotal in PromQL. Only counted for AUTO rides;
@@ -1222,7 +1319,10 @@ export class RidesService {
         rideId: ride.id,
         driverId: driverProfile.userId,
         amount: driverEarnings,
-        reason: err instanceof Error ? err.message : 'Unknown error crediting driver earnings',
+        reason:
+          err instanceof Error
+            ? err.message
+            : 'Unknown error crediting driver earnings',
       });
     }
   }
@@ -1583,6 +1683,38 @@ export class RidesService {
       );
     }
 
+    if (originalStatus === RideStatus.POOL_MATCHING) {
+      // Never paired yet — just clear the pending delayed-match job.
+      await this.poolMatchingService
+        .onRideCancelledBeforeMatch(ride.id)
+        .catch(() => undefined);
+    } else if (ride.poolGroupId && originalStatus === RideStatus.SEARCHING) {
+      // Already paired but no driver assigned to either side yet —
+      // don't leave the co-rider stuck waiting on a pool that will
+      // never complete; revert them to a normal solo request.
+      const partner = await this.ridesRepo.findOne({
+        where: { poolGroupId: ride.poolGroupId, id: Not(ride.id) },
+      });
+      if (partner) {
+        await this.poolMatchingService
+          .unpoolRide(
+            partner.id,
+            `partner ride ${ride.id} cancelled before dispatch`,
+          )
+          .catch((err) =>
+            this.logger.error(
+              `Failed to unpool partner of cancelled ride ${ride.id}: ${err}`,
+            ),
+          );
+      }
+    }
+    // Note: if a driver was already assigned to both sides of a pool
+    // (originalStatus ACCEPTED/ARRIVING/ARRIVED/IN_PROGRESS) and one
+    // passenger cancels, the driver currently keeps the ride/trip only
+    // for the remaining passenger with no fare recalculation or
+    // dispatch changes — full "continue pooled trip with one seat now
+    // empty" handling is a known gap for a later phase.
+
     if (
       cancelledBy === CancelledBy.PASSENGER &&
       driverWasEngaged &&
@@ -1641,7 +1773,9 @@ export class RidesService {
     // here since the ride is already CANCELLED and this is an
     // unconditional single-column update on an id match.
     if (ride.cancellationFee) {
-      await this.ridesRepo.update(ride.id, { cancellationFee: ride.cancellationFee });
+      await this.ridesRepo.update(ride.id, {
+        cancellationFee: ride.cancellationFee,
+      });
     }
 
     if (ride.driverId) {
