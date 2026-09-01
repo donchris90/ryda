@@ -568,6 +568,17 @@ export class RidesService {
    * so this avoids an extra Directions API call for rides nobody ever
    * looks at on a map.
    */
+  /**
+   * Real routed path for the ride's map, from the Directions API.
+   *
+   * Context-aware: while the driver is still on the way to the
+   * passenger (ACCEPTED/ARRIVING/ARRIVED), the useful route to show is
+   * the driver's live position -> pickup, not the ride's fixed
+   * pickup -> dropoff path — showing the latter during this phase drew
+   * a route the driver wasn't actually on. Once the trip is
+   * IN_PROGRESS (or later), it switches to the ride's actual
+   * pickup -> dropoff path.
+   */
   async getRoute(rideId: string, requesterId: string, requesterRole: UserRole) {
     const ride = await this.findById(rideId);
 
@@ -580,13 +591,33 @@ export class RidesService {
 
     if (!this.googleMaps.isConfigured()) return null;
 
-    const directions = await this.googleMaps.getDirections(
-      { lat: ride.pickupLat, lng: ride.pickupLng },
-      { lat: ride.dropoffLat, lng: ride.dropoffLng },
-    );
+    const isPrePickup = [
+      RideStatus.ACCEPTED,
+      RideStatus.ARRIVING,
+      RideStatus.ARRIVED,
+    ].includes(ride.status);
+
+    let origin = { lat: ride.pickupLat, lng: ride.pickupLng };
+    if (isPrePickup && ride.driverId) {
+      const driverProfile = await this.driversService
+        .findByUserId(ride.driverId)
+        .catch(() => null);
+      if (driverProfile?.currentLat != null && driverProfile?.currentLng != null) {
+        origin = { lat: driverProfile.currentLat, lng: driverProfile.currentLng };
+      }
+      // else: driver has no known location yet (rare — right after
+      // acceptance, before their first location ping) — falls back to
+      // the pickup->dropoff leg below rather than returning nothing.
+    }
+
+    const destination = isPrePickup
+      ? { lat: ride.pickupLat, lng: ride.pickupLng }
+      : { lat: ride.dropoffLat, lng: ride.dropoffLng };
+
+    const directions = await this.googleMaps.getDirections(origin, destination);
     if (!directions?.polyline) return null;
 
-    return { points: decodePolyline(directions.polyline) };
+    return { points: decodePolyline(directions.polyline), leg: isPrePickup ? 'to_pickup' as const : 'to_dropoff' as const };
   }
 
   /**
