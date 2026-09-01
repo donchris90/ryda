@@ -6,6 +6,7 @@ import { DriverLevel } from '../common/enums/driver-level.enum';
 import { VehicleCategory } from '../common/enums/vehicle.enum';
 import { DispatchMode } from '../candidate-search/candidate-search.types';
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
+import { UserRole } from '../common/enums/user-role.enum';
 
 function fakeRide(overrides: Partial<any> = {}) {
   return {
@@ -162,7 +163,7 @@ describe('RidesService — manual driver selection', () => {
         photoUrl: 'https://cdn.example.com/corolla.jpg',
       });
 
-      const result = await service.findSelectableDrivers('ride-1');
+      const result = await service.findSelectableDrivers('ride-1', 'passenger-1', UserRole.PASSENGER);
 
       expect(result).toEqual([
         {
@@ -198,7 +199,7 @@ describe('RidesService — manual driver selection', () => {
         roundsAttempted: 3,
       });
 
-      const result = await service.findSelectableDrivers('ride-1');
+      const result = await service.findSelectableDrivers('ride-1', 'passenger-1', UserRole.PASSENGER);
 
       expect(result).toEqual([]);
       expect(deps.driverRankingService.rank).not.toHaveBeenCalled();
