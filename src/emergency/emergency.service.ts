@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -10,6 +10,8 @@ import { DriverProfile } from '../drivers/entities/driver-profile.entity';
 import { RideStatus, CancelledBy } from '../common/enums/ride.enum';
 import { PassengersService } from '../passengers/passengers.service';
 import { User } from '../users/entities/user.entity';
+import { UserRole } from '../common/enums/user-role.enum';
+import { RESPONDER_ROLES } from '../common/constants/responder-roles';
 
 const ACTIVE_RIDE_STATUSES = [
   RideStatus.ACCEPTED,
@@ -182,6 +184,57 @@ export class EmergencyService {
 
   async getTimeline(incidentId: string): Promise<IncidentTimelineEntry[]> {
     return this.timelineRepo.find({ where: { incidentId }, order: { createdAt: 'ASC' } });
+  }
+
+  /**
+   * IDOR fix (batch 12): `getTimeline`/`addTimelineEntry` above take a bare
+   * incidentId with no notion of who's asking — fine for the internal
+   * admin-only callers (acknowledge/resolve/etc., already gated by
+   * RESPONDER_ROLES at the controller), but EmergencyController's general
+   * `timeline`/`notes` routes were calling them directly with no check at
+   * all, so any authenticated passenger or driver could read — or inject
+   * notes into — any incident on the platform just by guessing its id.
+   * Access is limited to whoever reported it, either party on the linked
+   * ride (if any), or platform responders — the same shape as the
+   * isParticipant-or-staff check used everywhere else in this codebase
+   * (RidesService.getForUser, SupportService.assertCanAccess, etc.).
+   */
+  private async assertCanAccess(
+    incidentId: string,
+    userId: string,
+    roles: UserRole[],
+  ): Promise<Incident> {
+    const incident = await this.findById(incidentId);
+    if (RESPONDER_ROLES.some((r) => roles.includes(r))) return incident;
+    if (incident.reportedByUserId === userId) return incident;
+
+    const ride = incident.rideId
+      ? await this.ridesRepo.findOne({ where: { id: incident.rideId } })
+      : null;
+    if (ride && (ride.passengerId === userId || ride.driverId === userId)) {
+      return incident;
+    }
+
+    throw new ForbiddenException("You don't have access to this incident");
+  }
+
+  async getTimelineForRequester(
+    incidentId: string,
+    userId: string,
+    roles: UserRole[],
+  ): Promise<IncidentTimelineEntry[]> {
+    await this.assertCanAccess(incidentId, userId, roles);
+    return this.getTimeline(incidentId);
+  }
+
+  async addNoteAsRequester(
+    incidentId: string,
+    userId: string,
+    roles: UserRole[],
+    note: string,
+  ): Promise<IncidentTimelineEntry> {
+    await this.assertCanAccess(incidentId, userId, roles);
+    return this.addTimelineEntry(incidentId, userId, 'note', note);
   }
 
   // ---- Live ride monitoring ----

@@ -15,6 +15,15 @@ function fakeOffer(overrides: Partial<any> = {}) {
 }
 
 function buildService(overrides: Record<string, any> = {}) {
+  const expireQueryBuilder: any = {
+    update: jest.fn().mockReturnThis(),
+    set: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    returning: jest.fn().mockReturnThis(),
+    execute: jest.fn().mockResolvedValue({ raw: [] }),
+  };
+
   const offersRepo = {
     find: jest.fn().mockResolvedValue([]),
     findOne: jest.fn().mockResolvedValue(null),
@@ -22,6 +31,8 @@ function buildService(overrides: Record<string, any> = {}) {
     update: jest.fn().mockResolvedValue({ affected: 1 }),
     create: jest.fn((x: any) => x),
     save: jest.fn(async (x: any) => x),
+    createQueryBuilder: jest.fn(() => expireQueryBuilder),
+    __expireQueryBuilder: expireQueryBuilder,
     ...overrides.offersRepo,
   };
   const ridesRepo = {
@@ -120,45 +131,88 @@ describe('DispatchService', () => {
   });
 
   describe('expireStaleOffersAndReassign', () => {
-    it('emits ride.offer.expired for every offer it expires', async () => {
-      const stale = [fakeOffer({ id: 'offer-1', driverUserId: 'driver-1' }), fakeOffer({ id: 'offer-2', driverUserId: 'driver-2', rideId: 'ride-2' })];
-      const { service, offersRepo, events } = buildService({
-        offersRepo: {
-          find: jest.fn().mockResolvedValue(stale),
-          save: jest.fn(async (x: any) => x),
-        },
+    it('expires via a single atomic conditional UPDATE (status=PENDING AND expiresAt<now), not a find-then-save round trip', async () => {
+      const { service, offersRepo } = buildService();
+      offersRepo.__expireQueryBuilder.execute.mockResolvedValue({
+        raw: [{ id: 'offer-1', rideId: 'ride-1', driverUserId: 'driver-1' }],
       });
 
       await service.expireStaleOffersAndReassign();
 
-      expect(offersRepo.save).toHaveBeenCalled();
+      expect(offersRepo.__expireQueryBuilder.set).toHaveBeenCalledWith({ status: RideOfferStatus.EXPIRED });
+      expect(offersRepo.__expireQueryBuilder.where).toHaveBeenCalledWith('status = :pending', {
+        pending: RideOfferStatus.PENDING,
+      });
+      expect(offersRepo.__expireQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'expiresAt < :now',
+        expect.objectContaining({ now: expect.any(Date) }),
+      );
+      // The old find()+save() pattern must not come back — save() on a
+      // stale-read entity is exactly the blind, unconditioned UPDATE this
+      // was rewritten to avoid.
+      expect(offersRepo.find).not.toHaveBeenCalled();
+      expect(offersRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('emits ride.offer.expired only for rows the UPDATE actually touched', async () => {
+      const { service, offersRepo, events } = buildService();
+      offersRepo.__expireQueryBuilder.execute.mockResolvedValue({
+        raw: [
+          { id: 'offer-1', rideId: 'ride-1', driverUserId: 'driver-1' },
+          { id: 'offer-2', rideId: 'ride-2', driverUserId: 'driver-2' },
+        ],
+      });
+
+      await service.expireStaleOffersAndReassign();
+
       expect(events.emit).toHaveBeenCalledWith('ride.offer.expired', { rideId: 'ride-1', driverUserId: 'driver-1' });
       expect(events.emit).toHaveBeenCalledWith('ride.offer.expired', { rideId: 'ride-2', driverUserId: 'driver-2' });
+      expect(events.emit).toHaveBeenCalledTimes(2);
     });
 
-    it('does nothing when there is nothing stale', async () => {
-      const { service, offersRepo, events } = buildService({
-        offersRepo: { find: jest.fn().mockResolvedValue([]) },
-      });
+    it('does nothing when nothing was stale', async () => {
+      const { service, events, metricsService } = buildService();
+      // default mock already resolves { raw: [] }
 
       await service.expireStaleOffersAndReassign();
 
-      expect(offersRepo.save).not.toHaveBeenCalled();
       expect(events.emit).not.toHaveBeenCalled();
+      expect(metricsService.dispatchOfferTimeoutsTotal.inc).not.toHaveBeenCalled();
     });
 
-    it('records offer_timeout_rate\'s numerator (dispatchOfferTimeoutsTotal) once per expired offer, MANUAL or AUTO alike', async () => {
-      const stale = [fakeOffer({ id: 'offer-1', driverUserId: 'driver-1' }), fakeOffer({ id: 'offer-2', driverUserId: 'driver-2', rideId: 'ride-2' })];
-      const { service, metricsService } = buildService({
-        offersRepo: {
-          find: jest.fn().mockResolvedValue(stale),
-          save: jest.fn(async (x: any) => x),
-        },
+    it("records offer_timeout_rate's numerator (dispatchOfferTimeoutsTotal) once per row the UPDATE actually expired, MANUAL or AUTO alike", async () => {
+      const { service, offersRepo, metricsService } = buildService();
+      offersRepo.__expireQueryBuilder.execute.mockResolvedValue({
+        raw: [
+          { id: 'offer-1', rideId: 'ride-1', driverUserId: 'driver-1' },
+          { id: 'offer-2', rideId: 'ride-2', driverUserId: 'driver-2' },
+        ],
       });
 
       await service.expireStaleOffersAndReassign();
 
       expect(metricsService.dispatchOfferTimeoutsTotal.inc).toHaveBeenCalledWith(2);
+    });
+
+    it('does not count or emit for an offer accepted in the same instant the sweep runs (the race the old find+save version lost)', async () => {
+      // Simulates: sweep's WHERE clause is evaluated at the DB level after
+      // markAccepted()'s own conditional UPDATE already committed for
+      // offer-1 — so offer-1 no longer matches `status = PENDING` and the
+      // atomic UPDATE below only ever touches offer-2. There is no
+      // separate save() step left that could clobber offer-1 back to
+      // EXPIRED, unlike the old implementation.
+      const { service, offersRepo, events, metricsService } = buildService();
+      offersRepo.__expireQueryBuilder.execute.mockResolvedValue({
+        raw: [{ id: 'offer-2', rideId: 'ride-2', driverUserId: 'driver-2' }],
+      });
+
+      await service.expireStaleOffersAndReassign();
+
+      expect(events.emit).not.toHaveBeenCalledWith(
+        'ride.offer.expired',
+        expect.objectContaining({ rideId: 'ride-1' }),
+      );
+      expect(metricsService.dispatchOfferTimeoutsTotal.inc).toHaveBeenCalledWith(1);
     });
   });
 });

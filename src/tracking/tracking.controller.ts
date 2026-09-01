@@ -36,9 +36,12 @@ export class TrackingController {
     return this.liveTrackingService.getLiveSnapshot(city);
   }
 
+  // IDOR fix (batch 12): used to have no access check — any authenticated
+  // user could pull the historical GPS route of any ride by guessing its
+  // id. Now scoped to the ride's own passenger/driver, or staff.
   @Get('rides/:id/route')
-  rideRoute(@Param('id') rideId: string) {
-    return this.historyService.getRideRoute(rideId);
+  rideRoute(@CurrentUser() user: User, @Param('id') rideId: string) {
+    return this.historyService.getRideRouteForRequester(rideId, user.id, user.roles ?? [user.role]);
   }
 
   @Get('drivers/me/history')

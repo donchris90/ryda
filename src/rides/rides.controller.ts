@@ -168,8 +168,8 @@ export class RidesController {
    */
   @Get(':id/selectable-drivers')
   @UseGuards(JwtAuthGuard)
-  selectableDrivers(@Param('id') id: string) {
-    return this.ridesService.findSelectableDrivers(id);
+  selectableDrivers(@Param('id') id: string, @CurrentUser() user: User) {
+    return this.ridesService.findSelectableDrivers(id, user.id, user.role);
   }
 
   @Post(':id/select-driver')
@@ -193,7 +193,8 @@ export class RidesController {
    */
   @Get(':id/current-offer')
   @UseGuards(JwtAuthGuard)
-  currentOffer(@Param('id') id: string) {
+  async currentOffer(@Param('id') id: string, @CurrentUser() user: User) {
+    await this.ridesService.assertCanViewOfferState(id, user.id, user.role);
     return this.dispatchService.getPendingOfferForRide(id);
   }
 

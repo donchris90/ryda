@@ -348,6 +348,26 @@ export class RidesService {
   }
 
   /**
+   * IDOR fix (batch 12): backs GET /rides/:id/current-offer, which used to
+   * call DispatchService.getPendingOfferForRide(id) directly with no check
+   * at all — any authenticated user could see whether (and to which
+   * driverUserId) any ride currently has a pending offer out. Only the
+   * ride's own passenger needs this (it drives the "waiting for driver"
+   * UI); staff can see it too via the admin tooling.
+   */
+  async assertCanViewOfferState(
+    rideId: string,
+    requesterId: string,
+    requesterRole: UserRole,
+  ): Promise<void> {
+    const ride = await this.findById(rideId);
+    const isStaff = STAFF_ROLES.includes(requesterRole);
+    if (ride.passengerId !== requesterId && !isStaff) {
+      throw new ForbiddenException("You don't have access to this ride");
+    }
+  }
+
+  /**
    * Admin ride list/search — same gap as DriversService.listForAdmin()
    * before it: nothing let staff look up a specific ride at all, only
    * `GET /rides/mine` (self) and `GET /rides/:id` (needs the exact ID
@@ -733,11 +753,23 @@ export class RidesService {
    * from anything other than this one shared source is exactly the
    * split architecture this was built to avoid — see
    * candidate-search.types.ts's DispatchMode doc comment.
+   *
+   * IDOR fix (batch 12): this used to have no access check at all —
+   * driver name/photo/plate number and live ETA/distance for any ride's
+   * pickup, readable by any authenticated user just by guessing a ride
+   * id. Scoped to the ride's own passenger (or staff), same pattern as
+   * getForUser/getDriverInfo/getRoute above.
    */
   async findSelectableDrivers(
     rideId: string,
+    requesterId: string,
+    requesterRole: UserRole,
   ): Promise<SelectableDriverResult[]> {
     const ride = await this.findById(rideId);
+    const isStaff = STAFF_ROLES.includes(requesterRole);
+    if (ride.passengerId !== requesterId && !isStaff) {
+      throw new ForbiddenException("You don't have access to this ride");
+    }
     // manual_selection_time (batch 9): full search+rank latency for the
     // MANUAL driver-list screen — the one metric on this list that has
     // no AUTO equivalent, since AUTO never shows a list to anyone.

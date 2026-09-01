@@ -6,6 +6,7 @@ import { DriverApprovalStatus, DriverAvailability } from '../common/enums/driver
 import { DriverService } from '../common/enums/driver-service.enum';
 import { VehicleCategory } from '../common/enums/vehicle.enum';
 import { DispatchDomain } from '../candidate-search/candidate-search.types';
+import { UserRole } from '../common/enums/user-role.enum';
 
 function fakeOrder(overrides: Partial<DeliveryOrder> = {}): DeliveryOrder {
   return {
@@ -645,5 +646,81 @@ describe('LogisticsService.markDelivered — payment settlement safety', () => {
       'driver_earnings.credit_failed',
       expect.objectContaining({ orderId: 'order-1' }),
     );
+  });
+});
+
+describe('LogisticsService.getForUser — ownership check on the detail endpoint (batch 11)', () => {
+  it('lets the customer who placed the order see it', async () => {
+    const { service, deps } = buildService({
+      ordersRepo: { findOne: jest.fn().mockResolvedValue(fakeOrder({ customerId: 'customer-1' })) },
+    });
+
+    const result = await service.getForUser('order-1', 'customer-1', UserRole.PASSENGER);
+
+    expect(result.id).toBe('order-1');
+  });
+
+  it('lets the assigned driver see it', async () => {
+    const { service } = buildService({
+      ordersRepo: {
+        findOne: jest.fn().mockResolvedValue(fakeOrder({ customerId: 'customer-1', driverId: 'driver-1' })),
+      },
+    });
+
+    const result = await service.getForUser('order-1', 'driver-1', UserRole.DRIVER);
+
+    expect(result.id).toBe('order-1');
+  });
+
+  it('lets staff (e.g. support) see it', async () => {
+    const { service } = buildService({
+      ordersRepo: { findOne: jest.fn().mockResolvedValue(fakeOrder({ customerId: 'customer-1' })) },
+    });
+
+    const result = await service.getForUser('order-1', 'agent-1', UserRole.SUPPORT_AGENT);
+
+    expect(result.id).toBe('order-1');
+  });
+
+  it(
+    "rejects an unrelated authenticated user (IDOR fix — findById() alone is not an authorization " +
+      'check, and the controller must not call it directly for this endpoint)',
+    async () => {
+      const { service } = buildService({
+        ordersRepo: { findOne: jest.fn().mockResolvedValue(fakeOrder({ customerId: 'customer-1' })) },
+      });
+
+      await expect(
+        service.getForUser('order-1', 'some-other-passenger', UserRole.PASSENGER),
+      ).rejects.toThrow(ForbiddenException);
+    },
+  );
+
+  it('rejects a driver who was never assigned this order — the whole point of MANUAL courier selection is that unselected drivers never learn the order exists', async () => {
+    const { service } = buildService({
+      ordersRepo: {
+        findOne: jest.fn().mockResolvedValue(
+          fakeOrder({ customerId: 'customer-1', driverId: null, status: DeliveryStatus.SEARCHING }),
+        ),
+      },
+    });
+
+    await expect(
+      service.getForUser('order-1', 'uninvolved-driver', UserRole.DRIVER),
+    ).rejects.toThrow(ForbiddenException);
+  });
+
+  it('rejects a driver who was assigned a *different* order', async () => {
+    const { service } = buildService({
+      ordersRepo: {
+        findOne: jest.fn().mockResolvedValue(
+          fakeOrder({ id: 'order-1', customerId: 'customer-1', driverId: 'driver-on-other-order' }),
+        ),
+      },
+    });
+
+    await expect(
+      service.getForUser('order-1', 'driver-1', UserRole.DRIVER),
+    ).rejects.toThrow(ForbiddenException);
   });
 });

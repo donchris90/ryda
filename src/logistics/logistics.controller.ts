@@ -59,8 +59,8 @@ export class LogisticsController {
 
   @Get(':id')
   @UseGuards(JwtAuthGuard)
-  get(@Param('id') id: string) {
-    return this.logisticsService.findById(id);
+  get(@CurrentUser() user: User, @Param('id') id: string) {
+    return this.logisticsService.getForUser(id, user.id, user.role);
   }
 
   // OPTION B ("choose a courier") — passenger-facing candidate list.

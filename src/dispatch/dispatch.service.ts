@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { LessThan, Repository } from 'typeorm';
+import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Interval } from '@nestjs/schedule';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -302,26 +302,55 @@ export class DispatchService {
    *     candidate. It re-checks the ride's current status/dispatchMode
    *     itself before doing anything, so this sweep doesn't need to know
    *     which rides are AUTO — it just reports every expiry uniformly.
+   *
+   * This is one atomic conditional UPDATE, not a find-then-save round
+   * trip. An earlier version read PENDING + time-expired rows, flipped
+   * `.status` on the in-memory objects, then called save() — which is a
+   * blind full-entity `UPDATE ... WHERE id = $1` with no guard on the
+   * row's *current* status. In the window between that read and that
+   * write, a driver's markAccepted() (or markDeclined()/withdrawOffer())
+   * could land its own targeted `WHERE status = 'pending'` update on the
+   * very same row — acceptRide() only requires the offer to have been
+   * live at the moment it checked, which can be a moment before this
+   * sweep's read. The old save() would then silently clobber that
+   * genuine ACCEPTED/DECLINED/SUPERSEDED status back to EXPIRED, and
+   * fire a bogus 'ride.offer.expired' for an offer that had actually
+   * just been accepted — corrupting both the offer's own audit trail
+   * and offer_timeout_rate's numerator below. Conditioning the UPDATE
+   * itself on `status = PENDING` closes that window the same way every
+   * other write in this file already does, and as a side effect also
+   * makes two overlapping sweep ticks (if one ever runs past 15s) safe:
+   * whichever's UPDATE commits first wins the row, the other's WHERE
+   * simply matches nothing.
    */
   @Interval(15000)
   async expireStaleOffersAndReassign(): Promise<void> {
     this.lastSweepAt = new Date();
 
-    const stale = await this.offersRepo.find({
-      where: { status: RideOfferStatus.PENDING, expiresAt: LessThan(new Date()) },
-    });
-    if (stale.length === 0) return;
+    const result = await this.offersRepo
+      .createQueryBuilder()
+      .update(RideOffer)
+      .set({ status: RideOfferStatus.EXPIRED })
+      .where('status = :pending', { pending: RideOfferStatus.PENDING })
+      .andWhere('expiresAt < :now', { now: new Date() })
+      .returning(['id', 'rideId', 'driverUserId'])
+      .execute();
 
-    for (const offer of stale) {
-      offer.status = RideOfferStatus.EXPIRED;
-    }
-    await this.offersRepo.save(stale);
+    const expired = (result.raw ?? []) as Array<{
+      id: string;
+      rideId: string;
+      driverUserId: string;
+    }>;
+    if (expired.length === 0) return;
 
     // offer_timeout_rate (batch 9): every offer that times out unanswered,
     // MANUAL or AUTO alike — divide against dispatchOffersTotal in PromQL.
-    this.metricsService.dispatchOfferTimeoutsTotal.inc(stale.length);
+    // Only offers this UPDATE actually flipped are counted, so an offer
+    // that was accepted/declined out from under the sweep in the same
+    // instant is correctly excluded rather than double-counted.
+    this.metricsService.dispatchOfferTimeoutsTotal.inc(expired.length);
 
-    for (const offer of stale) {
+    for (const offer of expired) {
       this.events.emit('ride.offer.expired', { rideId: offer.rideId, driverUserId: offer.driverUserId });
     }
   }

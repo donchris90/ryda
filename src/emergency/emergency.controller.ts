@@ -36,14 +36,19 @@ export class EmergencyController {
     return this.emergencyService.reportIncident(user.id, dto);
   }
 
+  // IDOR fix (batch 12): these used to call the service with just the
+  // incident id — no ownership/role check — so any authenticated user
+  // could read or write into any incident's timeline by guessing its id.
+  // Scoped now to the reporter, a party on the linked ride, or staff (see
+  // EmergencyService.assertCanAccess).
   @Get('emergency/incidents/:id/timeline')
-  timeline(@Param('id') id: string) {
-    return this.emergencyService.getTimeline(id);
+  timeline(@CurrentUser() user: User, @Param('id') id: string) {
+    return this.emergencyService.getTimelineForRequester(id, user.id, user.roles ?? [user.role]);
   }
 
   @Post('emergency/incidents/:id/notes')
   addNote(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: AddIncidentNoteDto) {
-    return this.emergencyService.addTimelineEntry(id, user.id, 'note', dto.note);
+    return this.emergencyService.addNoteAsRequester(id, user.id, user.roles ?? [user.role], dto.note);
   }
 
   // ---- Admin/support command center ----

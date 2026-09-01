@@ -28,6 +28,7 @@ import {
   DriverApprovalStatus,
 } from '../common/enums/driver-status.enum';
 import { DriverService, isOnlineForService } from '../common/enums/driver-service.enum';
+import { UserRole } from '../common/enums/user-role.enum';
 import { haversineDistanceKm } from '../common/utils/geo.util';
 import { DriversService } from '../drivers/drivers.service';
 import { VehiclesService } from '../vehicles/vehicles.service';
@@ -83,6 +84,15 @@ export interface CourierCandidateResult {
   etaMinutes: number;
   distanceKm: number;
 }
+
+// Same roster rides.service.ts's STAFF_ROLES uses — staff who can see
+// any ride can see any delivery, for the same support/ops reasons.
+const STAFF_ROLES = [
+  UserRole.ADMIN,
+  UserRole.SUPER_ADMIN,
+  UserRole.SUPPORT_AGENT,
+  UserRole.DISPATCHER,
+];
 
 @Injectable()
 export class LogisticsService {
@@ -456,6 +466,48 @@ export class LogisticsService {
   async findById(id: string): Promise<DeliveryOrder> {
     const order = await this.ordersRepo.findOne({ where: { id } });
     if (!order) throw new NotFoundException('Delivery order not found');
+    return order;
+  }
+
+  /**
+   * Authorization-checked lookup for the customer-/driver-facing detail
+   * endpoint (GET /deliveries/:id) — findById() above is the plain,
+   * unchecked repository read used internally by every other method here
+   * once it's already established the caller is entitled to this order
+   * (via customerId/driverId match, an explicit select-courier ownership
+   * check, etc). The controller was calling findById() directly, with no
+   * ownership check of any kind — any authenticated user, passenger or
+   * driver, could fetch any delivery's full detail (pickup/dropoff
+   * addresses, both contacts' names and phone numbers, item description
+   * and value, COD amount) by id alone, which is a real IDOR: mirrors
+   * exactly the gap rides.service.ts's getForUser() exists to close for
+   * the equivalent ride endpoint.
+   *
+   * Deliberately narrower than rides' getForUser(): rides also admits a
+   * driver with a live *offer* on the ride, because a targeted offer is
+   * the one case where a driver legitimately needs to see ride detail
+   * before deciding whether to accept. Deliveries have no equivalent
+   * offer/reservation record for a not-yet-assigned driver (see
+   * acceptDelivery()'s doc comment — broadcast, first-accept-wins, by
+   * design) — extending the same exception here for "any eligible
+   * candidate" would mean re-running the live candidate search just to
+   * authorize a read, and would defeat the entire point of MANUAL orders
+   * not broadcasting to begin with (a driver could learn full detail of
+   * a delivery they were never offered). So until this order has an
+   * assigned driver, only the customer who placed it (or staff) can see it.
+   */
+  async getForUser(
+    orderId: string,
+    requesterId: string,
+    requesterRole: UserRole,
+  ): Promise<DeliveryOrder> {
+    const order = await this.findById(orderId);
+    const isParticipant =
+      order.customerId === requesterId || order.driverId === requesterId;
+    const isStaff = STAFF_ROLES.includes(requesterRole);
+    if (!isParticipant && !isStaff) {
+      throw new ForbiddenException("You don't have access to this delivery");
+    }
     return order;
   }
 
