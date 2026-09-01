@@ -4,7 +4,12 @@ import { Repository } from 'typeorm';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
-import { Notification, NotificationChannel, NotificationCategory, NotificationStatus } from './entities/notification.entity';
+import {
+  Notification,
+  NotificationChannel,
+  NotificationCategory,
+  NotificationStatus,
+} from './entities/notification.entity';
 import { DeviceToken, DevicePlatform } from './entities/device-token.entity';
 import { TwilioProvider } from './providers/twilio.provider';
 import { AfricasTalkingProvider } from './providers/africas-talking.provider';
@@ -34,25 +39,47 @@ export class NotificationsService {
 
   // ---- Device tokens (for push) ----
 
-  async registerDeviceToken(userId: string, token: string, platform: DevicePlatform): Promise<DeviceToken> {
+  async registerDeviceToken(
+    userId: string,
+    token: string,
+    platform: DevicePlatform,
+  ): Promise<DeviceToken> {
     const existing = await this.deviceTokensRepo.findOne({ where: { token } });
     if (existing) {
       existing.userId = userId;
       existing.platform = platform;
       return this.deviceTokensRepo.save(existing);
     }
-    return this.deviceTokensRepo.save(this.deviceTokensRepo.create({ userId, token, platform }));
+    return this.deviceTokensRepo.save(
+      this.deviceTokensRepo.create({ userId, token, platform }),
+    );
   }
 
-  async removeDeviceToken(userId: string, token: string): Promise<{ removed: boolean }> {
+  async removeDeviceToken(
+    userId: string,
+    token: string,
+  ): Promise<{ removed: boolean }> {
     const result = await this.deviceTokensRepo.delete({ userId, token });
     return { removed: (result.affected ?? 0) > 0 };
   }
 
   // ---- Per-channel sends ----
 
-  async sendSms(userId: string, phone: string, title: string, body: string, category?: NotificationCategory): Promise<Notification> {
-    const record = await this.createRecord(userId, NotificationChannel.SMS, title, body, undefined, category);
+  async sendSms(
+    userId: string,
+    phone: string,
+    title: string,
+    body: string,
+    category?: NotificationCategory,
+  ): Promise<Notification> {
+    const record = await this.createRecord(
+      userId,
+      NotificationChannel.SMS,
+      title,
+      body,
+      undefined,
+      category,
+    );
     if (!this.twilio.isSmsConfigured()) return this.markSimulated(record);
 
     const result = await this.twilio.sendSms(phone, body);
@@ -81,7 +108,9 @@ export class NotificationsService {
    */
   async sendRawSms(phone: string, body: string): Promise<void> {
     if (!this.africasTalking.isConfigured()) {
-      this.logger.warn(`SMS not configured - would have sent to ${phone}: ${body}`);
+      this.logger.warn(
+        `SMS not configured - would have sent to ${phone}: ${body}`,
+      );
       return;
     }
     const result = await this.africasTalking.sendSms(phone, body);
@@ -90,16 +119,42 @@ export class NotificationsService {
     }
   }
 
-  async sendWhatsapp(userId: string, phone: string, title: string, body: string, category?: NotificationCategory): Promise<Notification> {
-    const record = await this.createRecord(userId, NotificationChannel.WHATSAPP, title, body, undefined, category);
+  async sendWhatsapp(
+    userId: string,
+    phone: string,
+    title: string,
+    body: string,
+    category?: NotificationCategory,
+  ): Promise<Notification> {
+    const record = await this.createRecord(
+      userId,
+      NotificationChannel.WHATSAPP,
+      title,
+      body,
+      undefined,
+      category,
+    );
     if (!this.twilio.isWhatsappConfigured()) return this.markSimulated(record);
 
     const result = await this.twilio.sendWhatsapp(phone, body);
     return this.applyResult(record, result);
   }
 
-  async sendEmail(userId: string, email: string, subject: string, body: string, category?: NotificationCategory): Promise<Notification> {
-    const record = await this.createRecord(userId, NotificationChannel.EMAIL, subject, body, undefined, category);
+  async sendEmail(
+    userId: string,
+    email: string,
+    subject: string,
+    body: string,
+    category?: NotificationCategory,
+  ): Promise<Notification> {
+    const record = await this.createRecord(
+      userId,
+      NotificationChannel.EMAIL,
+      subject,
+      body,
+      undefined,
+      category,
+    );
     if (!this.sendgrid.isConfigured()) return this.markSimulated(record);
 
     const result = await this.sendgrid.sendEmail(email, subject, body);
@@ -107,12 +162,28 @@ export class NotificationsService {
   }
 
   /** Sends to every device registered for this user. Records one Notification row regardless of device count. */
-  async sendPush(userId: string, title: string, body: string, data?: Record<string, string>, category?: NotificationCategory): Promise<Notification> {
-    const record = await this.createRecord(userId, NotificationChannel.PUSH, title, body, data, category);
+  async sendPush(
+    userId: string,
+    title: string,
+    body: string,
+    data?: Record<string, string>,
+    category?: NotificationCategory,
+  ): Promise<Notification> {
+    const record = await this.createRecord(
+      userId,
+      NotificationChannel.PUSH,
+      title,
+      body,
+      data,
+      category,
+    );
 
     const devices = await this.deviceTokensRepo.find({ where: { userId } });
     if (devices.length === 0) {
-      return this.applyResult(record, { success: false, error: 'No registered device tokens' });
+      return this.applyResult(record, {
+        success: false,
+        error: 'No registered device tokens',
+      });
     }
 
     // Per-device routing, not a single global provider choice — an Expo
@@ -129,7 +200,10 @@ export class NotificationsService {
         if (this.fcm.isConfigured()) {
           return this.fcm.sendPush(d.token, title, body, data);
         }
-        return Promise.resolve({ success: false, error: 'Token format not recognized and FCM not configured' });
+        return Promise.resolve({
+          success: false,
+          error: 'Token format not recognized and FCM not configured',
+        });
       }),
     );
     const anySucceeded = results.some((r) => r.success);
@@ -137,12 +211,28 @@ export class NotificationsService {
       record,
       anySucceeded
         ? { success: true }
-        : { success: false, error: results[0]?.error ?? 'All device sends failed' },
+        : {
+            success: false,
+            error: results[0]?.error ?? 'All device sends failed',
+          },
     );
   }
 
-  async sendInApp(userId: string, title: string, body: string, metadata?: Record<string, unknown>, category?: NotificationCategory): Promise<Notification> {
-    const record = await this.createRecord(userId, NotificationChannel.IN_APP, title, body, metadata, category);
+  async sendInApp(
+    userId: string,
+    title: string,
+    body: string,
+    metadata?: Record<string, unknown>,
+    category?: NotificationCategory,
+  ): Promise<Notification> {
+    const record = await this.createRecord(
+      userId,
+      NotificationChannel.IN_APP,
+      title,
+      body,
+      metadata,
+      category,
+    );
     record.status = NotificationStatus.SENT; // in-app "delivery" is just the DB write itself
     return this.notificationsRepo.save(record);
   }
@@ -164,13 +254,25 @@ export class NotificationsService {
           case NotificationChannel.IN_APP:
             return this.sendInApp(userId, title, body, metadata, category);
           case NotificationChannel.SMS:
-            return user.phone ? this.sendSms(userId, user.phone, title, body, category) : undefined;
+            return user.phone
+              ? this.sendSms(userId, user.phone, title, body, category)
+              : undefined;
           case NotificationChannel.WHATSAPP:
-            return user.phone ? this.sendWhatsapp(userId, user.phone, title, body, category) : undefined;
+            return user.phone
+              ? this.sendWhatsapp(userId, user.phone, title, body, category)
+              : undefined;
           case NotificationChannel.EMAIL:
-            return user.email ? this.sendEmail(userId, user.email, title, body, category) : undefined;
+            return user.email
+              ? this.sendEmail(userId, user.email, title, body, category)
+              : undefined;
           case NotificationChannel.PUSH:
-            return this.sendPush(userId, title, body, metadata as Record<string, string> | undefined, category);
+            return this.sendPush(
+              userId,
+              title,
+              body,
+              metadata as Record<string, string> | undefined,
+              category,
+            );
         }
       }),
     );
@@ -191,14 +293,19 @@ export class NotificationsService {
   }
 
   async markRead(userId: string, id: string): Promise<Notification> {
-    const record = await this.notificationsRepo.findOne({ where: { id, userId } });
+    const record = await this.notificationsRepo.findOne({
+      where: { id, userId },
+    });
     if (!record) throw new NotFoundException('Notification not found');
     record.isRead = true;
     return this.notificationsRepo.save(record);
   }
 
   async markAllRead(userId: string): Promise<{ updated: number }> {
-    const result = await this.notificationsRepo.update({ userId, isRead: false }, { isRead: true });
+    const result = await this.notificationsRepo.update(
+      { userId, isRead: false },
+      { isRead: true },
+    );
     return { updated: result.affected ?? 0 };
   }
 
@@ -213,7 +320,14 @@ export class NotificationsService {
     category: NotificationCategory = NotificationCategory.GENERAL,
   ): Promise<Notification> {
     return this.notificationsRepo.save(
-      this.notificationsRepo.create({ userId, channel, category, title, body, metadata: metadata ?? null }),
+      this.notificationsRepo.create({
+        userId,
+        channel,
+        category,
+        title,
+        body,
+        metadata: metadata ?? null,
+      }),
     );
   }
 
@@ -226,7 +340,9 @@ export class NotificationsService {
     record: Notification,
     result: { success: boolean; error?: string },
   ): Promise<Notification> {
-    record.status = result.success ? NotificationStatus.SENT : NotificationStatus.FAILED;
+    record.status = result.success
+      ? NotificationStatus.SENT
+      : NotificationStatus.FAILED;
     if (!result.success) record.failureReason = result.error ?? 'Unknown error';
     return this.notificationsRepo.save(record);
   }
@@ -254,7 +370,7 @@ export class NotificationsService {
       payload.passengerId,
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
       'Your driver has arrived',
-      "Your driver is waiting at the pickup point.",
+      'Your driver is waiting at the pickup point.',
       undefined,
       NotificationCategory.RIDE,
     );
@@ -291,7 +407,11 @@ export class NotificationsService {
   }
 
   @OnEvent('ride.completed')
-  async onRideCompleted(payload: { passengerId: string; driverId: string; totalFare: string }) {
+  async onRideCompleted(payload: {
+    passengerId: string;
+    driverId: string;
+    totalFare: string;
+  }) {
     await Promise.all([
       this.safeNotify(
         payload.passengerId,
@@ -313,22 +433,51 @@ export class NotificationsService {
   }
 
   @OnEvent('ride.cancelled')
-  async onRideCancelled(payload: { notifyUserId: string; reason: string | null }) {
+  async onRideCancelled(payload: {
+    notifyUserId: string;
+    reason: string | null;
+  }) {
     await this.safeNotify(
       payload.notifyUserId,
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
       'Ride cancelled',
-      payload.reason ? `Your ride was cancelled: ${payload.reason}` : 'Your ride was cancelled.',
+      payload.reason
+        ? `Your ride was cancelled: ${payload.reason}`
+        : 'Your ride was cancelled.',
+      undefined,
+      NotificationCategory.RIDE,
+    );
+  }
+
+  // Distinct from ride.cancelled: fired when a driver already carrying
+  // both passengers of a pooled trip loses one of them mid-trip. The
+  // driver's overall trip continues (with the remaining passenger, at
+  // that passenger's now-corrected solo fare) — "your ride was
+  // cancelled" would read as the whole trip ending, which it isn't.
+  @OnEvent('ride.pool_partner_cancelled')
+  async onRidePoolPartnerCancelled(payload: { notifyUserId: string }) {
+    await this.safeNotify(
+      payload.notifyUserId,
+      [NotificationChannel.IN_APP, NotificationChannel.PUSH],
+      'One passenger cancelled',
+      'One of your pooled passengers cancelled. Continue the trip with your remaining passenger.',
       undefined,
       NotificationCategory.RIDE,
     );
   }
 
   @OnEvent('driver.approval.changed')
-  async onDriverApprovalChanged(payload: { userId: string; approved: boolean }) {
+  async onDriverApprovalChanged(payload: {
+    userId: string;
+    approved: boolean;
+  }) {
     await this.safeNotify(
       payload.userId,
-      [NotificationChannel.IN_APP, NotificationChannel.SMS, NotificationChannel.PUSH],
+      [
+        NotificationChannel.IN_APP,
+        NotificationChannel.SMS,
+        NotificationChannel.PUSH,
+      ],
       payload.approved ? 'You are approved to drive' : 'Application update',
       payload.approved
         ? 'Congratulations — your driver application was approved. You can go online now.'
@@ -339,7 +488,11 @@ export class NotificationsService {
   }
 
   @OnEvent('driver.document.expiring')
-  async onDriverDocumentExpiring(payload: { userId: string; documentType: string; daysLeft: number }) {
+  async onDriverDocumentExpiring(payload: {
+    userId: string;
+    documentType: string;
+    daysLeft: number;
+  }) {
     const label = payload.documentType.replace(/_/g, ' ');
     await this.safeNotify(
       payload.userId,
@@ -376,7 +529,11 @@ export class NotificationsService {
   }
 
   @OnEvent('delivery.requested')
-  async onDeliveryRequested(payload: { driverUserIds: string[]; deliveryId: string; pickupAddress: string }) {
+  async onDeliveryRequested(payload: {
+    driverUserIds: string[];
+    deliveryId: string;
+    pickupAddress: string;
+  }) {
     await Promise.all(
       payload.driverUserIds.map((driverUserId) =>
         this.safeNotify(
@@ -392,7 +549,11 @@ export class NotificationsService {
   }
 
   @OnEvent('delivery.delivered')
-  async onDeliveryDelivered(payload: { customerId: string; driverId: string; totalFare: string }) {
+  async onDeliveryDelivered(payload: {
+    customerId: string;
+    driverId: string;
+    totalFare: string;
+  }) {
     await Promise.all([
       this.safeNotify(
         payload.customerId,
@@ -414,19 +575,28 @@ export class NotificationsService {
   }
 
   @OnEvent('delivery.cancelled')
-  async onDeliveryCancelled(payload: { notifyUserId: string; reason: string | null }) {
+  async onDeliveryCancelled(payload: {
+    notifyUserId: string;
+    reason: string | null;
+  }) {
     await this.safeNotify(
       payload.notifyUserId,
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
       'Delivery cancelled',
-      payload.reason ? `Delivery cancelled: ${payload.reason}` : 'Delivery cancelled.',
+      payload.reason
+        ? `Delivery cancelled: ${payload.reason}`
+        : 'Delivery cancelled.',
       undefined,
       NotificationCategory.RIDE,
     );
   }
 
   @OnEvent('support.ticket.created')
-  async onTicketCreated(payload: { userId: string; ticketId: string; subject: string }) {
+  async onTicketCreated(payload: {
+    userId: string;
+    ticketId: string;
+    subject: string;
+  }) {
     await this.safeNotify(
       payload.userId,
       [NotificationChannel.IN_APP],
@@ -438,7 +608,11 @@ export class NotificationsService {
   }
 
   @OnEvent('support.ticket.status_changed')
-  async onTicketStatusChanged(payload: { userId: string; ticketId: string; status: string }) {
+  async onTicketStatusChanged(payload: {
+    userId: string;
+    ticketId: string;
+    status: string;
+  }) {
     await this.safeNotify(
       payload.userId,
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
@@ -458,8 +632,12 @@ export class NotificationsService {
     lng: number | null;
     emergencyContactPhones: string[];
   }) {
-    const reporter = await this.usersService.findById(payload.userId).catch(() => null);
-    const reporterName = reporter ? `${reporter.firstName} ${reporter.lastName}` : 'A user';
+    const reporter = await this.usersService
+      .findById(payload.userId)
+      .catch(() => null);
+    const reporterName = reporter
+      ? `${reporter.firstName} ${reporter.lastName}`
+      : 'A user';
     const locationText =
       payload.lat != null && payload.lng != null
         ? ` Last known location: https://maps.google.com/?q=${payload.lat},${payload.lng}`
@@ -479,7 +657,10 @@ export class NotificationsService {
       NotificationCategory.SECURITY,
     );
     if (reporter?.phone) {
-      await this.sendRawSms(reporter.phone, 'Your emergency alert has been received. Help is being notified.');
+      await this.sendRawSms(
+        reporter.phone,
+        'Your emergency alert has been received. Help is being notified.',
+      );
     }
 
     // 2. Actively alert on-call staff instead of relying on someone to be
@@ -487,7 +668,8 @@ export class NotificationsService {
     // closes: the Incident row was always created correctly, but
     // nothing pushed word of it to anyone - see README's former
     // "Known gaps" entry on this.
-    const responders = await this.usersService.findActiveByAnyRole(RESPONDER_ROLES);
+    const responders =
+      await this.usersService.findActiveByAnyRole(RESPONDER_ROLES);
     const staffBody =
       `${reporterName} triggered SOS.` +
       (payload.rideId ? ` Ride: ${payload.rideId}.` : '') +
@@ -515,12 +697,18 @@ export class NotificationsService {
     // escape hatch for exactly this case.
     const contactBody = `${reporterName} has triggered an emergency SOS alert on Ryda and may need help.${locationText}`;
     await Promise.all(
-      payload.emergencyContactPhones.map((phone) => this.sendRawSms(phone, contactBody)),
+      payload.emergencyContactPhones.map((phone) =>
+        this.sendRawSms(phone, contactBody),
+      ),
     );
   }
 
   @OnEvent('incentive.rewarded')
-  async onIncentiveRewarded(payload: { driverUserId: string; incentiveName: string; amount: string }) {
+  async onIncentiveRewarded(payload: {
+    driverUserId: string;
+    incentiveName: string;
+    amount: string;
+  }) {
     await this.safeNotify(
       payload.driverUserId,
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
@@ -532,7 +720,11 @@ export class NotificationsService {
   }
 
   @OnEvent('geofence.entered')
-  async onGeofenceEntered(payload: { driverUserId: string; geofenceName: string; geofenceType: string }) {
+  async onGeofenceEntered(payload: {
+    driverUserId: string;
+    geofenceName: string;
+    geofenceType: string;
+  }) {
     if (payload.geofenceType !== 'restricted') return; // alert_zone entries are for admin monitoring only, not a driver-facing warning
     await this.safeNotify(
       payload.driverUserId,

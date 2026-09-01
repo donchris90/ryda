@@ -217,7 +217,6 @@ export class PoolMatchingService {
             parseFloat(ride.totalFare) * discountFraction,
           );
           const newTotal = this.round(parseFloat(ride.totalFare) - discount);
-          const otherRideId = ride.id === a.id ? b.id : a.id;
 
           const result = await manager
             .createQueryBuilder()
@@ -231,13 +230,14 @@ export class PoolMatchingService {
               discount: this.round(
                 parseFloat(ride.discount) + discount,
               ).toFixed(2),
-              stops: plan.sequence
-                .filter((s) => s.rideId === otherRideId)
-                .map((s) => ({
-                  lat: s.lat,
-                  lng: s.lng,
-                  address: `Co-rider ${s.type}: ${s.address}`,
-                })),
+              // Co-rider stop info is intentionally NOT duplicated onto
+              // `ride.stops` here. It used to be, but that made pool
+              // detail a second, divergent read path alongside
+              // getPoolManifest() (the PoolGroup-backed one, with
+              // isMine/done flags and the partner's name) — one client
+              // could end up trusting stale/partial data the other
+              // never saw. getPoolManifest() is now the single source
+              // for co-rider stop detail on both apps.
             })
             .where('id = :id', { id: ride.id })
             .andWhere('status = :status', { status: RideStatus.POOL_MATCHING })
@@ -396,6 +396,28 @@ export class PoolMatchingService {
   }
 
   /**
+   * Looks up the matched pair for a pooled ride, if any. Used by
+   * RidesService.getPoolManifest() to build the driver-app-facing
+   * combined stop sequence — see that method's doc comment.
+   */
+  async getGroupAndPartner(
+    ride: Ride,
+  ): Promise<{ group: PoolGroup; partnerRide: Ride } | null> {
+    if (!ride.poolGroupId) return null;
+    const group = await this.poolGroupsRepo.findOne({
+      where: { id: ride.poolGroupId },
+    });
+    if (!group) return null;
+    const partnerRideId =
+      group.anchorRideId === ride.id ? group.partnerRideId : group.anchorRideId;
+    const partnerRide = await this.ridesRepo.findOne({
+      where: { id: partnerRideId },
+    });
+    if (!partnerRide) return null;
+    return { group, partnerRide };
+  }
+
+  /**
    * Called from RidesService.acceptRide()'s pool propagation hook once
    * the anchor ride's driver reservation has committed. Assigns the
    * same driver/vehicle to the partner ride without running it through
@@ -454,7 +476,6 @@ export class PoolMatchingService {
       parseFloat(ride.discount) - parseFloat(ride.poolDiscountAmount),
     ).toFixed(2);
     ride.poolDiscountAmount = '0.00';
-    ride.stops = null;
     await this.ridesRepo.save(ride);
 
     await this.poolGroupsRepo.update(
@@ -466,5 +487,66 @@ export class PoolMatchingService {
     // Ride is already SEARCHING/AUTO from the original pairing, so the
     // normal dispatch loop just needs a fresh kick now that it's solo.
     void this.autoDispatchService.startForRide(ride.id);
+  }
+
+  /**
+   * Called when one side of a pool cancels AFTER a driver was already
+   * assigned to both rides (originalStatus ACCEPTED/ARRIVING/ARRIVED/
+   * IN_PROGRESS — see RidesService.cancelRide()'s pool hook). Unlike
+   * unpoolRide(), there's no dispatch to redo: the same driver just
+   * keeps driving the surviving passenger. This settles the two things
+   * that would otherwise silently stay wrong for that passenger's ride:
+   *   - the fare: the pool discount no longer reflects reality (the
+   *     detour/cost-sharing rationale for it is gone), so it's added
+   *     back the same way unpoolRide() does it.
+   *   - the stops: getPoolManifest() (the PoolGroup-backed read model
+   *     both apps read from) starts returning null for both sides the
+   *     moment poolGroupId is cleared here, which is what makes the
+   *     "shared ride" card disappear on its next poll instead of
+   *     keeping a stop for a passenger who's no longer coming.
+   * No-ops (rather than erroring) if the partner already finished or
+   * was independently cancelled in the meantime — nothing to unwind.
+   */
+  async unpoolRideMidTrip(rideId: string, reason: string): Promise<void> {
+    const ride = await this.ridesRepo.findOne({ where: { id: rideId } });
+    if (!ride || !ride.poolGroupId) return;
+
+    const groupId = ride.poolGroupId;
+    const group = await this.poolGroupsRepo.findOne({
+      where: { id: groupId },
+    });
+    if (!group) return;
+
+    const partnerRideId =
+      group.anchorRideId === ride.id ? group.partnerRideId : group.anchorRideId;
+    const partner = await this.ridesRepo.findOne({
+      where: { id: partnerRideId },
+    });
+    if (
+      !partner ||
+      partner.status === RideStatus.COMPLETED ||
+      partner.status === RideStatus.CANCELLED
+    ) {
+      return;
+    }
+
+    partner.poolGroupId = null;
+    partner.totalFare = this.round(
+      parseFloat(partner.totalFare) + parseFloat(partner.poolDiscountAmount),
+    ).toFixed(2);
+    partner.discount = this.round(
+      parseFloat(partner.discount) - parseFloat(partner.poolDiscountAmount),
+    ).toFixed(2);
+    partner.poolDiscountAmount = '0.00';
+    await this.ridesRepo.save(partner);
+
+    await this.poolGroupsRepo.update(
+      { id: groupId },
+      { status: PoolGroupStatus.UNWOUND, unwindReason: reason },
+    );
+
+    this.logger.log(
+      `Mid-trip unpool: ride ${ride.id} cancelled after dispatch — partner ${partner.id} continues solo at full fare (group ${groupId})`,
+    );
   }
 }

@@ -263,7 +263,6 @@ describe('PoolMatchingService', () => {
         poolDiscountAmount: '250.00',
         totalFare: '750.00',
         discount: '250.00',
-        stops: [{ lat: 1, lng: 2, address: 'co-rider stop' }],
       });
 
       const { service, ridesRepo, poolGroupsRepo, autoDispatchService } =
@@ -279,7 +278,6 @@ describe('PoolMatchingService', () => {
           totalFare: '1000.00',
           discount: '0.00',
           poolDiscountAmount: '0.00',
-          stops: null,
         }),
       );
       expect(poolGroupsRepo.update).toHaveBeenCalledWith(
@@ -298,6 +296,116 @@ describe('PoolMatchingService', () => {
       await service.unpoolRide('ride-b', 'n/a');
 
       expect(ridesRepo.save).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('unpoolRideMidTrip', () => {
+    it('settles the surviving passenger back to solo fare, keeping their driver assignment', async () => {
+      const cancelledRide = fakeRide({
+        id: 'ride-a',
+        status: RideStatus.CANCELLED,
+        poolGroupId: 'group-1',
+        driverId: 'driver-1',
+      });
+      const survivingRide = fakeRide({
+        id: 'ride-b',
+        status: RideStatus.IN_PROGRESS,
+        poolGroupId: 'group-1',
+        driverId: 'driver-1',
+        vehicleId: 'vehicle-1',
+        poolDiscountAmount: '250.00',
+        totalFare: '750.00',
+        discount: '250.00',
+      });
+
+      const { service, ridesRepo, poolGroupsRepo } = buildService({
+        ridesRepo: {
+          findOne: jest
+            .fn()
+            .mockResolvedValueOnce(cancelledRide)
+            .mockResolvedValueOnce(survivingRide),
+        },
+        poolGroupsRepo: {
+          findOne: jest.fn().mockResolvedValue({
+            id: 'group-1',
+            anchorRideId: 'ride-a',
+            partnerRideId: 'ride-b',
+          }),
+        },
+      });
+
+      await service.unpoolRideMidTrip('ride-a', 'partner cancelled mid-trip');
+
+      // Fare/discount reverted, driver/vehicle/status (still driving)
+      // untouched. Co-rider stop detail lives entirely in getPoolManifest
+      // now, which starts returning null for both sides as soon as
+      // poolGroupId clears below — there's no separate `stops` field to
+      // reset here.
+      expect(ridesRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'ride-b',
+          poolGroupId: null,
+          totalFare: '1000.00',
+          discount: '0.00',
+          poolDiscountAmount: '0.00',
+          status: RideStatus.IN_PROGRESS,
+          driverId: 'driver-1',
+          vehicleId: 'vehicle-1',
+        }),
+      );
+      expect(poolGroupsRepo.update).toHaveBeenCalledWith(
+        { id: 'group-1' },
+        {
+          status: PoolGroupStatus.UNWOUND,
+          unwindReason: 'partner cancelled mid-trip',
+        },
+      );
+    });
+
+    it('no-ops if the surviving partner already completed', async () => {
+      const cancelledRide = fakeRide({
+        id: 'ride-a',
+        status: RideStatus.CANCELLED,
+        poolGroupId: 'group-1',
+      });
+      const survivingRide = fakeRide({
+        id: 'ride-b',
+        status: RideStatus.COMPLETED,
+        poolGroupId: 'group-1',
+      });
+
+      const { service, ridesRepo, poolGroupsRepo } = buildService({
+        ridesRepo: {
+          findOne: jest
+            .fn()
+            .mockResolvedValueOnce(cancelledRide)
+            .mockResolvedValueOnce(survivingRide),
+        },
+        poolGroupsRepo: {
+          findOne: jest.fn().mockResolvedValue({
+            id: 'group-1',
+            anchorRideId: 'ride-a',
+            partnerRideId: 'ride-b',
+          }),
+        },
+      });
+
+      await service.unpoolRideMidTrip('ride-a', 'partner cancelled mid-trip');
+
+      expect(ridesRepo.save).not.toHaveBeenCalled();
+      expect(poolGroupsRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('no-ops for a ride with no pool group', async () => {
+      const ride = fakeRide({ id: 'ride-a', poolGroupId: null });
+      const { service, ridesRepo, poolGroupsRepo } = buildService({
+        ridesRepo: { findOne: jest.fn().mockResolvedValue(ride) },
+      });
+
+      await service.unpoolRideMidTrip('ride-a', 'n/a');
+
+      expect(ridesRepo.save).not.toHaveBeenCalled();
+      expect(poolGroupsRepo.update).not.toHaveBeenCalled();
     });
   });
 

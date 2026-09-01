@@ -28,7 +28,9 @@ export class AnalyticsController {
 
   @Get('top-drivers')
   topDrivers(@Query('limit') limit?: string) {
-    return this.analyticsService.getTopDrivers(limit ? parseInt(limit, 10) : undefined);
+    return this.analyticsService.getTopDrivers(
+      limit ? parseInt(limit, 10) : undefined,
+    );
   }
 
   @Get('heatmap')
@@ -69,5 +71,15 @@ export class AnalyticsController {
   @Get('active-users')
   activeUsers(@Query('groupBy') groupBy?: 'day' | 'week' | 'month') {
     return this.analyticsService.getActiveUsers(groupBy ?? 'day');
+  }
+
+  @Get('pooling-overview')
+  poolingOverview() {
+    return this.analyticsService.getPoolingOverview();
+  }
+
+  @Get('pooling-trend')
+  poolingTrend(@Query('groupBy') groupBy?: 'day' | 'week' | 'month') {
+    return this.analyticsService.getPoolingTrend(groupBy ?? 'day');
   }
 }

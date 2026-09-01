@@ -442,6 +442,9 @@ export class RidesService {
       .addSelect('ride.city', 'city')
       .addSelect('ride.totalFare', 'totalFare')
       .addSelect('ride.paymentMethod', 'paymentMethod')
+      .addSelect('ride.isPooled', 'isPooled')
+      .addSelect('ride.poolGroupId', 'poolGroupId')
+      .addSelect('ride.poolDiscountAmount', 'poolDiscountAmount')
       .addSelect('ride.createdAt', 'createdAt')
       .addSelect('passenger.firstName', 'passengerFirstName')
       .addSelect('passenger.lastName', 'passengerLastName')
@@ -536,6 +539,60 @@ export class RidesService {
    * call them. Same access pattern, same plain-phone caveat (no
    * telephony proxy in this deployment).
    */
+  /**
+   * Exposes the shared pickup/dropoff sequence for a pooled ride's
+   * driver-app trip screen -- the driver needs to know the full 4-stop
+   * order across both passengers, not just "who's the other rider" (see
+   * PoolMatchingService's class doc comment on why each pooled ride
+   * still goes through the ordinary per-ride ACCEPTED/ARRIVED/
+   * IN_PROGRESS/COMPLETED lifecycle independently; this manifest is
+   * purely a read model layered on top so the driver app can render
+   * "next stop" and mark earlier ones done, without needing any new
+   * ride-status machinery).
+   */
+  async getPoolManifest(
+    rideId: string,
+    requesterId: string,
+    requesterRole: UserRole,
+  ) {
+    const ride = await this.findById(rideId);
+    const isParticipant =
+      ride.passengerId === requesterId || ride.driverId === requesterId;
+    const isStaff = STAFF_ROLES.includes(requesterRole);
+    if (!isParticipant && !isStaff) {
+      throw new ForbiddenException("You don't have access to this ride");
+    }
+    if (!ride.isPooled) return null;
+
+    const pair = await this.poolMatchingService.getGroupAndPartner(ride);
+    if (!pair) return null; // never matched, or already unpooled
+
+    const { partnerRide } = pair;
+    const partnerUser = await this.usersService.findById(
+      partnerRide.passengerId,
+    );
+
+    const isStopDone = (stop: {
+      type: 'pickup' | 'dropoff';
+      rideId: string;
+    }) => {
+      const r = stop.rideId === ride.id ? ride : partnerRide;
+      return stop.type === 'pickup'
+        ? [RideStatus.IN_PROGRESS, RideStatus.COMPLETED].includes(r.status)
+        : r.status === RideStatus.COMPLETED;
+    };
+
+    return {
+      partnerRideId: partnerRide.id,
+      partnerFirstName: partnerUser.firstName,
+      stops: pair.group.routeSequence.map((s) => ({
+        ...s,
+        isMine: s.rideId === ride.id,
+        done: isStopDone(s),
+      })),
+    };
+  }
+
   async getPassengerInfo(
     rideId: string,
     requesterId: string,
@@ -1647,6 +1704,11 @@ export class RidesService {
       RideStatus.ARRIVED,
     ].includes(ride.status);
     const originalStatus = ride.status;
+    // Set below if this cancellation unwinds a mid-trip pool — used to
+    // give the driver an accurate notification instead of the generic
+    // "your ride was cancelled" (misleading when they're still driving
+    // the other pooled passenger).
+    let poolPartnerContinuing = false;
 
     ride.status = RideStatus.CANCELLED;
     ride.cancelledAt = new Date();
@@ -1707,13 +1769,32 @@ export class RidesService {
             ),
           );
       }
+    } else if (
+      ride.poolGroupId &&
+      [
+        RideStatus.ACCEPTED,
+        RideStatus.ARRIVING,
+        RideStatus.ARRIVED,
+        RideStatus.IN_PROGRESS,
+      ].includes(originalStatus)
+    ) {
+      // A driver was already assigned to both sides of the pool — there's
+      // no dispatch to redo, the same driver just keeps driving the
+      // surviving passenger. Settle that passenger's fare (pool discount
+      // no longer applies) and drop the co-rider stop that would
+      // otherwise keep showing on their ride.
+      poolPartnerContinuing = true;
+      await this.poolMatchingService
+        .unpoolRideMidTrip(
+          ride.id,
+          `partner ride ${ride.id} cancelled mid-trip (was ${originalStatus})`,
+        )
+        .catch((err) =>
+          this.logger.error(
+            `Failed to unwind pool after mid-trip cancellation of ride ${ride.id}: ${err}`,
+          ),
+        );
     }
-    // Note: if a driver was already assigned to both sides of a pool
-    // (originalStatus ACCEPTED/ARRIVING/ARRIVED/IN_PROGRESS) and one
-    // passenger cancels, the driver currently keeps the ride/trip only
-    // for the remaining passenger with no fare recalculation or
-    // dispatch changes — full "continue pooled trip with one seat now
-    // empty" handling is a known gap for a later phase.
 
     if (
       cancelledBy === CancelledBy.PASSENGER &&
@@ -1782,11 +1863,22 @@ export class RidesService {
       const driverProfile = await this.driversService.findByUserId(
         ride.driverId,
       );
+      // Recorded per-ride regardless of pooling — this specific ride row
+      // genuinely was cancelled on the driver, same "each member ride
+      // keeps its own lifecycle" accounting the rest of pooling uses.
       await this.driversService.recordTripOutcome(
         driverProfile.id,
         'cancelled',
       );
-      await this.driversService.restoreAvailabilityAfterTrip(ride.driverId);
+      // But do NOT restore availability (ON_TRIP -> ONLINE) when the
+      // driver is still actively driving the surviving pooled
+      // passenger — that would make them dispatchable for a brand new
+      // ride while mid-trip. Availability only comes back once their
+      // last active ride actually ends (their own completeRide()/
+      // cancelRide() call does that then).
+      if (!poolPartnerContinuing) {
+        await this.driversService.restoreAvailabilityAfterTrip(ride.driverId);
+      }
     }
     await this.passengersService.recordTripOutcome(
       ride.passengerId,
@@ -1797,10 +1889,17 @@ export class RidesService {
     const notifyUserId =
       cancelledBy === CancelledBy.PASSENGER ? ride.driverId : ride.passengerId;
     if (notifyUserId) {
-      this.events.emit('ride.cancelled', {
-        notifyUserId,
-        reason: ride.cancelReason,
-      });
+      if (poolPartnerContinuing) {
+        // Driver is still on-trip with the other pooled passenger — the
+        // generic "your ride was cancelled" would wrongly read as the
+        // whole trip ending.
+        this.events.emit('ride.pool_partner_cancelled', { notifyUserId });
+      } else {
+        this.events.emit('ride.cancelled', {
+          notifyUserId,
+          reason: ride.cancelReason,
+        });
+      }
     }
     this.metricsService.rideCancellationsTotal.inc({ cancelledBy });
 

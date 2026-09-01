@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, IsNull, Not, Repository } from 'typeorm';
 import { Ride } from '../rides/entities/ride.entity';
 import { User } from '../users/entities/user.entity';
 import { DriverProfile } from '../drivers/entities/driver-profile.entity';
@@ -32,19 +32,23 @@ export class AnalyticsService {
   constructor(
     @InjectRepository(Ride) private readonly ridesRepo: Repository<Ride>,
     @InjectRepository(User) private readonly usersRepo: Repository<User>,
-    @InjectRepository(DriverProfile) private readonly driversRepo: Repository<DriverProfile>,
+    @InjectRepository(DriverProfile)
+    private readonly driversRepo: Repository<DriverProfile>,
   ) {}
 
   async getOverview(): Promise<DashboardOverview> {
-    const [totalUsers, totalPassengers, totalDrivers, driversOnline] = await Promise.all([
-      this.usersRepo.count(),
-      this.usersRepo.count({ where: { role: UserRole.PASSENGER } }),
-      this.usersRepo.count({ where: { role: UserRole.DRIVER } }),
-      // "Online" for this admin overview metric means online for
-      // anything (rides, deliveries, or both) — it's a general
-      // dashboard headline number, not a per-service breakdown.
-      this.driversRepo.count({ where: { availability: In(ONLINE_AVAILABILITIES) } }),
-    ]);
+    const [totalUsers, totalPassengers, totalDrivers, driversOnline] =
+      await Promise.all([
+        this.usersRepo.count(),
+        this.usersRepo.count({ where: { role: UserRole.PASSENGER } }),
+        this.usersRepo.count({ where: { role: UserRole.DRIVER } }),
+        // "Online" for this admin overview metric means online for
+        // anything (rides, deliveries, or both) — it's a general
+        // dashboard headline number, not a per-service breakdown.
+        this.driversRepo.count({
+          where: { availability: In(ONLINE_AVAILABILITIES) },
+        }),
+      ]);
 
     const [totalRides, completedRides, cancelledRides] = await Promise.all([
       this.ridesRepo.count(),
@@ -72,10 +76,15 @@ export class AnalyticsService {
     };
   }
 
-  async getRevenueTimeSeries(groupBy: 'day' | 'week' | 'month' = 'day'): Promise<RevenuePoint[]> {
+  async getRevenueTimeSeries(
+    groupBy: 'day' | 'week' | 'month' = 'day',
+  ): Promise<RevenuePoint[]> {
     const rows = await this.ridesRepo
       .createQueryBuilder('ride')
-      .select(`to_char(date_trunc('${groupBy}', ride.completedAt), 'YYYY-MM-DD')`, 'period')
+      .select(
+        `to_char(date_trunc('${groupBy}', ride.completedAt), 'YYYY-MM-DD')`,
+        'period',
+      )
       .addSelect('COUNT(*)', 'rideCount')
       .addSelect('COALESCE(SUM(ride.totalFare), 0)', 'gmv')
       .addSelect('COALESCE(SUM(ride.commissionAmount), 0)', 'revenue')
@@ -126,13 +135,18 @@ export class AnalyticsService {
    * Swap for a real geospatial bucket query (PostGIS ST_SnapToGrid) if
    * pickup volume grows large enough that in-memory bucketing gets slow.
    */
-  async getPickupHeatmap(): Promise<Array<{ lat: number; lng: number; count: number }>> {
+  async getPickupHeatmap(): Promise<
+    Array<{ lat: number; lng: number; count: number }>
+  > {
     const rides = await this.ridesRepo.find({
       where: { status: RideStatus.COMPLETED },
       select: { pickupLat: true, pickupLng: true },
     });
 
-    const buckets = new Map<string, { lat: number; lng: number; count: number }>();
+    const buckets = new Map<
+      string,
+      { lat: number; lng: number; count: number }
+    >();
     const gridSize = 0.01; // ~1.1km at the equator
 
     for (const ride of rides) {
@@ -155,9 +169,18 @@ export class AnalyticsService {
   async getTripsTrend(groupBy: 'day' | 'week' | 'month' = 'day') {
     const rows = await this.ridesRepo
       .createQueryBuilder('ride')
-      .select(`to_char(date_trunc('${groupBy}', COALESCE(ride.completedAt, ride.createdAt)), 'YYYY-MM-DD')`, 'period')
-      .addSelect(`COUNT(*) FILTER (WHERE ride.status = 'completed')`, 'completed')
-      .addSelect(`COUNT(*) FILTER (WHERE ride.status = 'cancelled')`, 'cancelled')
+      .select(
+        `to_char(date_trunc('${groupBy}', COALESCE(ride.completedAt, ride.createdAt)), 'YYYY-MM-DD')`,
+        'period',
+      )
+      .addSelect(
+        `COUNT(*) FILTER (WHERE ride.status = 'completed')`,
+        'completed',
+      )
+      .addSelect(
+        `COUNT(*) FILTER (WHERE ride.status = 'cancelled')`,
+        'cancelled',
+      )
       .groupBy('period')
       .orderBy('period', 'ASC')
       .getRawMany();
@@ -178,7 +201,10 @@ export class AnalyticsService {
         period: point.period,
         totalRides: total,
         cancelledRides: point.cancelled,
-        cancellationRate: total > 0 ? parseFloat(((point.cancelled / total) * 100).toFixed(1)) : 0,
+        cancellationRate:
+          total > 0
+            ? parseFloat(((point.cancelled / total) * 100).toFixed(1))
+            : 0,
       };
     });
   }
@@ -198,10 +224,15 @@ export class AnalyticsService {
       .orderBy('hour', 'ASC')
       .getRawMany();
 
-    const byHour = new Map(rows.map((r) => [parseInt(r.hour, 10), parseInt(r.rideCount, 10)]));
+    const byHour = new Map(
+      rows.map((r) => [parseInt(r.hour, 10), parseInt(r.rideCount, 10)]),
+    );
     // Fill every hour 0-23 explicitly, including zero-ride hours, so a
     // chart never has a silently missing bar.
-    return Array.from({ length: 24 }, (_, hour) => ({ hour, rideCount: byHour.get(hour) ?? 0 }));
+    return Array.from({ length: 24 }, (_, hour) => ({
+      hour,
+      rideCount: byHour.get(hour) ?? 0,
+    }));
   }
 
   /** Rides/GMV/commission broken down by city — nothing showed this at all before. */
@@ -248,8 +279,14 @@ export class AnalyticsService {
   async getGrowth(groupBy: 'day' | 'week' | 'month' = 'day') {
     const rows = await this.usersRepo
       .createQueryBuilder('user')
-      .select(`to_char(date_trunc('${groupBy}', user.createdAt), 'YYYY-MM-DD')`, 'period')
-      .addSelect(`COUNT(*) FILTER (WHERE user.role = 'passenger')`, 'newPassengers')
+      .select(
+        `to_char(date_trunc('${groupBy}', user.createdAt), 'YYYY-MM-DD')`,
+        'period',
+      )
+      .addSelect(
+        `COUNT(*) FILTER (WHERE user.role = 'passenger')`,
+        'newPassengers',
+      )
       .addSelect(`COUNT(*) FILTER (WHERE user.role = 'driver')`, 'newDrivers')
       .groupBy('period')
       .orderBy('period', 'ASC')
@@ -272,7 +309,10 @@ export class AnalyticsService {
   async getActiveUsers(groupBy: 'day' | 'week' | 'month' = 'day') {
     const rows = await this.ridesRepo
       .createQueryBuilder('ride')
-      .select(`to_char(date_trunc('${groupBy}', ride.completedAt), 'YYYY-MM-DD')`, 'period')
+      .select(
+        `to_char(date_trunc('${groupBy}', ride.completedAt), 'YYYY-MM-DD')`,
+        'period',
+      )
       .addSelect('COUNT(DISTINCT ride.passengerId)', 'activePassengers')
       .addSelect('COUNT(DISTINCT ride.driverId)', 'activeDrivers')
       .where('ride.status = :status', { status: RideStatus.COMPLETED })
@@ -284,6 +324,73 @@ export class AnalyticsService {
       period: r.period,
       activePassengers: parseInt(r.activePassengers, 10),
       activeDrivers: parseInt(r.activeDrivers, 10),
+    }));
+  }
+
+  /**
+   * Ride-pooling health metrics. Deliberately simple for v1 — no
+   * average-detour figure here since that would need each ride's solo
+   * distance persisted at request time (only the matched PoolGroup's
+   * combined distance is stored today, see PoolGroup.estimatedTotalDistanceKm)
+   * -- a reasonable v2 addition, not faked here with a rough estimate.
+   */
+  async getPoolingOverview() {
+    const [requested, matched, completedPooled] = await Promise.all([
+      this.ridesRepo.count({ where: { isPooled: true } }),
+      this.ridesRepo.count({
+        where: { isPooled: true, poolGroupId: Not(IsNull()) },
+      }),
+      this.ridesRepo.count({
+        where: {
+          isPooled: true,
+          poolGroupId: Not(IsNull()),
+          status: RideStatus.COMPLETED,
+        },
+      }),
+    ]);
+
+    const discountRow = await this.ridesRepo
+      .createQueryBuilder('ride')
+      .select('COALESCE(SUM(ride.poolDiscountAmount), 0)', 'totalDiscount')
+      .where('ride.isPooled = true')
+      .andWhere('ride.status = :status', { status: RideStatus.COMPLETED })
+      .getRawOne();
+
+    return {
+      totalPoolRequests: requested,
+      matchedCount: matched,
+      completedPooledRides: completedPooled,
+      matchRatePercent:
+        requested > 0 ? Math.round((matched / requested) * 1000) / 10 : 0,
+      totalDiscountGivenNaira: parseFloat(discountRow.totalDiscount).toFixed(2),
+    };
+  }
+
+  /** Pool requests per period, split into matched vs fell-back-to-solo. */
+  async getPoolingTrend(groupBy: 'day' | 'week' | 'month' = 'day') {
+    const rows = await this.ridesRepo
+      .createQueryBuilder('ride')
+      .select(
+        `to_char(date_trunc('${groupBy}', ride.createdAt), 'YYYY-MM-DD')`,
+        'period',
+      )
+      .addSelect(
+        'COUNT(*) FILTER (WHERE ride."poolGroupId" IS NOT NULL)',
+        'matched',
+      )
+      .addSelect(
+        'COUNT(*) FILTER (WHERE ride."poolGroupId" IS NULL)',
+        'unmatched',
+      )
+      .where('ride.isPooled = true')
+      .groupBy('period')
+      .orderBy('period', 'ASC')
+      .getRawMany();
+
+    return rows.map((r) => ({
+      period: r.period,
+      matched: parseInt(r.matched, 10),
+      unmatched: parseInt(r.unmatched, 10),
     }));
   }
 }

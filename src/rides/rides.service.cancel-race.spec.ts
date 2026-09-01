@@ -1,5 +1,10 @@
 import { RidesService } from './rides.service';
-import { RideStatus, PaymentMethod, CancelledBy, RideCategory } from '../common/enums/ride.enum';
+import {
+  RideStatus,
+  PaymentMethod,
+  CancelledBy,
+  RideCategory,
+} from '../common/enums/ride.enum';
 import { DriverAvailability } from '../common/enums/driver-status.enum';
 import { BadRequestException } from '@nestjs/common';
 
@@ -43,7 +48,9 @@ function buildService(overrides: Record<string, any> = {}) {
     ridesRepo,
     fareService: { getCancellationFee: jest.fn().mockResolvedValue(500) },
     driversService: {
-      findByUserId: jest.fn().mockResolvedValue({ id: 'profile-1', fleetCompanyId: null }),
+      findByUserId: jest
+        .fn()
+        .mockResolvedValue({ id: 'profile-1', fleetCompanyId: null }),
       recordTripOutcome: jest.fn(),
       setAvailability: jest.fn(),
       restoreAvailabilityAfterTrip: jest.fn(),
@@ -75,16 +82,22 @@ function buildService(overrides: Record<string, any> = {}) {
     googleMaps: {},
     candidateSearchService: {},
     driverRankingService: {},
-    poolMatchingService: { requestPool: jest.fn(), propagateDriverAssignment: jest.fn().mockResolvedValue(undefined), onRideCancelledBeforeMatch: jest.fn().mockResolvedValue(undefined), unpoolRide: jest.fn().mockResolvedValue(undefined) },
+    poolMatchingService: {
+      requestPool: jest.fn(),
+      propagateDriverAssignment: jest.fn().mockResolvedValue(undefined),
+      onRideCancelledBeforeMatch: jest.fn().mockResolvedValue(undefined),
+      unpoolRide: jest.fn().mockResolvedValue(undefined),
+      unpoolRideMidTrip: jest.fn().mockResolvedValue(undefined),
+    },
     featureFlagsService: { isEnabled: jest.fn().mockResolvedValue(true) },
   };
 
   const service = new RidesService(
-    deps.ridesRepo as any,
+    deps.ridesRepo,
     deps.fareService as any,
-    deps.driversService as any,
+    deps.driversService,
     deps.vehiclesService as any,
-    deps.walletsService as any,
+    deps.walletsService,
     deps.commissionService as any,
     deps.usersService as any,
     deps.paymentsService as any,
@@ -114,22 +127,36 @@ function buildService(overrides: Record<string, any> = {}) {
 describe('RidesService.cancelRide — atomic cancellation claim (batch 9)', () => {
   it('claims the cancellation via a conditional UPDATE scoped to the ride id and the status just read', async () => {
     const { service, deps, queryBuilder } = buildService();
-    deps.ridesRepo.findOne.mockResolvedValue(fakeRide({ status: RideStatus.SEARCHING }));
+    deps.ridesRepo.findOne.mockResolvedValue(
+      fakeRide({ status: RideStatus.SEARCHING }),
+    );
 
-    await service.cancelRide('ride-1', 'passenger-1', CancelledBy.PASSENGER, {});
+    await service.cancelRide(
+      'ride-1',
+      'passenger-1',
+      CancelledBy.PASSENGER,
+      {},
+    );
 
     expect(queryBuilder.set).toHaveBeenCalledWith(
       expect.objectContaining({ status: RideStatus.CANCELLED }),
     );
-    expect(queryBuilder.where).toHaveBeenCalledWith('id = :id', { id: 'ride-1' });
-    expect(queryBuilder.andWhere).toHaveBeenCalledWith('status = :originalStatus', {
-      originalStatus: RideStatus.SEARCHING,
+    expect(queryBuilder.where).toHaveBeenCalledWith('id = :id', {
+      id: 'ride-1',
     });
+    expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+      'status = :originalStatus',
+      {
+        originalStatus: RideStatus.SEARCHING,
+      },
+    );
   });
 
   it('throws and does not touch wallets/driver state when the ride changed status underneath it (e.g. a concurrent acceptRide won first)', async () => {
     const { service, deps, queryBuilder } = buildService();
-    deps.ridesRepo.findOne.mockResolvedValue(fakeRide({ status: RideStatus.SEARCHING, driverId: 'driver-1' }));
+    deps.ridesRepo.findOne.mockResolvedValue(
+      fakeRide({ status: RideStatus.SEARCHING, driverId: 'driver-1' }),
+    );
     queryBuilder.execute.mockResolvedValue({ affected: 0 });
 
     await expect(
@@ -142,7 +169,9 @@ describe('RidesService.cancelRide — atomic cancellation claim (batch 9)', () =
     expect(deps.walletsService.debit).not.toHaveBeenCalled();
     expect(deps.driversService.setAvailability).not.toHaveBeenCalled();
     expect(deps.events.emit).not.toHaveBeenCalled();
-    expect(deps.metricsService.rideCancellationsTotal.inc).not.toHaveBeenCalled();
+    expect(
+      deps.metricsService.rideCancellationsTotal.inc,
+    ).not.toHaveBeenCalled();
   });
 
   it('two concurrent cancelRide calls for the same ride: only one can win the atomic claim', async () => {
@@ -156,7 +185,11 @@ describe('RidesService.cancelRide — atomic cancellation claim (batch 9)', () =
       update: jest.fn().mockReturnThis(),
       set: jest.fn().mockReturnThis(),
       where: jest.fn().mockReturnThis(),
-      andWhere: jest.fn(function (this: any, _clause: string, params: { originalStatus: RideStatus }) {
+      andWhere: jest.fn(function (
+        this: any,
+        _clause: string,
+        params: { originalStatus: RideStatus },
+      ) {
         this.__expectedStatus = params.originalStatus;
         return this;
       }),
@@ -173,7 +206,9 @@ describe('RidesService.cancelRide — atomic cancellation claim (batch 9)', () =
     const buildRacer = () =>
       buildService({
         ridesRepo: {
-          findOne: jest.fn().mockResolvedValue(fakeRide({ status: RideStatus.SEARCHING })),
+          findOne: jest
+            .fn()
+            .mockResolvedValue(fakeRide({ status: RideStatus.SEARCHING })),
           createQueryBuilder: jest.fn(() => sharedQueryBuilder),
           update: jest.fn().mockResolvedValue(undefined),
         },
@@ -193,13 +228,15 @@ describe('RidesService.cancelRide — atomic cancellation claim (batch 9)', () =
     expect(claims).toBe(1);
     expect(fulfilled).toHaveLength(1);
     expect(rejected).toHaveLength(1);
-    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(BadRequestException);
+    expect(rejected[0].reason).toBeInstanceOf(BadRequestException);
   });
 
   it('does not overwrite a ride that was accepted by another driver in between the read and the claim (the original lost-update scenario)', async () => {
     const { service, deps, queryBuilder } = buildService();
     // findById() read the ride while it was still SEARCHING...
-    deps.ridesRepo.findOne.mockResolvedValue(fakeRide({ status: RideStatus.SEARCHING, driverId: 'driver-1' }));
+    deps.ridesRepo.findOne.mockResolvedValue(
+      fakeRide({ status: RideStatus.SEARCHING, driverId: 'driver-1' }),
+    );
     // ...but by the time the claim runs, acceptRide() already committed
     // SEARCHING -> ACCEPTED in another transaction, so the conditional
     // UPDATE (WHERE status = SEARCHING) matches nothing.
@@ -212,6 +249,163 @@ describe('RidesService.cancelRide — atomic cancellation claim (batch 9)', () =
     // Confirms this really is the fix for the lost-update bug: the driver
     // that acceptRide() just reserved ON_TRIP is never silently restored
     // to online by this losing cancel attempt.
-    expect(deps.driversService.restoreAvailabilityAfterTrip).not.toHaveBeenCalled();
+    expect(
+      deps.driversService.restoreAvailabilityAfterTrip,
+    ).not.toHaveBeenCalled();
+  });
+});
+
+describe('RidesService.cancelRide — mid-trip pool cancellation', () => {
+  it('unwinds the partner side via PoolMatchingService when a driver is already assigned to both pooled rides', async () => {
+    const { service, deps } = buildService();
+    deps.ridesRepo.findOne.mockResolvedValue(
+      fakeRide({
+        status: RideStatus.IN_PROGRESS,
+        driverId: 'driver-1',
+        poolGroupId: 'group-1',
+      }),
+    );
+
+    await service.cancelRide(
+      'ride-1',
+      'passenger-1',
+      CancelledBy.PASSENGER,
+      {},
+    );
+
+    expect(deps.poolMatchingService.unpoolRideMidTrip).toHaveBeenCalledWith(
+      'ride-1',
+      expect.stringContaining('ride-1'),
+    );
+    // The other, earlier-stage pool hooks must NOT also fire for this case.
+    expect(
+      deps.poolMatchingService.onRideCancelledBeforeMatch,
+    ).not.toHaveBeenCalled();
+    expect(deps.poolMatchingService.unpoolRide).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    RideStatus.ACCEPTED,
+    RideStatus.ARRIVING,
+    RideStatus.ARRIVED,
+    RideStatus.IN_PROGRESS,
+  ])(
+    'does not restore driver availability when cancelling from %s with an active pool partner (driver is still on-trip with them)',
+    async (status) => {
+      const { service, deps } = buildService();
+      deps.ridesRepo.findOne.mockResolvedValue(
+        fakeRide({ status, driverId: 'driver-1', poolGroupId: 'group-1' }),
+      );
+
+      await service.cancelRide(
+        'ride-1',
+        'passenger-1',
+        CancelledBy.PASSENGER,
+        {},
+      );
+
+      // The ride row itself is still recorded as a cancelled trip for the
+      // driver (per-ride accounting)...
+      expect(deps.driversService.recordTripOutcome).toHaveBeenCalledWith(
+        'profile-1',
+        'cancelled',
+      );
+      // ...but they must NOT be put back on the market while still
+      // actively driving the surviving pooled passenger.
+      expect(
+        deps.driversService.restoreAvailabilityAfterTrip,
+      ).not.toHaveBeenCalled();
+    },
+  );
+
+  it('still restores driver availability for a normal (non-pooled) engaged-driver cancellation', async () => {
+    const { service, deps } = buildService();
+    deps.ridesRepo.findOne.mockResolvedValue(
+      fakeRide({
+        status: RideStatus.ACCEPTED,
+        driverId: 'driver-1',
+        poolGroupId: null,
+      }),
+    );
+
+    await service.cancelRide(
+      'ride-1',
+      'passenger-1',
+      CancelledBy.PASSENGER,
+      {},
+    );
+
+    expect(
+      deps.driversService.restoreAvailabilityAfterTrip,
+    ).toHaveBeenCalledWith('driver-1');
+    expect(deps.poolMatchingService.unpoolRideMidTrip).not.toHaveBeenCalled();
+  });
+
+  it('notifies the driver with the pool-specific event instead of the generic "ride cancelled" one', async () => {
+    const { service, deps } = buildService();
+    deps.ridesRepo.findOne.mockResolvedValue(
+      fakeRide({
+        status: RideStatus.IN_PROGRESS,
+        driverId: 'driver-1',
+        poolGroupId: 'group-1',
+      }),
+    );
+
+    await service.cancelRide(
+      'ride-1',
+      'passenger-1',
+      CancelledBy.PASSENGER,
+      {},
+    );
+
+    expect(deps.events.emit).toHaveBeenCalledWith(
+      'ride.pool_partner_cancelled',
+      { notifyUserId: 'driver-1' },
+    );
+    expect(deps.events.emit).not.toHaveBeenCalledWith(
+      'ride.cancelled',
+      expect.anything(),
+    );
+  });
+
+  it('falls back to the generic "ride cancelled" notification for a non-pooled cancellation', async () => {
+    const { service, deps } = buildService();
+    deps.ridesRepo.findOne.mockResolvedValue(
+      fakeRide({
+        status: RideStatus.SEARCHING,
+        driverId: null,
+        poolGroupId: null,
+        passengerId: 'passenger-1',
+      }),
+    );
+
+    await service.cancelRide('ride-1', 'passenger-1', CancelledBy.PASSENGER, {
+      reason: 'change of plans',
+    });
+
+    expect(deps.events.emit).not.toHaveBeenCalledWith(
+      'ride.pool_partner_cancelled',
+      expect.anything(),
+    );
+  });
+
+  it('does not touch PoolMatchingService at all for a plain solo ride cancellation', async () => {
+    const { service, deps } = buildService();
+    deps.ridesRepo.findOne.mockResolvedValue(
+      fakeRide({ status: RideStatus.SEARCHING, poolGroupId: null }),
+    );
+
+    await service.cancelRide(
+      'ride-1',
+      'passenger-1',
+      CancelledBy.PASSENGER,
+      {},
+    );
+
+    expect(
+      deps.poolMatchingService.onRideCancelledBeforeMatch,
+    ).not.toHaveBeenCalled();
+    expect(deps.poolMatchingService.unpoolRide).not.toHaveBeenCalled();
+    expect(deps.poolMatchingService.unpoolRideMidTrip).not.toHaveBeenCalled();
   });
 });
