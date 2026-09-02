@@ -1,14 +1,4 @@
-import {
-  Body,
-  Controller,
-  Delete,
-  Get,
-  Param,
-  Patch,
-  Post,
-  Query,
-  UseGuards,
-} from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -82,15 +72,7 @@ export class RidesController {
 
   @Get('admin/list')
   @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(
-    UserRole.ADMIN,
-    UserRole.SUPER_ADMIN,
-    UserRole.COUNTRY_ADMIN,
-    UserRole.CITY_MANAGER,
-    UserRole.SUPPORT_AGENT,
-    UserRole.FINANCE,
-    UserRole.AUDITOR,
-  )
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.COUNTRY_ADMIN, UserRole.CITY_MANAGER, UserRole.SUPPORT_AGENT, UserRole.FINANCE, UserRole.AUDITOR)
   listForAdmin(
     @Query('status') status?: RideStatus,
     @Query('search') search?: string,
@@ -141,12 +123,6 @@ export class RidesController {
     return this.ridesService.getPassengerInfo(id, user.id, user.role);
   }
 
-  @Get(':id/pool-manifest')
-  @UseGuards(JwtAuthGuard)
-  getPoolManifest(@Param('id') id: string, @CurrentUser() user: User) {
-    return this.ridesService.getPoolManifest(id, user.id, user.role);
-  }
-
   @Get(':id/route')
   @UseGuards(JwtAuthGuard)
   getRoute(@Param('id') id: string, @CurrentUser() user: User) {
@@ -168,21 +144,13 @@ export class RidesController {
 
   @Post(':id/verify-pin')
   @UseGuards(JwtAuthGuard)
-  verifyPin(
-    @Param('id') id: string,
-    @CurrentUser() user: User,
-    @Body() dto: VerifyPinDto,
-  ) {
+  verifyPin(@Param('id') id: string, @CurrentUser() user: User, @Body() dto: VerifyPinDto) {
     return this.ridesService.verifyPin(id, user.id, dto.pin);
   }
 
   @Post(':id/tip')
   @UseGuards(JwtAuthGuard)
-  addTip(
-    @Param('id') id: string,
-    @CurrentUser() user: User,
-    @Body() dto: AddTipDto,
-  ) {
+  addTip(@Param('id') id: string, @CurrentUser() user: User, @Body() dto: AddTipDto) {
     return this.ridesService.addTip(id, user.id, dto.amount);
   }
 
@@ -190,10 +158,7 @@ export class RidesController {
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.DISPATCHER)
   nearbyDrivers(@Param('id') id: string, @Query('radiusKm') radiusKm?: string) {
-    return this.ridesService.findNearbyDrivers(
-      id,
-      radiusKm ? parseFloat(radiusKm) : undefined,
-    );
+    return this.ridesService.findNearbyDrivers(id, radiusKm ? parseFloat(radiusKm) : undefined);
   }
 
   /**
@@ -203,17 +168,13 @@ export class RidesController {
    */
   @Get(':id/selectable-drivers')
   @UseGuards(JwtAuthGuard)
-  selectableDrivers(@Param('id') id: string, @CurrentUser() user: User) {
-    return this.ridesService.findSelectableDrivers(id, user.id, user.role);
+  selectableDrivers(@Param('id') id: string) {
+    return this.ridesService.findSelectableDrivers(id);
   }
 
   @Post(':id/select-driver')
   @UseGuards(JwtAuthGuard)
-  selectDriver(
-    @CurrentUser() user: User,
-    @Param('id') id: string,
-    @Body() dto: SelectDriverDto,
-  ) {
+  selectDriver(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: SelectDriverDto) {
     return this.ridesService.selectDriver(id, user.id, dto.driverUserId);
   }
 
@@ -232,8 +193,7 @@ export class RidesController {
    */
   @Get(':id/current-offer')
   @UseGuards(JwtAuthGuard)
-  async currentOffer(@Param('id') id: string, @CurrentUser() user: User) {
-    await this.ridesService.assertCanViewOfferState(id, user.id, user.role);
+  currentOffer(@Param('id') id: string) {
     return this.dispatchService.getPendingOfferForRide(id);
   }
 
@@ -273,31 +233,21 @@ export class RidesController {
     @Body() dto: CancelRideDto,
   ) {
     const cancelledBy =
-      user.role === UserRole.DRIVER
-        ? CancelledBy.DRIVER
-        : CancelledBy.PASSENGER;
+      user.role === UserRole.DRIVER ? CancelledBy.DRIVER : CancelledBy.PASSENGER;
     return this.ridesService.cancelRide(id, user.id, cancelledBy, dto);
   }
 
   @Post(':id/rate/driver')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.PASSENGER)
-  rateDriver(
-    @CurrentUser() user: User,
-    @Param('id') id: string,
-    @Body() dto: RateRideDto,
-  ) {
+  rateDriver(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: RateRideDto) {
     return this.ridesService.rateDriver(id, user.id, dto);
   }
 
   @Post(':id/rate/passenger')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.DRIVER)
-  ratePassenger(
-    @CurrentUser() user: User,
-    @Param('id') id: string,
-    @Body() dto: RateRideDto,
-  ) {
+  ratePassenger(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: RateRideDto) {
     return this.ridesService.ratePassenger(id, user.id, dto);
   }
 }

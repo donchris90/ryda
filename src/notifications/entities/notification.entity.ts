@@ -38,6 +38,7 @@ export enum NotificationCategory {
 }
 
 @Entity('notifications')
+@Index(['userId', 'createdAt'])
 export class Notification {
   @PrimaryGeneratedColumn('uuid')
   id: string;

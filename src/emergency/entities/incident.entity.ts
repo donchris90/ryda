@@ -17,8 +17,17 @@ export enum IncidentType {
 export enum IncidentStatus {
   OPEN = 'open',
   ACKNOWLEDGED = 'acknowledged',
+  RESPONDING = 'responding',
+  ESCALATED = 'escalated',
   RESOLVED = 'resolved',
   CLOSED = 'closed',
+}
+
+export enum IncidentSeverity {
+  LOW = 'low',
+  MEDIUM = 'medium',
+  HIGH = 'high',
+  CRITICAL = 'critical',
 }
 
 @Entity('incidents')
@@ -28,6 +37,12 @@ export class Incident {
 
   @Column({ type: 'enum', enum: IncidentType })
   type: IncidentType;
+
+  // SOS is always CRITICAL by design (see EmergencyService.triggerSos())
+  // - other incident types default lower and can be raised by a
+  // responder as they investigate.
+  @Column({ type: 'enum', enum: IncidentSeverity, default: IncidentSeverity.MEDIUM })
+  severity: IncidentSeverity;
 
   @Index()
   @Column()
@@ -52,6 +67,18 @@ export class Incident {
 
   @Column({ type: 'varchar', nullable: true })
   acknowledgedBy: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  respondingBy: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  escalatedBy: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  escalationReason: string | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  escalatedAt: Date | null;
 
   @Column({ type: 'varchar', nullable: true })
   resolvedBy: string | null;

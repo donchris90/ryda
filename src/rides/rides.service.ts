@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Not } from 'typeorm';
+import { Repository } from 'typeorm';
 import { Ride } from './entities/ride.entity';
 import { GoogleMapsService } from '../maps/google-maps.service';
 import { decodePolyline } from '../common/utils/polyline.util';
@@ -43,17 +43,14 @@ import {
 } from '../settings/settings.service';
 import { MetricsService } from '../observability/metrics.service';
 import { CandidateSearchService } from '../candidate-search/candidate-search.service';
-import {
-  DispatchDomain,
-  DispatchMode,
-} from '../candidate-search/candidate-search.types';
+import { DispatchDomain, DispatchMode } from '../candidate-search/candidate-search.types';
 import { DriverRankingService } from '../ranking/ranking.service';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { ConfigService } from '@nestjs/config';
 import { UserRole } from '../common/enums/user-role.enum';
-import { randomUUID } from 'crypto';
+import { randomUUID, randomInt } from 'crypto';
 
 const STAFF_ROLES = [
   UserRole.ADMIN,
@@ -61,20 +58,17 @@ const STAFF_ROLES = [
   UserRole.SUPPORT_AGENT,
   UserRole.DISPATCHER,
 ];
+// verifyPin()'s rate limit - the PIN space is only 9000 possible
+// 4-digit values, so an unbounded attempt count would be brute-forceable.
+const PIN_MAX_ATTEMPTS = 5;
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { TransactionCategory } from '../common/enums/transaction.enum';
-import { DriverApprovalStatus } from '../common/enums/driver-status.enum';
 import {
-  DriverService,
-  isOnlineForService,
-} from '../common/enums/driver-service.enum';
+  DriverApprovalStatus,
+} from '../common/enums/driver-status.enum';
+import { DriverService, isOnlineForService } from '../common/enums/driver-service.enum';
 import { doesVehicleMatchRideCategory } from '../common/ride-vehicle-match.util';
-import { PoolMatchingService } from '../pooling/pool-matching.service';
-import {
-  FeatureFlagsService,
-  FEATURE_KEYS,
-} from '../feature-flags/feature-flags.service';
-import { RideCategory } from '../common/enums/ride.enum';
+import { VehicleStatus } from '../common/enums/vehicle.enum';
 
 export interface SelectableDriverResult {
   driverUserId: string;
@@ -84,12 +78,10 @@ export interface SelectableDriverResult {
   level: DriverProfile['level'];
   distanceKm: number;
   etaMinutes: number;
-  driverPhotoUrl: string | null;
   vehicleMake: string | null;
   vehicleModel: string | null;
   vehicleColor: string | null;
   vehiclePlateNumber: string | null;
-  vehiclePhotoUrl: string | null;
 }
 
 @Injectable()
@@ -122,8 +114,6 @@ export class RidesService {
     private readonly googleMaps: GoogleMapsService,
     private readonly candidateSearchService: CandidateSearchService,
     private readonly driverRankingService: DriverRankingService,
-    private readonly poolMatchingService: PoolMatchingService,
-    private readonly featureFlagsService: FeatureFlagsService,
   ) {}
 
   async estimateFare(dto: FareEstimateDto) {
@@ -138,31 +128,6 @@ export class RidesService {
 
   async requestRide(passengerId: string, dto: RequestRideDto): Promise<Ride> {
     await this.passengersService.assertNotBlacklisted(passengerId);
-
-    if (dto.isPooled) {
-      if (dto.category !== RideCategory.ECONOMY) {
-        throw new BadRequestException(
-          'Pooled rides are only available on Economy',
-        );
-      }
-      if (dto.scheduledAt) {
-        throw new BadRequestException(
-          'Pooled rides cannot be scheduled ahead — request one when you actually need it',
-        );
-      }
-      if (dto.dispatchMode && dto.dispatchMode !== DispatchMode.AUTO) {
-        throw new BadRequestException(
-          'Pooled rides are always AUTO-dispatched',
-        );
-      }
-      if (
-        !(await this.featureFlagsService.isEnabled(FEATURE_KEYS.RIDE_SHARING))
-      ) {
-        throw new BadRequestException(
-          'Ride pooling is not available right now',
-        );
-      }
-    }
 
     const surge = await this.pricingService.calculateSurge(dto.city);
     const breakdown = await this.fareService.estimate(
@@ -202,15 +167,8 @@ export class RidesService {
     const ride = this.ridesRepo.create({
       passengerId,
       category: dto.category,
-      status: scheduledAt
-        ? RideStatus.SCHEDULED
-        : dto.isPooled
-          ? RideStatus.POOL_MATCHING
-          : RideStatus.SEARCHING,
-      isPooled: !!dto.isPooled,
-      dispatchMode: dto.isPooled
-        ? DispatchMode.AUTO
-        : (dto.dispatchMode ?? DispatchMode.MANUAL),
+      status: scheduledAt ? RideStatus.SCHEDULED : RideStatus.SEARCHING,
+      dispatchMode: dto.dispatchMode ?? DispatchMode.MANUAL,
       scheduledAt,
       pickupLat: dto.pickupLat,
       pickupLng: dto.pickupLng,
@@ -228,14 +186,13 @@ export class RidesService {
       nightMultiplierApplied: breakdown.nightMultiplierApplied.toFixed(2),
       airportFee: breakdown.airportFee.toFixed(2),
       isAirportTrip: !!dto.isAirportTrip,
-      requiresAccessibleVehicle: !!dto.requiresAccessibleVehicle,
       flightNumber: dto.flightNumber ?? null,
       usedRealRouting: breakdown.usedRealRouting,
       tollFare: breakdown.tollFare.toFixed(2),
       discount: breakdown.discount.toFixed(2),
       totalFare: breakdown.totalFare.toFixed(2),
       paymentMethod,
-      verificationPin: String(Math.floor(1000 + Math.random() * 9000)),
+      verificationPin: String(randomInt(1000, 10000)),
     });
 
     const savedRide = await this.ridesRepo.save(ride);
@@ -243,6 +200,7 @@ export class RidesService {
       rideId: savedRide.id,
       passengerId: savedRide.passengerId,
     });
+    this.emitStatusChanged(savedRide);
     this.metricsService.rideRequestsTotal.inc({ category: dto.category });
 
     if (dto.promoCode) {
@@ -294,16 +252,28 @@ export class RidesService {
     // tryOfferNextCandidate()), so a transient failure here can never
     // fail ride creation — the ride simply stays SEARCHING and the next
     // decline/timeout/retry gets another chance.
-    if (!scheduledAt && savedRide.isPooled) {
-      // Pooled rides never go straight to normal dispatch — they sit in
-      // the batch-matching window first. See PoolMatchingService's
-      // class doc comment for the full lifecycle.
-      void this.poolMatchingService.requestPool(savedRide.id);
-    } else if (!scheduledAt && savedRide.dispatchMode === DispatchMode.AUTO) {
+    if (!scheduledAt && savedRide.dispatchMode === DispatchMode.AUTO) {
       void this.autoDispatchService.startForRide(savedRide.id);
     }
 
     return savedRide;
+  }
+
+  /**
+   * Fires alongside (not instead of) every status-specific event this
+   * service already emits - those were each built with their own
+   * consumers in mind (push notifications, incentives, loyalty) and
+   * several don't even carry rideId, so they can't be used directly to
+   * broadcast to a specific ride's WebSocket room. This one, single,
+   * consistently-shaped event is what TrackingGateway listens for.
+   */
+  private emitStatusChanged(ride: Ride): void {
+    this.events.emit('ride.status_changed', {
+      rideId: ride.id,
+      status: ride.status,
+      passengerId: ride.passengerId,
+      driverId: ride.driverId,
+    });
   }
 
   async findById(id: string): Promise<Ride> {
@@ -398,26 +368,6 @@ export class RidesService {
   }
 
   /**
-   * IDOR fix (batch 12): backs GET /rides/:id/current-offer, which used to
-   * call DispatchService.getPendingOfferForRide(id) directly with no check
-   * at all — any authenticated user could see whether (and to which
-   * driverUserId) any ride currently has a pending offer out. Only the
-   * ride's own passenger needs this (it drives the "waiting for driver"
-   * UI); staff can see it too via the admin tooling.
-   */
-  async assertCanViewOfferState(
-    rideId: string,
-    requesterId: string,
-    requesterRole: UserRole,
-  ): Promise<void> {
-    const ride = await this.findById(rideId);
-    const isStaff = STAFF_ROLES.includes(requesterRole);
-    if (ride.passengerId !== requesterId && !isStaff) {
-      throw new ForbiddenException("You don't have access to this ride");
-    }
-  }
-
-  /**
    * Admin ride list/search — same gap as DriversService.listForAdmin()
    * before it: nothing let staff look up a specific ride at all, only
    * `GET /rides/mine` (self) and `GET /rides/:id` (needs the exact ID
@@ -442,9 +392,6 @@ export class RidesService {
       .addSelect('ride.city', 'city')
       .addSelect('ride.totalFare', 'totalFare')
       .addSelect('ride.paymentMethod', 'paymentMethod')
-      .addSelect('ride.isPooled', 'isPooled')
-      .addSelect('ride.poolGroupId', 'poolGroupId')
-      .addSelect('ride.poolDiscountAmount', 'poolDiscountAmount')
       .addSelect('ride.createdAt', 'createdAt')
       .addSelect('passenger.firstName', 'passengerFirstName')
       .addSelect('passenger.lastName', 'passengerLastName')
@@ -539,60 +486,6 @@ export class RidesService {
    * call them. Same access pattern, same plain-phone caveat (no
    * telephony proxy in this deployment).
    */
-  /**
-   * Exposes the shared pickup/dropoff sequence for a pooled ride's
-   * driver-app trip screen -- the driver needs to know the full 4-stop
-   * order across both passengers, not just "who's the other rider" (see
-   * PoolMatchingService's class doc comment on why each pooled ride
-   * still goes through the ordinary per-ride ACCEPTED/ARRIVED/
-   * IN_PROGRESS/COMPLETED lifecycle independently; this manifest is
-   * purely a read model layered on top so the driver app can render
-   * "next stop" and mark earlier ones done, without needing any new
-   * ride-status machinery).
-   */
-  async getPoolManifest(
-    rideId: string,
-    requesterId: string,
-    requesterRole: UserRole,
-  ) {
-    const ride = await this.findById(rideId);
-    const isParticipant =
-      ride.passengerId === requesterId || ride.driverId === requesterId;
-    const isStaff = STAFF_ROLES.includes(requesterRole);
-    if (!isParticipant && !isStaff) {
-      throw new ForbiddenException("You don't have access to this ride");
-    }
-    if (!ride.isPooled) return null;
-
-    const pair = await this.poolMatchingService.getGroupAndPartner(ride);
-    if (!pair) return null; // never matched, or already unpooled
-
-    const { partnerRide } = pair;
-    const partnerUser = await this.usersService.findById(
-      partnerRide.passengerId,
-    );
-
-    const isStopDone = (stop: {
-      type: 'pickup' | 'dropoff';
-      rideId: string;
-    }) => {
-      const r = stop.rideId === ride.id ? ride : partnerRide;
-      return stop.type === 'pickup'
-        ? [RideStatus.IN_PROGRESS, RideStatus.COMPLETED].includes(r.status)
-        : r.status === RideStatus.COMPLETED;
-    };
-
-    return {
-      partnerRideId: partnerRide.id,
-      partnerFirstName: partnerUser.firstName,
-      stops: pair.group.routeSequence.map((s) => ({
-        ...s,
-        isMine: s.rideId === ride.id,
-        done: isStopDone(s),
-      })),
-    };
-  }
-
   async getPassengerInfo(
     rideId: string,
     requesterId: string,
@@ -675,17 +568,6 @@ export class RidesService {
    * so this avoids an extra Directions API call for rides nobody ever
    * looks at on a map.
    */
-  /**
-   * Real routed path for the ride's map, from the Directions API.
-   *
-   * Context-aware: while the driver is still on the way to the
-   * passenger (ACCEPTED/ARRIVING/ARRIVED), the useful route to show is
-   * the driver's live position -> pickup, not the ride's fixed
-   * pickup -> dropoff path — showing the latter during this phase drew
-   * a route the driver wasn't actually on. Once the trip is
-   * IN_PROGRESS (or later), it switches to the ride's actual
-   * pickup -> dropoff path.
-   */
   async getRoute(rideId: string, requesterId: string, requesterRole: UserRole) {
     const ride = await this.findById(rideId);
 
@@ -698,42 +580,13 @@ export class RidesService {
 
     if (!this.googleMaps.isConfigured()) return null;
 
-    const isPrePickup = [
-      RideStatus.ACCEPTED,
-      RideStatus.ARRIVING,
-      RideStatus.ARRIVED,
-    ].includes(ride.status);
-
-    let origin = { lat: ride.pickupLat, lng: ride.pickupLng };
-    if (isPrePickup && ride.driverId) {
-      const driverProfile = await this.driversService
-        .findByUserId(ride.driverId)
-        .catch(() => null);
-      if (
-        driverProfile?.currentLat != null &&
-        driverProfile?.currentLng != null
-      ) {
-        origin = {
-          lat: driverProfile.currentLat,
-          lng: driverProfile.currentLng,
-        };
-      }
-      // else: driver has no known location yet (rare — right after
-      // acceptance, before their first location ping) — falls back to
-      // the pickup->dropoff leg below rather than returning nothing.
-    }
-
-    const destination = isPrePickup
-      ? { lat: ride.pickupLat, lng: ride.pickupLng }
-      : { lat: ride.dropoffLat, lng: ride.dropoffLng };
-
-    const directions = await this.googleMaps.getDirections(origin, destination);
+    const directions = await this.googleMaps.getDirections(
+      { lat: ride.pickupLat, lng: ride.pickupLng },
+      { lat: ride.dropoffLat, lng: ride.dropoffLng },
+    );
     if (!directions?.polyline) return null;
 
-    return {
-      points: decodePolyline(directions.polyline),
-      leg: isPrePickup ? ('to_pickup' as const) : ('to_dropoff' as const),
-    };
+    return { points: decodePolyline(directions.polyline) };
   }
 
   /**
@@ -744,6 +597,22 @@ export class RidesService {
    * for a feature that should stay opt-in extra assurance, not a new
    * failure mode for a driver who forgets to ask.
    */
+  /**
+   * Called by the driver at pickup — a lightweight anti-fraud check that
+   * they're picking up the actual matched passenger. Deliberately NOT
+   * wired as a hard gate on `start()` (i.e. a wrong/missing PIN doesn't
+   * block the trip) — that would touch the already-tested core lifecycle
+   * for a feature that should stay opt-in extra assurance, not a new
+   * failure mode for a driver who forgets to ask.
+   *
+   * Rate limited (max 5 attempts) since the PIN space is only 9000
+   * possible 4-digit values - unlimited attempts would make it
+   * brute-forceable. Invalidated after a correct verification
+   * (verificationPin cleared to null) - the passenger app already only
+   * ever displays the PIN before it's verified, so this doesn't change
+   * what's shown, it just closes the window where a used PIN still sits
+   * around comparable.
+   */
   async verifyPin(
     rideId: string,
     driverId: string,
@@ -753,11 +622,21 @@ export class RidesService {
     if (ride.driverId !== driverId) {
       throw new ForbiddenException("You're not the driver on this ride");
     }
-    const verified = ride.verificationPin === pin;
-    if (verified && !ride.isPinVerified) {
-      ride.isPinVerified = true;
-      await this.ridesRepo.save(ride);
+    if (ride.isPinVerified) {
+      throw new BadRequestException('This PIN has already been verified for this ride');
     }
+    if (ride.pinAttemptCount >= PIN_MAX_ATTEMPTS) {
+      throw new BadRequestException('Too many incorrect attempts — ask the passenger to confirm their identity another way');
+    }
+
+    const verified = ride.verificationPin === pin;
+    if (verified) {
+      ride.isPinVerified = true;
+      ride.verificationPin = null; // invalidated after use
+    } else {
+      ride.pinAttemptCount += 1;
+    }
+    await this.ridesRepo.save(ride);
     return { verified };
   }
 
@@ -801,36 +680,13 @@ export class RidesService {
       ride.id,
       'Driver tip',
     );
-
-    // Bug fix: this used to credit the driver and set ride.tipAmount in
-    // one unguarded sequence. If the debit above succeeded but the
-    // credit below then failed (driver wallet not found, transient DB
-    // error, etc.), the exception propagated straight out — tipAmount
-    // was never set, so the "already tipped this trip" guard above
-    // never tripped, and a client retry after seeing that error would
-    // debit the passenger's wallet a second time for the same tip. Same
-    // charged-but-not-settled class of bug as completeRide()'s
-    // settleDriverEarningsAfterPayerCharged: once the payer has been
-    // charged, a downstream failure must not be silently retryable —
-    // it needs to fail closed (tipAmount set, so retries are blocked)
-    // and surface for ops to manually settle the driver's side.
-    try {
-      await this.walletsService.credit(
-        driverWallet.id,
-        amount,
-        TransactionCategory.TIP_RECEIVED,
-        ride.id,
-        'Tip received',
-      );
-    } catch (err) {
-      this.events.emit('tip_earnings.credit_failed', {
-        rideId: ride.id,
-        driverId: ride.driverId,
-        amount,
-        reason:
-          err instanceof Error ? err.message : 'Unknown error crediting tip',
-      });
-    }
+    await this.walletsService.credit(
+      driverWallet.id,
+      amount,
+      TransactionCategory.TIP_RECEIVED,
+      ride.id,
+      'Tip received',
+    );
 
     ride.tipAmount = amount.toFixed(2);
     return this.ridesRepo.save(ride);
@@ -901,23 +757,11 @@ export class RidesService {
    * from anything other than this one shared source is exactly the
    * split architecture this was built to avoid — see
    * candidate-search.types.ts's DispatchMode doc comment.
-   *
-   * IDOR fix (batch 12): this used to have no access check at all —
-   * driver name/photo/plate number and live ETA/distance for any ride's
-   * pickup, readable by any authenticated user just by guessing a ride
-   * id. Scoped to the ride's own passenger (or staff), same pattern as
-   * getForUser/getDriverInfo/getRoute above.
    */
   async findSelectableDrivers(
     rideId: string,
-    requesterId: string,
-    requesterRole: UserRole,
   ): Promise<SelectableDriverResult[]> {
     const ride = await this.findById(rideId);
-    const isStaff = STAFF_ROLES.includes(requesterRole);
-    if (ride.passengerId !== requesterId && !isStaff) {
-      throw new ForbiddenException("You don't have access to this ride");
-    }
     // manual_selection_time (batch 9): full search+rank latency for the
     // MANUAL driver-list screen — the one metric on this list that has
     // no AUTO equivalent, since AUTO never shows a list to anyone.
@@ -931,7 +775,6 @@ export class RidesService {
       domain: DispatchDomain.RIDE,
       mode: DispatchMode.MANUAL,
       rideCategory: ride.category,
-      requiresAccessibleVehicle: ride.requiresAccessibleVehicle,
       // A passenger picking manually wants a real list to choose from,
       // not just "the first one found" — keep expanding until there's a
       // reasonable spread or the max radius is reached.
@@ -966,17 +809,11 @@ export class RidesService {
     const vehicleIds = rankingOutcome.ranked.map((c) => c.vehicleId);
     const [users, vehicles] = await Promise.all([
       this.usersService.findByIds(userIds),
-      Promise.all(
-        vehicleIds.map((id) =>
-          this.vehiclesService.findById(id).catch(() => null),
-        ),
-      ),
+      Promise.all(vehicleIds.map((id) => this.vehiclesService.findById(id).catch(() => null))),
     ]);
     const userById = new Map(users.map((u) => [u.id, u]));
     const vehicleById = new Map(
-      vehicles
-        .filter((v): v is NonNullable<typeof v> => !!v)
-        .map((v) => [v.id, v]),
+      vehicles.filter((v): v is NonNullable<typeof v> => !!v).map((v) => [v.id, v]),
     );
 
     return rankingOutcome.ranked.map((c) => {
@@ -990,12 +827,10 @@ export class RidesService {
         level: c.level,
         distanceKm: c.distanceKm,
         etaMinutes: c.etaMinutes,
-        driverPhotoUrl: user?.profilePhotoUrl ?? null,
         vehicleMake: vehicle?.make ?? null,
         vehicleModel: vehicle?.model ?? null,
         vehicleColor: vehicle?.color ?? null,
         vehiclePlateNumber: vehicle?.plateNumber ?? null,
-        vehiclePhotoUrl: vehicle?.photoUrl ?? null,
       };
     });
   }
@@ -1038,7 +873,6 @@ export class RidesService {
       domain: DispatchDomain.RIDE,
       mode: DispatchMode.MANUAL,
       rideCategory: ride.category,
-      requiresAccessibleVehicle: ride.requiresAccessibleVehicle,
       // We only need to know whether this one specific driver is still
       // eligible, not build a full list — but the engine has no
       // "search for one driver" mode, so ask for a reasonably sized
@@ -1049,20 +883,14 @@ export class RidesService {
       limit: 50,
     });
 
-    const stillEligible = searchOutcome.candidates.find(
-      (c) => c.driverUserId === driverUserId,
-    );
+    const stillEligible = searchOutcome.candidates.find((c) => c.driverUserId === driverUserId);
     if (!stillEligible) {
       throw new BadRequestException(
         'This driver is no longer available — please refresh and select another driver.',
       );
     }
 
-    await this.dispatchService.offerToSpecificDriver(
-      rideId,
-      driverUserId,
-      stillEligible.distanceKm,
-    );
+    await this.dispatchService.offerToSpecificDriver(rideId, driverUserId, stillEligible.distanceKm);
   }
 
   /**
@@ -1128,9 +956,7 @@ export class RidesService {
       throw new ForbiddenException('Driver is not approved');
     }
     if (!isOnlineForService(driverProfile.availability, DriverService.RIDE)) {
-      throw new BadRequestException(
-        'Driver must be online for rides to accept rides',
-      );
+      throw new BadRequestException('Driver must be online for rides to accept rides');
     }
 
     // Defense in depth, not just the filtered selectable-drivers list -
@@ -1145,6 +971,11 @@ export class RidesService {
     const acceptingVehicle = await this.vehiclesService.findById(
       driverProfile.activeVehicleId,
     );
+    if (acceptingVehicle.status !== VehicleStatus.ACTIVE) {
+      throw new BadRequestException(
+        `Your registered vehicle is ${acceptingVehicle.status.replace(/_/g, ' ')}, not active - it needs to be approved before you can accept rides.`,
+      );
+    }
     if (!doesVehicleMatchRideCategory(acceptingVehicle, ride.category)) {
       throw new BadRequestException(
         `Your registered vehicle doesn't match this ride's ${ride.category} category.`,
@@ -1191,66 +1022,45 @@ export class RidesService {
     // reservation UPDATE commits first wins, and the loser's transaction
     // rolls back entirely — including the ride claim — rather than
     // leaving a half-succeeded booking.
-    const { saved, reservedProfile } = await this.ridesRepo.manager.transaction(
-      async (manager) => {
-        const reservedProfile =
-          await this.driversService.reserveOnlineDriverForTrip(
-            manager,
-            driverUserId,
-            DriverService.RIDE,
-          );
+    const { saved, reservedProfile } = await this.ridesRepo.manager.transaction(async (manager) => {
+      const reservedProfile = await this.driversService.reserveOnlineDriverForTrip(
+        manager,
+        driverUserId,
+        DriverService.RIDE,
+      );
 
-        const updateResult = await manager
-          .createQueryBuilder()
-          .update(Ride)
-          .set({
-            driverId: driverUserId,
-            vehicleId: reservedProfile.activeVehicleId,
-            status: RideStatus.ACCEPTED,
-            acceptedAt: new Date(),
-          })
-          .where('id = :id', { id: rideId })
-          .andWhere('status IN (:...statuses)', {
-            statuses: [RideStatus.SEARCHING, RideStatus.REQUESTED],
-          })
-          .execute();
+      const updateResult = await manager
+        .createQueryBuilder()
+        .update(Ride)
+        .set({
+          driverId: driverUserId,
+          vehicleId: reservedProfile.activeVehicleId,
+          status: RideStatus.ACCEPTED,
+          acceptedAt: new Date(),
+        })
+        .where('id = :id', { id: rideId })
+        .andWhere('status IN (:...statuses)', {
+          statuses: [RideStatus.SEARCHING, RideStatus.REQUESTED],
+        })
+        .execute();
 
-        if (updateResult.affected !== 1) {
-          // Throwing here rolls back reserveOnlineDriverForTrip()'s UPDATE
-          // too, in the same transaction — the driver goes right back to
-          // ONLINE from PostgreSQL's perspective, exactly as if this whole
-          // call had never happened.
-          throw new BadRequestException(
-            'This ride was just accepted by another driver.',
-          );
-        }
+      if (updateResult.affected !== 1) {
+        // Throwing here rolls back reserveOnlineDriverForTrip()'s UPDATE
+        // too, in the same transaction — the driver goes right back to
+        // ONLINE from PostgreSQL's perspective, exactly as if this whole
+        // call had never happened.
+        throw new BadRequestException('This ride was just accepted by another driver.');
+      }
 
-        const savedRide = await manager.findOneOrFail(Ride, {
-          where: { id: rideId },
-        });
-        return { saved: savedRide, reservedProfile };
-      },
-    );
+      const savedRide = await manager.findOneOrFail(Ride, { where: { id: rideId } });
+      return { saved: savedRide, reservedProfile };
+    });
 
     // Only now, after the transaction has actually committed, tell the
     // rest of the system (the live-driver index, primarily) that this
     // driver left the available pool — see reserveOnlineDriverForTrip()'s
     // doc comment for why this can't happen any earlier.
     this.driversService.emitReservedForTrip(reservedProfile);
-
-    // Pooled ride: this driver was only ever dispatched for the "anchor"
-    // ride of the pair — propagate the same driver/vehicle onto the
-    // partner ride now rather than dispatching it a second time. See
-    // PoolMatchingService's class doc comment.
-    if (saved.poolGroupId) {
-      await this.poolMatchingService
-        .propagateDriverAssignment(saved)
-        .catch((err) => {
-          this.logger.error(
-            `Failed to propagate pool driver assignment for ride ${saved.id}: ${err}`,
-          );
-        });
-    }
 
     // auto_offer_accept_rate's numerator (batch 9) — divide against
     // autoDispatchOffersTotal in PromQL. Only counted for AUTO rides;
@@ -1265,6 +1075,7 @@ export class RidesService {
       passengerId: saved.passengerId,
       driverName: driver.firstName,
     });
+    this.emitStatusChanged(saved);
 
     // Best-effort — marks this driver's offer (if any) accepted and
     // supersedes any other pending offers for this ride. Works the same
@@ -1293,6 +1104,7 @@ export class RidesService {
     // this, but a push notification matters specifically for a
     // backgrounded app.
     this.events.emit('ride.arrived', { passengerId: ride.passengerId });
+    this.emitStatusChanged(saved);
     return saved;
   }
 
@@ -1328,6 +1140,7 @@ export class RidesService {
       driverId: driverUserId,
       passengerId: ride.passengerId,
     });
+    this.emitStatusChanged(saved);
     return saved;
   }
 
@@ -1344,46 +1157,6 @@ export class RidesService {
    *    full fare instead of a personal wallet; driver earnings settle the
    *    same way.
    */
-  /**
-   * Wraps creditDriverEarnings() for the three payment methods where the
-   * payer side (passenger wallet debit, card charge, or corporate account
-   * debit) has already succeeded by the time this runs. That charge is
-   * real and already happened — so unlike a failure earlier in the same
-   * branch, a failure here must NOT propagate up to completeRide()'s
-   * outer catch, which reverts the ride to IN_PROGRESS specifically so
-   * the driver's app can safely retry completion. Retrying after the
-   * payer has already been charged would charge them a second time for
-   * the same trip. The ride stays COMPLETED with earningsSettled left
-   * false — the same signal the bank_transfer path already relies on to
-   * mark a ride as awaiting driver settlement — and ops can follow up,
-   * rather than the passenger paying twice for one ride.
-   */
-  private async settleDriverEarningsAfterPayerCharged(
-    ride: Ride,
-    driverProfile: DriverProfile,
-    driverEarnings: number,
-    commissionPercent: number,
-  ): Promise<void> {
-    try {
-      await this.creditDriverEarnings(
-        ride,
-        driverProfile,
-        driverEarnings,
-        commissionPercent,
-      );
-    } catch (err) {
-      this.events.emit('driver_earnings.credit_failed', {
-        rideId: ride.id,
-        driverId: driverProfile.userId,
-        amount: driverEarnings,
-        reason:
-          err instanceof Error
-            ? err.message
-            : 'Unknown error crediting driver earnings',
-      });
-    }
-  }
-
   async completeRide(rideId: string, driverUserId: string): Promise<Ride> {
     const ride = await this.getOwnedByDriver(rideId, driverUserId);
     if (ride.status !== RideStatus.IN_PROGRESS) {
@@ -1415,6 +1188,7 @@ export class RidesService {
     ride.commissionAmount = commissionAmount.toFixed(2);
     ride.driverEarnings = driverEarnings.toFixed(2);
     await this.ridesRepo.save(ride);
+    this.emitStatusChanged(ride);
 
     try {
       if (ride.paymentMethod === PaymentMethod.WALLET) {
@@ -1428,7 +1202,7 @@ export class RidesService {
           ride.id,
           `Ride payment for trip ${ride.id}`,
         );
-        await this.settleDriverEarningsAfterPayerCharged(
+        await this.creditDriverEarnings(
           ride,
           driverProfile,
           driverEarnings,
@@ -1503,7 +1277,7 @@ export class RidesService {
           throw new BadRequestException(reason);
         }
         // Synchronous charge — settle immediately, same as wallet.
-        await this.settleDriverEarningsAfterPayerCharged(
+        await this.creditDriverEarnings(
           ride,
           driverProfile,
           driverEarnings,
@@ -1539,7 +1313,7 @@ export class RidesService {
           totalFare,
           ride.id,
         );
-        await this.settleDriverEarningsAfterPayerCharged(
+        await this.creditDriverEarnings(
           ride,
           driverProfile,
           driverEarnings,
@@ -1563,6 +1337,7 @@ export class RidesService {
       ride.commissionAmount = null;
       ride.driverEarnings = null;
       await this.ridesRepo.save(ride);
+      this.emitStatusChanged(ride);
       throw err;
     }
 
@@ -1578,16 +1353,6 @@ export class RidesService {
       ride.passengerId,
     );
     await this.promotionsService.grantReferralBonusIfEligible(ride.passengerId);
-    // Driver-app's Referral Centre promises a bonus "when they complete
-    // their first trip" (driver-to-driver referrals), but this call was
-    // missing entirely - grantReferralBonusIfEligible was only ever
-    // invoked for the passenger side, so a driver's referredByCode could
-    // never be honored no matter how many trips they completed. The
-    // function is already idempotent per refereeUserId (unique
-    // constraint on ReferralGrant.refereeUserId), so calling it here too
-    // is safe even if this same user account somehow also completed a
-    // ride as a passenger.
-    await this.promotionsService.grantReferralBonusIfEligible(driverUserId);
 
     this.events.emit('ride.completed', {
       passengerId: ride.passengerId,
@@ -1704,11 +1469,6 @@ export class RidesService {
       RideStatus.ARRIVED,
     ].includes(ride.status);
     const originalStatus = ride.status;
-    // Set below if this cancellation unwinds a mid-trip pool — used to
-    // give the driver an accurate notification instead of the generic
-    // "your ride was cancelled" (misleading when they're still driving
-    // the other pooled passenger).
-    let poolPartnerContinuing = false;
 
     ride.status = RideStatus.CANCELLED;
     ride.cancelledAt = new Date();
@@ -1743,57 +1503,6 @@ export class RidesService {
       throw new BadRequestException(
         'This ride just changed status (it may already have been accepted, completed, or cancelled) — please refresh and try again.',
       );
-    }
-
-    if (originalStatus === RideStatus.POOL_MATCHING) {
-      // Never paired yet — just clear the pending delayed-match job.
-      await this.poolMatchingService
-        .onRideCancelledBeforeMatch(ride.id)
-        .catch(() => undefined);
-    } else if (ride.poolGroupId && originalStatus === RideStatus.SEARCHING) {
-      // Already paired but no driver assigned to either side yet —
-      // don't leave the co-rider stuck waiting on a pool that will
-      // never complete; revert them to a normal solo request.
-      const partner = await this.ridesRepo.findOne({
-        where: { poolGroupId: ride.poolGroupId, id: Not(ride.id) },
-      });
-      if (partner) {
-        await this.poolMatchingService
-          .unpoolRide(
-            partner.id,
-            `partner ride ${ride.id} cancelled before dispatch`,
-          )
-          .catch((err) =>
-            this.logger.error(
-              `Failed to unpool partner of cancelled ride ${ride.id}: ${err}`,
-            ),
-          );
-      }
-    } else if (
-      ride.poolGroupId &&
-      [
-        RideStatus.ACCEPTED,
-        RideStatus.ARRIVING,
-        RideStatus.ARRIVED,
-        RideStatus.IN_PROGRESS,
-      ].includes(originalStatus)
-    ) {
-      // A driver was already assigned to both sides of the pool — there's
-      // no dispatch to redo, the same driver just keeps driving the
-      // surviving passenger. Settle that passenger's fare (pool discount
-      // no longer applies) and drop the co-rider stop that would
-      // otherwise keep showing on their ride.
-      poolPartnerContinuing = true;
-      await this.poolMatchingService
-        .unpoolRideMidTrip(
-          ride.id,
-          `partner ride ${ride.id} cancelled mid-trip (was ${originalStatus})`,
-        )
-        .catch((err) =>
-          this.logger.error(
-            `Failed to unwind pool after mid-trip cancellation of ride ${ride.id}: ${err}`,
-          ),
-        );
     }
 
     if (
@@ -1854,31 +1563,18 @@ export class RidesService {
     // here since the ride is already CANCELLED and this is an
     // unconditional single-column update on an id match.
     if (ride.cancellationFee) {
-      await this.ridesRepo.update(ride.id, {
-        cancellationFee: ride.cancellationFee,
-      });
+      await this.ridesRepo.update(ride.id, { cancellationFee: ride.cancellationFee });
     }
 
     if (ride.driverId) {
       const driverProfile = await this.driversService.findByUserId(
         ride.driverId,
       );
-      // Recorded per-ride regardless of pooling — this specific ride row
-      // genuinely was cancelled on the driver, same "each member ride
-      // keeps its own lifecycle" accounting the rest of pooling uses.
       await this.driversService.recordTripOutcome(
         driverProfile.id,
         'cancelled',
       );
-      // But do NOT restore availability (ON_TRIP -> ONLINE) when the
-      // driver is still actively driving the surviving pooled
-      // passenger — that would make them dispatchable for a brand new
-      // ride while mid-trip. Availability only comes back once their
-      // last active ride actually ends (their own completeRide()/
-      // cancelRide() call does that then).
-      if (!poolPartnerContinuing) {
-        await this.driversService.restoreAvailabilityAfterTrip(ride.driverId);
-      }
+      await this.driversService.restoreAvailabilityAfterTrip(ride.driverId);
     }
     await this.passengersService.recordTripOutcome(
       ride.passengerId,
@@ -1889,18 +1585,12 @@ export class RidesService {
     const notifyUserId =
       cancelledBy === CancelledBy.PASSENGER ? ride.driverId : ride.passengerId;
     if (notifyUserId) {
-      if (poolPartnerContinuing) {
-        // Driver is still on-trip with the other pooled passenger — the
-        // generic "your ride was cancelled" would wrongly read as the
-        // whole trip ending.
-        this.events.emit('ride.pool_partner_cancelled', { notifyUserId });
-      } else {
-        this.events.emit('ride.cancelled', {
-          notifyUserId,
-          reason: ride.cancelReason,
-        });
-      }
+      this.events.emit('ride.cancelled', {
+        notifyUserId,
+        reason: ride.cancelReason,
+      });
     }
+    this.emitStatusChanged(ride);
     this.metricsService.rideCancellationsTotal.inc({ cancelledBy });
 
     return ride;

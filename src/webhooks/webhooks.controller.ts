@@ -5,7 +5,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../common/enums/user-role.enum';
 import { WebhooksService, WEBHOOK_EVENTS } from './webhooks.service';
-import { CreateWebhookSubscriptionDto, UpdateWebhookSubscriptionDto } from './dto/webhook.dto';
+import { CreateWebhookSubscriptionDto } from './dto/webhook.dto';
 import { Audit } from '../audit/decorators/audit.decorator';
 
 @ApiTags('webhooks')
@@ -43,35 +43,11 @@ export class WebhooksController {
     return this.webhooksService.setActive(id, isActive === 'true');
   }
 
-  @Patch('admin/webhooks/subscriptions/:id')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
-  @Audit('webhook_subscription.update')
-  update(@Param('id') id: string, @Body() dto: UpdateWebhookSubscriptionDto) {
-    return this.webhooksService.update(id, dto);
-  }
-
-  @Post('admin/webhooks/subscriptions/:id/test')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
-  @Audit('webhook_subscription.test')
-  sendTest(@Param('id') id: string) {
-    return this.webhooksService.sendTestEvent(id);
-  }
-
   @Get('admin/webhooks/subscriptions/:id/logs')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   logs(@Param('id') id: string) {
     return this.webhooksService.getLogs(id);
-  }
-
-  @Post('admin/webhooks/logs/:logId/retry')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
-  @Audit('webhook_delivery.retry')
-  retry(@Param('logId') logId: string) {
-    return this.webhooksService.retryDelivery(logId);
   }
 
   /**
@@ -81,6 +57,8 @@ export class WebhooksController {
    * Not meant for production use.
    */
   @Post('webhooks/test-receiver')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   testReceiver(@Body() body: unknown) {
     return { received: true, body };
   }

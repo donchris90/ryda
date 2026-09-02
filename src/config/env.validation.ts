@@ -106,3 +106,30 @@ export function assertProductionStorageIsConfigured(
     );
   }
 }
+
+/**
+ * PaymentsService.chargeSavedCard()/initBankTransfer() both fall back
+ * to a clearly-flagged "simulated" success (PaymentStatus.SUCCESS,
+ * simulated: true) when Paystack isn't configured - genuinely useful
+ * for local dev/CI (see PaymentsService's own doc comments), but a
+ * real, serious hole if that fallback were ever live in production:
+ * every card/bank-transfer ride payment would silently "succeed"
+ * with no money ever actually moving. Same "refuse to boot" pattern
+ * as the JWT-secret/storage checks above.
+ */
+export function assertProductionPaymentsAreConfigured(
+  nodeEnv: string,
+  paystackConfigured: boolean,
+): void {
+  if (nodeEnv !== 'production') return;
+
+  if (!paystackConfigured) {
+    throw new Error(
+      'Refusing to start with NODE_ENV=production while Paystack is not configured ' +
+        '(PAYSTACK_SECRET_KEY not set). PaymentsService falls back to simulated/fake payment ' +
+        'success when Paystack is unconfigured — acceptable in dev/CI, never in production, ' +
+        'where it would mean real rides "succeed" payment with no money ever moving. Set a real ' +
+        'PAYSTACK_SECRET_KEY.',
+    );
+  }
+}

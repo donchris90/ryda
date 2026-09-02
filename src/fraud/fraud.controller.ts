@@ -20,11 +20,6 @@ import { Audit } from '../audit/decorators/audit.decorator';
 export class FraudController {
   constructor(private readonly fraudService: FraudService) {}
 
-  @Get('summary')
-  summary() {
-    return this.fraudService.getSummary();
-  }
-
   @Get('flags')
   list(
     @Query('type') type?: FraudFlagType,

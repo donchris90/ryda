@@ -45,6 +45,13 @@ export interface PaystackTransferResult {
   raw: unknown;
 }
 
+export interface PaystackTransactionSummary {
+  reference: string;
+  status: string;
+  amountKobo: number;
+  paidAt: Date | null;
+}
+
 /**
  * Thin client over Paystack's REST API (https://paystack.com/docs/api/).
  * Reads PAYSTACK_SECRET_KEY from config — if it's unset, every call throws
@@ -193,6 +200,44 @@ export class PaystackService {
   async listBanks(country = 'nigeria'): Promise<Array<{ name: string; code: string }>> {
     const data = await this.request('GET', `/bank?country=${country}`);
     return (data as any[]).map((b) => ({ name: b.name, code: b.code }));
+  }
+
+  /**
+   * Lists every transaction Paystack has on record in the given range -
+   * used by ReconciliationController's Paystack-side reconciliation to
+   * compare against what this backend's own payment_records show.
+   * Paginates through everything itself (perPage capped at 100, the
+   * documented Paystack maximum) rather than handing back just the
+   * first page, since a real reconciliation window can span far more
+   * than one page's worth of transactions.
+   */
+  async listTransactions(from: Date, to: Date): Promise<PaystackTransactionSummary[]> {
+    const results: PaystackTransactionSummary[] = [];
+    let page = 1;
+    const perPage = 100;
+
+    while (true) {
+      const query = new URLSearchParams({
+        perPage: String(perPage),
+        page: String(page),
+        from: from.toISOString(),
+        to: to.toISOString(),
+      });
+      const data = await this.request('GET', `/transaction?${query.toString()}`);
+      const rows = (data as any[]) ?? [];
+      for (const row of rows) {
+        results.push({
+          reference: row.reference,
+          status: row.status,
+          amountKobo: row.amount,
+          paidAt: row.paid_at ? new Date(row.paid_at) : null,
+        });
+      }
+      if (rows.length < perPage) break; // last page
+      page += 1;
+    }
+
+    return results;
   }
 
   /**

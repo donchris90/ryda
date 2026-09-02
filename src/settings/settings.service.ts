@@ -83,10 +83,7 @@ export class SystemSettingsService {
       return null;
     }
 
-    this.cache.set(key, {
-      value: setting.value,
-      expiresAt: Date.now() + CACHE_TTL_MS,
-    });
+    this.cache.set(key, { value: setting.value, expiresAt: Date.now() + CACHE_TTL_MS });
     return setting.value;
   }
 
@@ -117,55 +114,28 @@ export class SystemSettingsService {
    * readable just because a new setting was added later.
    */
   async getContactInfo() {
-    const [
-      companyName,
-      supportEmail,
-      supportPhone,
-      whatsapp,
-      website,
-      address,
-      businessHours,
-      facebook,
-      instagram,
-      twitter,
-      tiktok,
-    ] = await Promise.all([
-      this.getString(SETTING_KEYS.CONTACT_COMPANY_NAME, 'Ryda'),
-      this.getString(SETTING_KEYS.CONTACT_SUPPORT_EMAIL, ''),
-      this.getString(SETTING_KEYS.CONTACT_SUPPORT_PHONE, ''),
-      this.getString(SETTING_KEYS.CONTACT_WHATSAPP, ''),
-      this.getString(SETTING_KEYS.CONTACT_WEBSITE, ''),
-      this.getString(SETTING_KEYS.CONTACT_ADDRESS, ''),
-      this.getString(SETTING_KEYS.CONTACT_BUSINESS_HOURS, ''),
-      this.getString(SETTING_KEYS.CONTACT_FACEBOOK, ''),
-      this.getString(SETTING_KEYS.CONTACT_INSTAGRAM, ''),
-      this.getString(SETTING_KEYS.CONTACT_TWITTER, ''),
-      this.getString(SETTING_KEYS.CONTACT_TIKTOK, ''),
-    ]);
-    return {
-      companyName,
-      supportEmail,
-      supportPhone,
-      whatsapp,
-      website,
-      address,
-      businessHours,
-      facebook,
-      instagram,
-      twitter,
-      tiktok,
-    };
+    const [companyName, supportEmail, supportPhone, whatsapp, website, address, businessHours, facebook, instagram, twitter, tiktok] =
+      await Promise.all([
+        this.getString(SETTING_KEYS.CONTACT_COMPANY_NAME, 'Ryda'),
+        this.getString(SETTING_KEYS.CONTACT_SUPPORT_EMAIL, ''),
+        this.getString(SETTING_KEYS.CONTACT_SUPPORT_PHONE, ''),
+        this.getString(SETTING_KEYS.CONTACT_WHATSAPP, ''),
+        this.getString(SETTING_KEYS.CONTACT_WEBSITE, ''),
+        this.getString(SETTING_KEYS.CONTACT_ADDRESS, ''),
+        this.getString(SETTING_KEYS.CONTACT_BUSINESS_HOURS, ''),
+        this.getString(SETTING_KEYS.CONTACT_FACEBOOK, ''),
+        this.getString(SETTING_KEYS.CONTACT_INSTAGRAM, ''),
+        this.getString(SETTING_KEYS.CONTACT_TWITTER, ''),
+        this.getString(SETTING_KEYS.CONTACT_TIKTOK, ''),
+      ]);
+    return { companyName, supportEmail, supportPhone, whatsapp, website, address, businessHours, facebook, instagram, twitter, tiktok };
   }
 
   async listAll(): Promise<SystemSetting[]> {
     return this.repo.find({ order: { key: 'ASC' } });
   }
 
-  async set(
-    key: string,
-    updatedBy: string,
-    dto: UpsertSettingDto,
-  ): Promise<SystemSetting> {
+  async set(key: string, updatedBy: string, dto: UpsertSettingDto): Promise<SystemSetting> {
     let setting = await this.repo.findOne({ where: { key } });
     if (!setting) {
       setting = this.repo.create({ key });

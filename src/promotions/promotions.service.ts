@@ -67,35 +67,6 @@ export class PromotionsService {
     return this.promotionsRepo.save(promotion);
   }
 
-  /**
-   * Deliberately excludes `code` and `type` — changing either out from
-   * under an already-shared/printed promo code would silently change what
-   * a code someone has already been given actually does. Deactivate and
-   * create a new code instead for that case.
-   */
-  async updatePromotion(id: string, dto: Partial<CreatePromotionDto>): Promise<Promotion> {
-    const promotion = await this.promotionsRepo.findOne({ where: { id } });
-    if (!promotion) throw new NotFoundException('Promotion not found');
-
-    if (dto.description !== undefined) promotion.description = dto.description;
-    if (dto.value !== undefined) promotion.value = dto.value.toFixed(2);
-    if (dto.maxDiscountAmount !== undefined) promotion.maxDiscountAmount = dto.maxDiscountAmount.toFixed(2);
-    if (dto.minFareAmount !== undefined) promotion.minFareAmount = dto.minFareAmount.toFixed(2);
-    if (dto.usageLimitTotal !== undefined) promotion.usageLimitTotal = dto.usageLimitTotal;
-    if (dto.usageLimitPerUser !== undefined) promotion.usageLimitPerUser = dto.usageLimitPerUser;
-    if (dto.validFrom !== undefined) promotion.validFrom = dto.validFrom ? new Date(dto.validFrom) : null;
-    if (dto.validUntil !== undefined) promotion.validUntil = dto.validUntil ? new Date(dto.validUntil) : null;
-
-    return this.promotionsRepo.save(promotion);
-  }
-
-  /** Usage/performance figures for the admin promotions list — redemption count and total discount given, derived straight from the redemption ledger rather than trusting `timesRedeemed` alone. */
-  async getStats(id: string): Promise<{ redemptionCount: number; totalDiscountGiven: string }> {
-    const redemptions = await this.redemptionsRepo.find({ where: { promotionId: id } });
-    const totalDiscountGiven = redemptions.reduce((sum, r) => sum + parseFloat(r.discountAmount), 0);
-    return { redemptionCount: redemptions.length, totalDiscountGiven: totalDiscountGiven.toFixed(2) };
-  }
-
   /** Validates a code for a user/fare without redeeming it — safe to call for a UI preview. */
   async validate(code: string, userId: string, fareAmount: number): Promise<PromoPreview> {
     const promotion = await this.promotionsRepo.findOne({ where: { code: code.toUpperCase() } });
@@ -207,13 +178,6 @@ export class PromotionsService {
 
   async listCampaigns(): Promise<Campaign[]> {
     return this.campaignsRepo.find({ order: { createdAt: 'DESC' } });
-  }
-
-  async setCampaignActive(id: string, isActive: boolean): Promise<Campaign> {
-    const campaign = await this.campaignsRepo.findOne({ where: { id } });
-    if (!campaign) throw new NotFoundException('Campaign not found');
-    campaign.isActive = isActive;
-    return this.campaignsRepo.save(campaign);
   }
 
   // ---- Referral bonuses ----

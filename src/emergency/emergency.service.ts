@@ -1,8 +1,8 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { EventEmitter2 } from '@nestjs/event-emitter';
-import { Incident, IncidentStatus, IncidentType } from './entities/incident.entity';
+import { Incident, IncidentStatus, IncidentType, IncidentSeverity } from './entities/incident.entity';
 import { IncidentTimelineEntry } from './entities/incident-timeline-entry.entity';
 import { ReportIncidentDto } from './dto/emergency.dto';
 import { Ride } from '../rides/entities/ride.entity';
@@ -10,8 +10,6 @@ import { DriverProfile } from '../drivers/entities/driver-profile.entity';
 import { RideStatus, CancelledBy } from '../common/enums/ride.enum';
 import { PassengersService } from '../passengers/passengers.service';
 import { User } from '../users/entities/user.entity';
-import { UserRole } from '../common/enums/user-role.enum';
-import { RESPONDER_ROLES } from '../common/constants/responder-roles';
 
 const ACTIVE_RIDE_STATUSES = [
   RideStatus.ACCEPTED,
@@ -58,32 +56,62 @@ export class EmergencyService {
     lat: number | undefined,
     lng: number | undefined,
   ): Promise<Incident> {
-    const incident = await this.incidentsRepo.save(
-      this.incidentsRepo.create({
-        type: IncidentType.SOS,
+    // A second press while one SOS is already open shouldn't fragment
+    // the response across two separate incident records - re-use the
+    // existing one (still re-notify everyone, since a second press is
+    // exactly the kind of thing that should reinforce urgency, not go
+    // silent) rather than creating a duplicate.
+    const existingOpenSos = await this.incidentsRepo.findOne({
+      where: {
         reportedByUserId: userId,
-        rideId: rideId ?? null,
-        description: 'SOS triggered',
-        lat: lat ?? null,
-        lng: lng ?? null,
-      }),
-    );
+        type: IncidentType.SOS,
+        status: In([
+          IncidentStatus.OPEN,
+          IncidentStatus.ACKNOWLEDGED,
+          IncidentStatus.RESPONDING,
+          IncidentStatus.ESCALATED,
+        ]),
+      },
+      order: { createdAt: 'DESC' },
+    });
 
-    await this.addTimelineEntry(incident.id, null, 'sos_triggered', 'SOS button pressed');
+    const incident =
+      existingOpenSos ??
+      (await this.incidentsRepo.save(
+        this.incidentsRepo.create({
+          type: IncidentType.SOS,
+          severity: IncidentSeverity.CRITICAL,
+          reportedByUserId: userId,
+          rideId: rideId ?? null,
+          description: 'SOS triggered',
+          lat: lat ?? null,
+          lng: lng ?? null,
+        }),
+      ));
+
+    await this.addTimelineEntry(
+      incident.id,
+      null,
+      existingOpenSos ? 'sos_pressed_again' : 'sos_triggered',
+      existingOpenSos ? 'SOS button pressed again while already open' : 'SOS button pressed',
+    );
 
     // Notify admin/support (via the notifications broadcast pattern) and
     // the reporter's own trusted contacts, if they've set any.
-    const emergencyContacts = await this.passengersService
-      .listEmergencyContacts(userId)
-      .catch(() => []);
+    const [emergencyContacts, reporter] = await Promise.all([
+      this.passengersService.listEmergencyContacts(userId).catch(() => []),
+      this.usersRepo.findOne({ where: { id: userId } }),
+    ]);
 
     this.events.emit('incident.sos_triggered', {
       incidentId: incident.id,
       userId,
-      rideId: rideId ?? null,
+      rideId: rideId ?? incident.rideId,
       lat: lat ?? null,
       lng: lng ?? null,
-      emergencyContactPhones: emergencyContacts.map((c) => c.phone),
+      reporterName: reporter ? `${reporter.firstName} ${reporter.lastName}` : 'Unknown',
+      reporterRole: reporter?.role ?? null,
+      emergencyContacts: emergencyContacts.map((c) => ({ name: c.name, phone: c.phone })),
     });
 
     return incident;
@@ -111,6 +139,33 @@ export class EmergencyService {
   }
 
   /**
+   * Lets the reporter themselves say "that was an accident" - real gap
+   * found: previously the only way to close an open SOS/incident was
+   * an admin resolving it, with no way for the person who triggered it
+   * to self-correct a false alarm. Deliberately NOT allowed once
+   * ESCALATED (or already resolved/closed) - a responder has already
+   * determined that needs serious attention at that point, and the
+   * reporter shouldn't be able to unilaterally shut it down.
+   */
+  async cancelIncident(incidentId: string, userId: string): Promise<Incident> {
+    const incident = await this.findById(incidentId);
+    if (incident.reportedByUserId !== userId) {
+      throw new ForbiddenException('You can only cancel an incident you reported yourself');
+    }
+    if (incident.status === IncidentStatus.ESCALATED) {
+      throw new BadRequestException('This incident has been escalated and can no longer be self-cancelled — contact support');
+    }
+    if (incident.status === IncidentStatus.RESOLVED || incident.status === IncidentStatus.CLOSED) {
+      throw new BadRequestException(`This incident is already ${incident.status}`);
+    }
+
+    incident.status = IncidentStatus.CLOSED;
+    const saved = await this.incidentsRepo.save(incident);
+    await this.addTimelineEntry(incidentId, userId, 'cancelled_by_reporter', 'Reporter cancelled — marked as a false alarm');
+    return saved;
+  }
+
+  /**
    * Same "raw userId, no name" gap already found and fixed four times
    * elsewhere (rides, drivers, support, users) — here it matters more
    * than usual: a responder looking at an active SOS needs to know WHO
@@ -123,12 +178,17 @@ export class EmergencyService {
       .leftJoin(User, 'reporter', 'reporter.id::text = incident.reportedByUserId')
       .select('incident.id', 'id')
       .addSelect('incident.type', 'type')
+      .addSelect('incident.severity', 'severity')
       .addSelect('incident.status', 'status')
       .addSelect('incident.description', 'description')
       .addSelect('incident.rideId', 'rideId')
       .addSelect('incident.lat', 'lat')
       .addSelect('incident.lng', 'lng')
       .addSelect('incident.acknowledgedBy', 'acknowledgedBy')
+      .addSelect('incident.respondingBy', 'respondingBy')
+      .addSelect('incident.escalatedBy', 'escalatedBy')
+      .addSelect('incident.escalationReason', 'escalationReason')
+      .addSelect('incident.escalatedAt', 'escalatedAt')
       .addSelect('incident.resolvedBy', 'resolvedBy')
       .addSelect('incident.resolutionNotes', 'resolutionNotes')
       .addSelect('incident.createdAt', 'createdAt')
@@ -144,7 +204,12 @@ export class EmergencyService {
   }
 
   async listActive() {
-    return this.listWithReporter([IncidentStatus.OPEN, IncidentStatus.ACKNOWLEDGED]);
+    return this.listWithReporter([
+      IncidentStatus.OPEN,
+      IncidentStatus.ACKNOWLEDGED,
+      IncidentStatus.RESPONDING,
+      IncidentStatus.ESCALATED,
+    ]);
   }
 
   async listAll() {
@@ -157,6 +222,48 @@ export class EmergencyService {
     incident.acknowledgedBy = adminUserId;
     const saved = await this.incidentsRepo.save(incident);
     await this.addTimelineEntry(incidentId, adminUserId, 'acknowledged');
+    return saved;
+  }
+
+  /** A responder is now actively working the incident - dispatched to the scene, on the phone with the reporter, etc. */
+  async respond(incidentId: string, adminUserId: string, notes?: string): Promise<Incident> {
+    const incident = await this.findById(incidentId);
+    if (incident.status === IncidentStatus.RESOLVED || incident.status === IncidentStatus.CLOSED) {
+      throw new BadRequestException(`Cannot respond to an incident that is already ${incident.status}`);
+    }
+    incident.status = IncidentStatus.RESPONDING;
+    incident.respondingBy = adminUserId;
+    const saved = await this.incidentsRepo.save(incident);
+    await this.addTimelineEntry(incidentId, adminUserId, 'responding', notes);
+    return saved;
+  }
+
+  /**
+   * Escalation is exactly as time-sensitive as the original SOS - not a
+   * status field quietly changing. Emits the same real-time delivery
+   * path (broadcast to every safety-ops staff member watching the
+   * admin:safety room) that the original SOS alert used, so an
+   * escalation genuinely reaches people, not just gets logged.
+   */
+  async escalate(incidentId: string, adminUserId: string, reason: string): Promise<Incident> {
+    const incident = await this.findById(incidentId);
+    if (incident.status === IncidentStatus.RESOLVED || incident.status === IncidentStatus.CLOSED) {
+      throw new BadRequestException(`Cannot escalate an incident that is already ${incident.status}`);
+    }
+    incident.status = IncidentStatus.ESCALATED;
+    incident.severity = IncidentSeverity.CRITICAL;
+    incident.escalatedBy = adminUserId;
+    incident.escalationReason = reason;
+    incident.escalatedAt = new Date();
+    const saved = await this.incidentsRepo.save(incident);
+    await this.addTimelineEntry(incidentId, adminUserId, 'escalated', reason);
+
+    this.events.emit('incident.escalated', {
+      incidentId,
+      escalatedBy: adminUserId,
+      reason,
+    });
+
     return saved;
   }
 
@@ -184,57 +291,6 @@ export class EmergencyService {
 
   async getTimeline(incidentId: string): Promise<IncidentTimelineEntry[]> {
     return this.timelineRepo.find({ where: { incidentId }, order: { createdAt: 'ASC' } });
-  }
-
-  /**
-   * IDOR fix (batch 12): `getTimeline`/`addTimelineEntry` above take a bare
-   * incidentId with no notion of who's asking — fine for the internal
-   * admin-only callers (acknowledge/resolve/etc., already gated by
-   * RESPONDER_ROLES at the controller), but EmergencyController's general
-   * `timeline`/`notes` routes were calling them directly with no check at
-   * all, so any authenticated passenger or driver could read — or inject
-   * notes into — any incident on the platform just by guessing its id.
-   * Access is limited to whoever reported it, either party on the linked
-   * ride (if any), or platform responders — the same shape as the
-   * isParticipant-or-staff check used everywhere else in this codebase
-   * (RidesService.getForUser, SupportService.assertCanAccess, etc.).
-   */
-  private async assertCanAccess(
-    incidentId: string,
-    userId: string,
-    roles: UserRole[],
-  ): Promise<Incident> {
-    const incident = await this.findById(incidentId);
-    if (RESPONDER_ROLES.some((r) => roles.includes(r))) return incident;
-    if (incident.reportedByUserId === userId) return incident;
-
-    const ride = incident.rideId
-      ? await this.ridesRepo.findOne({ where: { id: incident.rideId } })
-      : null;
-    if (ride && (ride.passengerId === userId || ride.driverId === userId)) {
-      return incident;
-    }
-
-    throw new ForbiddenException("You don't have access to this incident");
-  }
-
-  async getTimelineForRequester(
-    incidentId: string,
-    userId: string,
-    roles: UserRole[],
-  ): Promise<IncidentTimelineEntry[]> {
-    await this.assertCanAccess(incidentId, userId, roles);
-    return this.getTimeline(incidentId);
-  }
-
-  async addNoteAsRequester(
-    incidentId: string,
-    userId: string,
-    roles: UserRole[],
-    note: string,
-  ): Promise<IncidentTimelineEntry> {
-    await this.assertCanAccess(incidentId, userId, roles);
-    return this.addTimelineEntry(incidentId, userId, 'note', note);
   }
 
   // ---- Live ride monitoring ----

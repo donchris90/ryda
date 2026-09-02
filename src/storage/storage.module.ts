@@ -6,15 +6,9 @@ import { LocalDiskProvider } from './providers/local-disk.provider';
 import { S3Provider } from './providers/s3.provider';
 import { CloudflareR2Provider } from './providers/cloudflare-r2.provider';
 import { DriverDocument } from '../drivers/entities/driver-document.entity';
-import { UploadedFile } from './entities/uploaded-file.entity';
-import { Ride } from '../rides/entities/ride.entity';
-import { SupportModule } from '../support/support.module';
 
 @Module({
-  imports: [
-    TypeOrmModule.forFeature([DriverDocument, UploadedFile, Ride]),
-    SupportModule,
-  ],
+  imports: [TypeOrmModule.forFeature([DriverDocument])],
   providers: [
     StorageService,
     LocalDiskProvider,

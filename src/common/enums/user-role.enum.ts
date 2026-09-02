@@ -26,3 +26,12 @@ export const ADMIN_LIKE_ROLES = [
   UserRole.COUNTRY_ADMIN,
   UserRole.CITY_MANAGER,
 ];
+
+/**
+ * Who counts as "operations personnel" for safety-critical alerts
+ * (SOS, incident escalation) and who can actually act on an incident
+ * (view/acknowledge/respond/escalate/resolve in EmergencyController) -
+ * deliberately the same list for both, so nobody who can act is left
+ * un-notified, and nobody who's notified is unable to act.
+ */
+export const SAFETY_OPS_ROLES = [...ADMIN_LIKE_ROLES, UserRole.DISPATCHER, UserRole.SUPPORT_AGENT];

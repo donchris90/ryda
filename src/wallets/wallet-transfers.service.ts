@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Between, MoreThan, Repository } from 'typeorm';
 import { WalletTransferRequest, WalletTransferStatus } from './entities/wallet-transfer-request.entity';
@@ -10,7 +10,6 @@ import { OtpPurpose } from '../otp/otp-code.entity';
 import { SystemSettingsService, SETTING_KEYS } from '../settings/settings.service';
 import { TransactionCategory } from '../common/enums/transaction.enum';
 import { InitiateTransferDto, ConfirmTransferDto } from './dto/transfer.dto';
-import { MailerService } from '../mailer/mailer.service';
 
 const TRANSFER_REQUEST_TTL_MINUTES = 10;
 
@@ -26,6 +25,12 @@ function maskEmail(email: string): string {
   return `${local.slice(0, 2)}***@${domain}`;
 }
 
+function maskPhone(phone: string | null): string | null {
+  // +2348011112222 -> +23480*****222 - same reasoning as maskEmail().
+  if (!phone || phone.length <= 7) return phone;
+  return `${phone.slice(0, 5)}*****${phone.slice(-3)}`;
+}
+
 @Injectable()
 export class WalletTransfersService {
   constructor(
@@ -37,11 +42,32 @@ export class WalletTransfersService {
     private readonly usersService: UsersService,
     private readonly otpService: OtpService,
     private readonly settingsService: SystemSettingsService,
-    private readonly mailerService: MailerService,
   ) {}
 
   async initiate(senderId: string, dto: InitiateTransferDto) {
     const sender = await this.usersService.findById(senderId);
+    if (!sender.phone || !sender.isPhoneVerified) {
+      throw new BadRequestException(
+        'You need a verified phone number on file before you can send money — add and verify one first.',
+      );
+    }
+
+    // A double-tap or network retry creating a second pending request
+    // is a real correctness risk here, not just clutter: OTP
+    // verification is scoped only to (phone, purpose), not to a
+    // specific transferRequestId, so the code the user actually
+    // receives (always the latest one sent) could otherwise be used
+    // to confirm a stale, earlier request with a different
+    // amount/recipient than the one currently on screen.
+    const existingPending = await this.transferRequestsRepo.findOne({
+      where: { senderId, status: WalletTransferStatus.PENDING },
+    });
+    if (existingPending && existingPending.expiresAt > new Date()) {
+      throw new ConflictException(
+        'You already have a transfer awaiting OTP confirmation — confirm or wait for it to expire before starting another.',
+      );
+    }
+
     const recipient = dto.recipientEmail
       ? await this.usersService.findByEmail(dto.recipientEmail)
       : await this.usersService.findByPhone(dto.recipientPhone!);
@@ -97,20 +123,13 @@ export class WalletTransfersService {
       }),
     );
 
-    const { devOnlyCode, expiresInSeconds } = await this.otpService.send(sender.email, OtpPurpose.WALLET_TRANSFER);
-    await this.mailerService.send(
-      sender.email,
-      'Confirm your Ryda transfer',
-      `<p>Hi ${sender.firstName},</p>
-       <p>Enter this code in the app to confirm sending ₦${dto.amount.toLocaleString()} to ${maskName(recipient.firstName, recipient.lastName)}:</p>
-       <p style="font-size: 24px; font-weight: bold; letter-spacing: 4px;">${devOnlyCode}</p>
-       <p>This code expires in ${Math.round(expiresInSeconds / 60)} minutes. If you didn't request this transfer, you can ignore this email — no money will move without the code.</p>`,
-    );
+    const { expiresInSeconds } = await this.otpService.send(sender.phone!, OtpPurpose.WALLET_TRANSFER);
 
     return {
       transferRequestId: request.id,
       recipientName: maskName(recipient.firstName, recipient.lastName),
       recipientEmail: maskEmail(recipient.email),
+      recipientPhone: maskPhone(recipient.phone),
       amount: dto.amount,
       fee,
       total,
@@ -140,7 +159,7 @@ export class WalletTransfersService {
     }
 
     const sender = await this.usersService.findById(senderId);
-    await this.otpService.verify(sender.email, dto.otpCode, OtpPurpose.WALLET_TRANSFER);
+    await this.otpService.verify(sender.phone!, dto.otpCode, OtpPurpose.WALLET_TRANSFER);
 
     const senderWallet = await this.walletsService.getByUserId(request.senderId);
     const recipientWallet = await this.walletsService.getByUserId(request.recipientId);

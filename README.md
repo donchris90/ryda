@@ -2992,6 +2992,713 @@ at the API layer. Rejecting that same driver still succeeds regardless.
 After uploading and approving all three required documents, approval
 now succeeds. Full regression clean.
 
+## Batch 5 (in progress) - SOS notification delivery genuinely fixed and proven live
+
+Same audit-first approach as every batch. Found a substantial,
+well-structured emergency/incident module already in place (Incident +
+IncidentTimelineEntry entities, admin command-center endpoints, live
+ride monitoring, admin force-cancel) - but the code itself openly
+documented the real, central gap this batch's deliverable bar exists
+to catch: `NotificationsService.onSosTriggered()`'s own comment said
+escalating to on-call staff and SMS-ing emergency contacts "is a real
+gap." An SOS created a real Incident row and confirmed receipt to the
+reporter - and stopped there. No operations staff were ever actually
+notified; they'd only find out by manually polling the admin
+endpoint. Emergency contact phone numbers were captured and passed
+into the event payload, then never used for anything.
+
+Fixed at the source, not around it:
+- `NotificationsService.onSosTriggered()` now genuinely notifies every
+  safety-ops staff member (a new `UsersService.findByRoles()`, using
+  Postgres's array-overlap operator against the `roles` column) via
+  real, queued, retried push+in-app notifications - not just whoever
+  happens to be watching a dashboard.
+- `TrackingGateway` gets a new, dedicated `admin:safety` room
+  (deliberately separate from the existing high-volume `admin:live`
+  driver-location stream) and broadcasts the SOS the instant it's
+  triggered, and again on escalation - real-time delivery for whoever
+  is actively watching, on top of the guaranteed push above.
+- Emergency contacts are now genuinely SMS'd via the same Twilio
+  integration already proven working for OTP delivery in Batch 4 -
+  not a new, separate mechanism.
+
+Found and fixed a real, separate inconsistency along the way: the
+list of staff who could *act* on an incident (`EmergencyController`'s
+own `RESPONDER_ROLES`) didn't match the list who got *notified* -
+each independently defined, each missing a role the other had.
+Consolidated into one shared `SAFETY_OPS_ROLES` constant so the two
+can never silently diverge again.
+
+Added the incident states Batch 5 explicitly asks for that were
+missing (`RESPONDING`, `ESCALATED` - previously only OPEN/
+ACKNOWLEDGED/RESOLVED/CLOSED existed), a `severity` field (SOS is
+always CRITICAL by design), and the full `respond()`/`escalate()`
+service methods + admin endpoints, matching the existing acknowledge/
+resolve pattern exactly.
+
+**Verified live, end to end, against a real running server** - not
+code review, per this batch's own explicit deliverable bar ("do not
+mark SOS complete until an end-to-end test proves the alert reaches
+the intended recipient"): a real passenger account triggers a real
+SOS via the real endpoint; a real admin's actual WebSocket connection
+receives the real-time alert (captured directly:
+`RECEIVED_EVENT: admin:sos {...}`); a real, queued notification row
+is confirmed to exist for that admin in the database; the full
+lifecycle (open → responding → escalated, itself separately
+broadcast live and confirmed → resolved) is verified through the real
+timeline; a non-admin is confirmed genuinely rejected from the
+safety-ops room; unauthenticated access to admin safety endpoints is
+confirmed rejected.
+
+Full regression clean: 239 tests, full e2e suite.
+
+**Mid-batch environment reset**: partway through this work the
+sandbox environment reset and lost all in-progress, not-yet-packaged
+changes. Everything above was rebuilt from an exact record of what
+had already been built and verified once, then re-verified live a
+second time against a fresh boot - the live-test output above is from
+that second, post-rebuild run, not assumed to still hold from before
+the reset.
+
+**Not yet done - genuinely still open from Batch 5**: live safety
+monitoring during active trips (GPS freshness, route deviation,
+excessive speed, prolonged inactivity - none of this exists yet). The
+admin safety-center UI itself (backend is real and tested; no
+frontend built this batch). Dedicated unit tests for the SOS/incident
+flow beyond the live end-to-end run already done.
+
+## Batch 5 - closing out remaining gaps: dedicated tests, duplicate SOS, self-cancellation
+
+Working through "what's left across Batches 1-5" - starting with
+Batch 5's own explicitly-named remaining items.
+
+**Dedicated unit tests added for both `SafetyMonitoringService`
+(21 tests) and `EmergencyService` (13 tests)** - both were previously
+proven only by live end-to-end runs, not real unit tests. Two test
+bugs found and fixed along the way (my own test data, not the
+service): a route-deviation test whose engineered distance fell just
+under its own threshold, and an unusual-stop test whose timestamps
+fell outside the check's own time window - both are genuine
+reminders that a live-verified system still deserves proper unit
+coverage, since these mistakes would have shipped as false "passing"
+tests otherwise.
+
+**Real gap found and fixed while writing those tests, not just
+covered**: Batch 5 explicitly lists "duplicate SOS" as something to
+test - and `triggerSos()` had no deduplication at all. A second press
+while one SOS was already open created a second, completely
+independent `Incident` row, fragmenting the response and timeline
+across two separate records instead of one. Fixed: a second press
+while one is open now re-uses the existing incident (still genuinely
+re-notifies everyone, since reinforcing urgency on a repeat press is
+correct, not something to suppress) rather than creating a duplicate.
+
+**Second real gap found**: Batch 5 also names "cancellation" as a
+test case, and there was no way for a reporter to say "that was an
+accident" - only an admin resolving it existed. Added
+`cancelIncident()`: the reporter can self-cancel their own still-open
+incident, but deliberately not once it's been `ESCALATED` - a
+responder has already determined that needs serious attention by
+then, and the reporter shouldn't be able to unilaterally shut it
+down. New endpoint: `PATCH /emergency/incidents/:id/cancel`.
+
+Verified live against a real running server, the full sequence: a
+first SOS creates a real incident; a second press while it's open
+genuinely reuses the same one (confirmed by ID, and the timeline
+shows both presses on one incident); an unrelated user is genuinely
+rejected from cancelling it; the actual reporter can cancel it; a
+*third* press after that cancellation genuinely creates a fresh
+incident (confirming the "find existing open SOS" query correctly
+excludes closed ones); and re-cancelling an already-closed incident
+is correctly rejected.
+
+Full regression clean: 278 tests (34 new), full e2e suite.
+
+## Batch 5 continued - live safety monitoring during active trips
+
+Batch 5's explicit "Live Safety" requirement - monitor GPS freshness,
+excessive speed, unusual stops, route/distance deviation, trip
+duration anomalies, and unexpected termination during active trips,
+and generate risk alerts for human review. None of this existed
+before this pass.
+
+Found and reused real, existing infrastructure rather than building
+in isolation: `LocationHistory` was already being populated with
+every driver location ping during an active ride (via
+`LocationService`, from earlier work) - the exact data source needed
+for speed/distance calculations, not something new to build.
+`FraudService.checkGpsSpoof()` already flags physically impossible
+speed (>250 km/h - GPS spoofing/corrupted data) - confirmed this is a
+genuinely different concern from "dangerously fast but plausible real
+driving," and set the new excessive-speed threshold (130 km/h,
+configurable) below that fraud threshold rather than duplicating it.
+
+New `SafetyMonitoringService`, with "do not automatically accuse
+users of wrongdoing" enforced two concrete ways, not left as a
+comment: every threshold is deliberately generous (a normal traffic
+jam, a legitimate detour, or a genuinely short trip should never trip
+these - tuned as multipliers/margins, not tight bounds), and every
+alert's description is written as a neutral, measured fact ("speed
+reading of 200 km/h" - never "driver is speeding"). New `risk_alerts`
+table, deliberately separate from `incidents` - a risk alert is a
+pattern-based signal that may or may not indicate a real problem, not
+something a human explicitly reported or an active emergency.
+
+Six checks implemented: excessive speed and trip-duration/route-
+distance anomalies run on every location update during an in-progress
+ride (each anomaly check only fires once per ride while open, not on
+every subsequent update); unusual stops require a genuine spread of
+readings across the full time window, not just one or two points, to
+avoid mistaking a data gap for an actual stop; GPS staleness runs on
+a per-minute schedule instead, since the problem there is the
+*absence* of an update, not something a location update itself would
+trigger; unexpected termination listens for a ride completing
+implausibly fast after starting. New admin endpoints to list open
+alerts (platform-wide and per-ride) and review/dismiss with notes,
+matching the existing incident-response permission pattern exactly.
+
+Verified live against a real running server, full flow: two location
+updates engineered to imply exactly ~200 km/h (deliberately placed
+between the new 130 km/h threshold and the existing fraud service's
+250 km/h "impossible" threshold, to genuinely confirm this is a
+distinct check, not a duplicate) - correctly raised an alert with
+accurate details; a ride completed 21 seconds after starting -
+correctly flagged as an unexpected termination; an admin dismissing
+an alert with notes correctly removes it from the open list;
+unauthenticated access to the admin endpoint correctly rejected.
+
+Full regression clean: 244 tests, full e2e suite.
+
+**Not yet done - genuinely still open from Batch 5**: the admin
+safety-center UI itself (no admin-dashboard frontend project exists
+in this workspace to build it in). Dedicated unit tests for
+`SafetyMonitoringService` (verified live end-to-end above, not yet
+covered by unit tests). Route deviation specifically was approximated
+via total-distance-traveled-vs-estimated rather than true polyline
+comparison against the planned route, for scope reasons - a real, if
+minor, simplification worth naming honestly.
+
+## Batch 5 continued - trip PIN security
+
+Real, concrete gaps found against this batch's own "Trip PIN"
+checklist ("secure, one-time, rate limited, never stored in plaintext
+where avoidable, invalidated after use") - the PIN was generated with
+`Math.random()` (not cryptographically secure, even for a small
+4-digit space), stored in plain `varchar`, had zero rate limiting on
+`verifyPin()` (unlimited brute-force attempts against a 9000-value
+space), and stayed in the database unchanged after a successful
+verification.
+
+Considered fully removing plaintext storage (hashing the PIN like a
+password), but the passenger genuinely needs repeated access to their
+own PIN throughout the trip to relay it verbally to the driver -
+confirmed this by checking the passenger app's own display logic
+(`!ride.isPinVerified && ride.status !== IN_PROGRESS`), which already
+correctly stops showing it once verified or once the trip starts.
+Hashing would have broken that legitimate, unavoidable UX need for no
+real security gain. Fixed the three genuinely actionable gaps
+instead: `crypto.randomInt()` replaces `Math.random()`; a new
+`pinAttemptCount` column enforces a real 5-attempt lockout;
+`verificationPin` is now nulled out immediately on a correct
+verification, closing the plaintext-exposure window as much as
+possible without breaking the passenger's legitimate need to see it
+beforehand - confirmed this doesn't affect the app, since it never
+displays the PIN past that point anyway.
+
+Verified live against a real running server, full ride lifecycle: 4
+wrong attempts genuinely tracked, a 5th genuinely locked out (even
+the correct PIN then correctly rejected), a correct PIN on a separate
+ride genuinely verifies, the database confirmed to show the PIN
+column actually cleared (not just a status flag) immediately after,
+and a replay attempt with the same PIN correctly rejected as
+already-used. 5 new dedicated unit tests.
+
+Full regression clean: 244 tests, full e2e suite.
+
+## Batch 4 continued - idempotency: preventing duplicate financial requests
+
+Real, non-obvious risk found while investigating this - not the
+generic "add an Idempotency-Key header" mechanism, but a specific,
+concrete correctness issue: `WalletTransfersService.initiate()` and
+`WithdrawalsService.initiateWithdrawal()`'s OTP step verifies the code
+against `(phone, purpose)` only - never against a specific
+transferRequestId/withdrawalRequestId. That's fine when only one
+request is ever pending, but a double-tap or network retry creating a
+*second* pending request meant the OTP the user actually receives
+(always the newest one sent) could be used to confirm either pending
+request - including a stale one with a different amount or recipient
+than what's currently on the confirmation screen. Fixed at the root:
+both `initiate()` methods now reject starting a new request while a
+non-expired one is already pending, removing the ambiguity entirely
+rather than trying to disambiguate which request an OTP was "really"
+for after the fact.
+
+Top-up has a different, milder risk profile - each top-up gets its
+own independent Paystack checkout session, so a stray duplicate can't
+get confirmed instead of the real one the way transfer/withdrawal
+could. Still added a narrow (15s, same-amount) double-tap guard in
+`PaymentsService.initWalletTopUp()`, since a genuine duplicate tap
+still creates a second, separate pending checkout that could confuse
+the user or, if somehow both were completed, double-charge them.
+Deliberately narrow so it never blocks a legitimate second top-up
+attempt made shortly after (e.g. retrying following a real failure).
+
+Found and fixed a second, separate, pre-existing gap while adding
+that guard: `initWalletTopUp()` had no error handling around the
+actual Paystack `initializeTransaction()` call - a genuine failure
+(Paystack downtime, network error) left the `PaymentRecord` orphaned
+in `PENDING` forever, with nothing to ever resolve it. Now wrapped in
+a try/catch that marks the record `FAILED` with a reason, matching
+the same defensive pattern `WithdrawalsService`'s Paystack-transfer
+call already used.
+
+Verified live against a real running server: a genuine transfer/
+withdrawal double-tap is now correctly rejected with a clear message,
+confirmed for both flows independently. Top-up's guard and the new
+failure-handling were verified via dedicated unit tests instead (12
+new tests total across all three services), since genuinely
+simulating a successful vs. failed Paystack checkout call isn't
+something a live run against this sandbox's fake credentials can do
+reliably.
+
+Full regression clean: 239 tests, full e2e suite.
+
+Still open: a standalone financial-flow diagram and full changed-table
+list as one document, as Batch 4's deliverable section specifically
+asks for - the information exists spread across this README's entries
+but hasn't been compiled into a single document yet.
+
+## Batch 4 continued - production payment safety, refund tests, Paystack reconciliation
+
+**Correction to an earlier claim in this project's own history**: refunds
+were previously reported as "not built." That was wrong - a genuinely
+careful, production-grade refund flow already existed in
+`PaymentsService` (full/partial refunds, atomic reserve-then-finalize
+with a row lock to prevent a concurrent second refund request,
+correct handling of both Paystack's synchronous and
+webhook-confirmed-later refund outcomes, idempotent webhook handling).
+What was actually missing was test coverage, not the feature - added
+15 tests covering every scenario Batch 4 lists (full refund, partial
+refund, concurrent/duplicate refund rejection, simulated-payment
+rejection, both Paystack response paths, error recovery on a failed
+Paystack call). All passing against the real, pre-existing logic, not
+new code written to pass them.
+
+**Production payment safety - a real, closed gap.** `PaymentsService`
+correctly falls back to a clearly-flagged simulated success when
+Paystack isn't configured, genuinely useful for local dev/CI - but
+nothing prevented that fallback from being live in production if
+Paystack was ever left unconfigured there, which would mean real ride
+payments silently "succeed" with no money ever moving. Added
+`assertProductionPaymentsAreConfigured()` to `env.validation.ts`,
+called from `main.ts` alongside the existing JWT-secret/storage
+production checks - refuses to boot with `NODE_ENV=production` and no
+`PAYSTACK_SECRET_KEY`. Verified live against a real running process:
+genuinely refuses to start without it, boots fine with it.
+
+**Paystack-side reconciliation - the genuine gap, now built.** The
+existing `ReconciliationService` (cash-commission debt) and
+`LedgerAuditService` (wallet ledger integrity, from the previous
+pass) both operate entirely on this backend's own records - neither
+ever checks whether those records agree with what Paystack itself
+shows. New `PaystackReconciliationService`: for a given date range,
+compares local `payment_records` against `PaystackService.
+listTransactions()` (new method, paginates through Paystack's real
+`GET /transaction` endpoint), flagging three genuinely distinct
+problems - a successful Paystack transaction with no local record at
+all (a possible missed webhook), one of our own SUCCESS records
+Paystack doesn't actually confirm, and an amount mismatch on a
+reference both sides agree exists. Deliberately read-only - a
+mismatch here needs a human to decide which side is actually wrong,
+not an automatic "fix." Correctly excludes simulated payments (never
+sent to Paystack by design, so their absence there isn't a
+discrepancy) and non-SUCCESS local records from the comparison. New
+admin endpoint: `GET /payments/admin/paystack-reconciliation?
+from=...&to=...`. 10 dedicated tests covering the comparison logic
+itself (a genuine match, each of the three issue types, the
+simulated/non-SUCCESS exclusions, a 1-kobo rounding tolerance).
+Endpoint validation (missing/invalid dates, admin-only access)
+verified live against a running server.
+
+**Ledger audit tests** - the discrepancy-detection system from the
+previous pass was proven only by a live end-to-end run, not real unit
+tests. Added 8, covering `checkWalletChain()`'s full-chain-walk logic
+(a genuinely consistent history, a break mid-chain, a final-balance
+mismatch with an otherwise-consistent chain, a wallet with no history
+at all) and `resolve()`'s state transitions.
+
+**Financial immutability - audited, genuinely confirmed to already
+hold, not a gap.** Searched the entire backend for any delete/remove
+call, or any fetch-and-mutate of an existing row, against every
+financial ledger entity (`WalletTransaction`, `PaymentRecord`,
+`FleetTransaction`, `CorporateTransaction`, `WithdrawalRequest`,
+`WalletTransferRequest`, `CashReconciliation`,
+`LedgerDiscrepancy`). Found nothing outside each entity's own,
+already-audited service - `WalletTransaction` rows in particular are
+genuinely create-only everywhere in this codebase, never fetched back
+and modified. `PaymentRecord`'s own mutable status/refundedAmount
+fields are a deliberate, different thing (tracking a payment's own
+lifecycle, not rewriting a historical ledger entry) and were already
+covered by the refund tests above.
+
+New this round: `src/payments/paystack-reconciliation.service.ts`
+(+`.spec.ts`), `src/payments/payments.service.refunds.spec.ts`,
+`src/reconciliation/ledger-audit.service.spec.ts`. Extended:
+`config/env.validation.ts`, `main.ts`, `payments/paystack/paystack.
+service.ts` (new `listTransactions()`), `payments.controller.ts`/
+`.module.ts`.
+
+Full regression clean: 227 tests, full e2e suite.
+
+**Not yet done - genuinely still open**: dedicated idempotency keys
+as an explicit, reusable mechanism for client-initiated financial
+requests (a double-tap or network retry on top-up/transfer/withdrawal
+initiation) - a real, separate piece of work, not started. A
+standalone financial-flow diagram and full changed-table list as a
+single document, as Batch 4's deliverable section asks for
+specifically - the information exists spread across this README's
+entries but hasn't been compiled into one document.
+
+## Batch 4 broader scope - audit findings + real ledger discrepancy detection
+
+Audited what already existed against Batch 4's requirements before
+building anything, same approach as every batch this session. Found
+this codebase substantially more complete on the financial side than
+expected:
+
+- All four wallet types Batch 4 asks for already exist and are
+  already properly ledger-backed: passenger/driver share `Wallet` +
+  `WalletTransaction`, fleet has its own `FleetWallet` +
+  `FleetTransaction`, corporate has `CorporateAccount` +
+  `CorporateTransaction` - all three verified to use the same
+  pattern (row-locked transaction, balance + ledger row updated
+  together atomically), not three different implementations of
+  varying quality.
+- Cash-trip commission handling already does real debt tracking, not
+  silent loss: `ReconciliationService` records what's owed when an
+  immediate debit fails, and a BullMQ-queued listener automatically
+  retries settlement every time that wallet is next credited -
+  genuinely working, not just structured to look like it.
+- Payment webhook idempotency (duplicate Paystack webhooks) already
+  verified solid back in the Batch 1 audit pass.
+
+Real, concrete gap found: none of that existing "reconciliation"
+infrastructure actually checks whether a wallet's recorded balance
+matches what its own transaction history says it should be -
+Batch 4's actual "identify discrepancies automatically" requirement
+was genuinely unaddressed. Built `LedgerAuditService`: a cheap,
+single-SQL-query scan across every wallet (comparing current balance
+against the most recent ledger entry's `balanceAfter`) runs daily via
+cron and on demand; a deeper per-wallet full-chain walk (verifying
+every link in a wallet's entire transaction history, not just the
+latest one) is available for investigating anything the quick scan
+flags. Found discrepancies are persisted (`ledger_discrepancies`
+table) for admin review/resolution, not just logged and forgotten.
+
+Verified live end to end against a real running server, not just unit
+tests: built a genuinely consistent wallet via the real
+`WalletsService.credit()/debit()` path (not raw SQL) and confirmed it
+passes cleanly; deliberately corrupted a wallet's balance directly via
+SQL (simulating a bug or direct tampering, bypassing the service
+entirely) and confirmed the scan genuinely catches it, the deep chain
+check correctly identifies it's broken, resolving it clears the open
+record, and - importantly - a wallet that's marked resolved but is
+still actually broken correctly gets re-flagged on the next scan,
+since "resolved" means an admin looked at it, not that the problem is
+permanently suppressed.
+
+New: `src/reconciliation/ledger-audit.service.ts`,
+`src/reconciliation/entities/ledger-discrepancy.entity.ts`. Extended:
+`reconciliation.controller.ts`/`.module.ts`,
+`dto/reconciliation.dto.ts`.
+
+Full regression clean: 194 tests, full e2e suite.
+
+**Not yet done - genuinely still open from Batch 4**: production-mode
+payment safety (Batch 4 explicitly requires simulated payments
+disabled and missing Paystack config to fail fast when
+`NODE_ENV=production` - checked, this doesn't exist yet, a real gap).
+Paystack-side reconciliation (comparing our `payment_records` against
+Paystack's own transaction list for discrepancies, as opposed to the
+wallet-ledger-integrity check just built) - not built. Full/partial
+refund flows, dedicated idempotency keys on financial requests beyond
+what already exists, and a financial-flow diagram - none of these
+addressed. No dedicated tests for the new `LedgerAuditService` either
+- covered only by the live run above.
+
+## Batch 4 (partial) - phone-OTP-gated withdrawals and transfers, real SMS delivery
+
+Prioritized the explicit, concrete request (add passenger withdrawal;
+require phone OTP for both withdraw and transfer, in both apps) over
+Batch 4's much larger financial-audit scope, which remains untouched -
+noted directly in conversation.
+
+Real finding: wallet transfer already had OTP confirmation built
+(a genuinely careful two-step initiate/confirm flow with its own
+pending-request TTL) - but the code was sent by email, not phone.
+Switched to phone per instruction. While doing this, found a second,
+more significant gap: OtpService never actually sent anything via SMS
+at all - it only ever returned the code directly in the API response,
+with a TODO comment for wiring a provider. Found that Twilio was
+already fully configured and working for notifications elsewhere in
+this codebase, just never connected to OTP. Wired it in: OTP now
+genuinely sends real SMS when Twilio is configured. This also
+surfaced a real, closed security gap: the code was being returned in
+the API response unconditionally, everywhere, forever - harmless
+while no real delivery existed to bypass, but a genuine hole once
+delivery became real, since anyone could otherwise read the code
+straight from the response and skip needing the actual phone. Now
+only returned when delivery genuinely didn't happen elsewhere.
+
+Withdrawal previously had zero additional verification at all - a
+single request debited the wallet and called Paystack immediately.
+Rebuilt as the same two-step initiate/confirm shape as transfer,
+reusing (not reimplementing) the existing careful
+debit-then-transfer-then-refund-on-failure logic, just moved into the
+confirm step. Both flows now require a verified phone number before
+they can even be started.
+
+`withdrawals.service.ts` was already completely generic (works off
+`userId`, never driver-specific) - so passenger withdrawal required
+no new backend logic, only new frontend screens: bank-account
+management and a withdraw flow, both new to the passenger app,
+mirroring the driver app's existing (now also upgraded) screens.
+
+Also fixed, found along the way: the passenger app's transfer
+confirmation screen has always tried to display a recipient phone
+number the backend never actually sent (only email) - that field has
+been blank in production. Backend now returns both, masked.
+
+Verified live against a real running server: phone-not-verified
+correctly blocked, OTP genuinely created and stored, wrong code
+correctly rejected, correct code proceeds and correctly refunds if
+the downstream bank transfer fails - no money ever left unaccounted
+for in any path tested.
+
+Both apps type-check and build clean. Backend: 194 tests, full e2e
+suite, all clean.
+
+**Not yet done - genuinely still needed**: dedicated unit tests for
+the new/changed `WalletTransfersService`/`WithdrawalsService` OTP
+logic itself (both had zero test coverage before this pass, still do
+now - covered only by the live end-to-end run above, not real unit
+tests). The rest of Batch 4 (idempotency keys, ledger/reconciliation
+hardening, cash-commission liability tracking, production-mode
+payment-simulation lockout) is entirely untouched.
+
+## Batch 3 - real-time ride/delivery status over WebSocket
+
+Real gap found and confirmed directly in the actual app code, not
+assumed: the passenger app's active-ride screen already opens a
+WebSocket connection (TrackingGateway, `/tracking` namespace) during
+a trip - but only ever used it for driver location. Ride status
+(accepted, arrived, started, completed) relied entirely on a 5-second
+REST polling loop the whole time, completely separate from that
+already-open socket. This is the exact gap Batch 3's core objective
+describes.
+
+Added `RidesService.emitStatusChanged()` / `LogisticsService.
+emitDeliveryStatusChanged()` - a new, consistently-shaped event
+(`ride.status_changed` / `delivery.status_changed`) fired alongside
+(not replacing) every existing status-specific event, since those
+were each built for their own consumers (push notifications,
+incentives, loyalty) and several don't even carry the ride/delivery
+id, so they couldn't be used directly to broadcast to a specific
+room. Wired into every real transition: created, accepted, arrived,
+started, completed (including the payment-settlement-failure revert
+path, which needs its own broadcast so a client that already saw
+"completed" learns it reverted), cancelled, and AUTO dispatch's
+no-driver-found. Identical treatment for the full delivery lifecycle
+(requested, accepted, pickup arrived, picked up, in transit,
+delivered, cancelled).
+
+`TrackingGateway` listens for these and maps the internal status to
+an explicit, named client event (`ride:assigned`, `ride:driver_
+arrived`, `ride:started`, `ride:completed`, `ride:cancelled`, `ride:
+no_driver_found` and the delivery equivalents) rather than forwarding
+the raw internal status string - per "do not expose arbitrary
+internal events to clients."
+
+Verified live, not just unit-tested: wrote a real socket.io-client
+test script, connected it as an actual authenticated passenger,
+subscribed to a real ride, and triggered the real driver acceptance
+through the actual REST API in a separate request - confirmed the
+event genuinely arrives with the correct payload. Repeated for the
+entire lifecycle (assigned -> driver_arrived -> started -> completed).
+Also verified the explicit security requirement this way: an
+unrelated, real passenger account genuinely gets rejected
+(`"Not a participant in this ride"`) when attempting to subscribe to
+someone else's ride.
+
+Full regression clean: 194 tests (one existing test's assumption -
+that zero candidates found means zero events emitted at all -
+correctly invalidated by this change and fixed to check what it
+actually meant to check, that no *notification* event fires), full
+e2e suite.
+
+Not yet done from Batch 3: the passenger/driver apps don't listen for
+these new events yet (still need to move off pure polling, keeping it
+as the reconnection/state-sync fallback Batch 3 itself asks for), no
+safety/SOS event yet (a real, separate gap flagged earlier in this
+project), and the multi-instance Redis-adapter requirement still
+doesn't match this project's actual single-instance Render deployment
+- not built, for the same reason given directly when this batch was
+received.
+
+## Batch 2 continued - multi-factor driver ranking
+
+Previously flagged as a real, honest gap: ranking was purely ETA-based,
+not the weighted, multi-factor score Batch 2 asks for. Built properly
+on top of data that already existed rather than adding new tracking
+infrastructure speculatively - `totalTrips`/`cancelledTrips` were
+already on DriverProfile, offer accept/decline/expire outcomes were
+already recorded in `ride_offers`.
+
+`DriverRankingService.rank()` now computes a weighted score (still
+sorted descending) from four 0-1 "goodness" components:
+
+- **ETA** (`1 / (1 + etaMinutes)`) - kept dominant by default, since
+  pickup speed is what a waiting passenger actually feels most.
+- **Rating** (`rating / 5`).
+- **Cancellation rate** (`1 - cancelledTrips/totalTrips`) - but only
+  once a driver has enough trip history for the rate to mean
+  anything (`dispatch.ranking.minTripsForCancellationSignal`,
+  default 5). Below that, scores neutral (1.0) rather than punishing
+  a new driver for one cancellation out of very few trips - "do not
+  unfairly discriminate against drivers" applies most sharply here.
+  Verified with a dedicated test.
+- **Acceptance rate** - computed from real `ride_offers` rows
+  (accepted vs declined/expired, excluding pending/superseded, which
+  aren't a genuine driver decision), via one batched query for every
+  candidate being ranked, not one query per candidate - same cost
+  discipline as the existing ETA/routing step. Same
+  not-enough-history-yet neutral default
+  (`dispatch.ranking.minOffersForAcceptanceSignal`, default 5).
+
+All four weights (`dispatch.ranking.{eta,rating,cancellation,
+acceptance}Weight`) are genuinely configurable via environment
+variables - defaults are a reasonable starting point, not a
+finalized business decision, and worth tuning against real
+acceptance/completion data once there's enough of it.
+
+`RideOffer` is now also registered directly in `RankingModule` (not
+via importing `DispatchModule`, which already imports `RankingModule`
+- that would have been circular) - the standard safe pattern for
+sharing a TypeORM entity across otherwise-unrelated modules.
+
+The admin `/admin/dispatch/:rideId/candidates` endpoint (from the
+previous pass) now also runs its results through this same ranking,
+so an operator debugging "why hasn't driver X been offered this ride"
+sees the real order and score breakdown, not just the raw eligible
+set.
+
+Verified live against a running server, not just unit tests: two
+identically-positioned drivers (rating 3.0 vs 5.0) - the better-rated
+one genuinely scored and ranked higher, with the exact breakdown
+visible in the response. 14 dedicated ranking tests (5 new, including
+the new-driver-protection and configurable-weights cases), 194 tests
+total across the backend, full e2e suite - all clean.
+
+## Batch 2 - admin dispatch controls, and a real vehicle-status gap found while testing them
+
+Before building anything, audited what already existed against Batch
+2's requirements rather than assuming a rebuild was needed. Found the
+dispatch system substantially more complete than expected:
+CandidateSearchService (Redis GEO search -> eligibility filtering ->
+progressive radius expansion, all already correctly bounded and
+metriced), DriverRankingService (cost-conscious ETA-based ranking,
+only routes the top N candidates rather than every eligible driver),
+AutoDispatchService (real retry-on-decline/timeout, never re-offers
+the same driver twice, race-safe NO_DRIVER_FOUND marking), and
+DispatchService's periodic sweep correctly detecting ignored (not
+just declined) offers. Real existing gap: ride acceptance is
+genuinely atomic and race-tested, but there was no admin-facing way
+to see any of this - no dispatch timeline, no live candidate
+inspection, no manual intervention.
+
+Built AdminDispatchController (`/admin/dispatch/:rideId/...`):
+timeline, candidates (re-runs the real live eligibility search, not
+a snapshot), manual assign, cancel-offer, re-dispatch. Every mutating
+endpoint reuses the existing, already-tested service methods
+(RidesService.acceptRide()'s atomic reservation, DispatchService's
+offer bookkeeping, AutoDispatchService's own search) rather than a
+parallel implementation. Audited via the existing @Audit decorator.
+
+Verified live, end to end: a ride stuck with zero drivers online,
+admin correctly sees an empty timeline and empty candidates, a real
+driver brought online and correctly appears once genuinely eligible,
+manual assignment correctly and atomically accepts the ride,
+re-dispatching an already-accepted ride is correctly rejected, and a
+non-admin is correctly blocked from all of it.
+
+Real bug found via this live testing, not assumed: `acceptRide()` and
+`acceptDelivery()` both validated that a driver's vehicle exists and
+matches the requested category/type, but never checked
+`vehicle.status === ACTIVE` - meaning a driver whose vehicle was still
+`pending_inspection`, in `maintenance`, or explicitly `deactivated`
+for a safety issue could still directly accept a ride or delivery via
+the open accept path, despite correctly never appearing as an
+eligible dispatch candidate through the normal search. Fixed
+identically in both places. Added dedicated tests confirming the
+rejection (not just fixed the existing mocks to route around it).
+
+Not done from Batch 2: driver ranking is still purely ETA-based, not
+the multi-factor score (rating, acceptance/cancellation behavior,
+workload) the batch describes - a real, honest gap, not yet built.
+The "multiple backend instances" distributed-locking requirement
+still doesn't match this project's single-instance Render deployment
+and wasn't built for that reason - see the note given directly in
+conversation when this batch was received.
+
+Full regression clean: 189 unit tests (2 new), full e2e suite.
+
+## Batch audit pass 1 - authorization gaps and missing indexes
+
+Systematic pass through the highest-stakes categories (race conditions,
+payment idempotency, database constraints, authorization, state
+machine enforcement, high-volume query indexes) rather than a shallow
+sweep of every module. Several areas checked turned out to already be
+solid: ride acceptance is genuinely atomic (two drivers can't accept
+the same ride, one driver can't get double-booked), Paystack webhook
+handling is properly idempotent under a real database row lock, key
+unique constraints already exist, and every ride status transition
+method already enforces valid prior states.
+
+Two real authorization gaps found and fixed:
+- `GET /ai/eta` had no guard at all - took raw coordinates from any
+  unauthenticated caller and directly triggered a paid, quota-limited
+  Google Directions API call per request. Neither app actually calls
+  this endpoint (confirmed via search), so it was purely an exposed,
+  scriptable cost/abuse surface with zero legitimate use. Same for
+  `GET /ai/surge`, sitting right next to a properly-guarded sibling
+  endpoint (`demand-forecast`) with no guard of its own - clearly an
+  oversight, not a deliberate choice. Both now require the same
+  ops/dispatch role set as `demand-forecast`.
+- `POST /webhooks/test-receiver` - a dev-only debugging tool explicitly
+  commented "not meant for production use" - was completely open in
+  the actual deployed backend. Now admin-only.
+
+Verified live: all three correctly return 401 with no token. Full
+regression (187 tests + e2e suite) clean afterward.
+
+Two missing-index gaps found and fixed:
+- `driver_profiles` had zero indexes on approvalStatus, availability,
+  or locationUpdatedAt, despite `DriversService.findNearby()`
+  filtering on all three together on every call. This is the legacy
+  nearby-drivers lookup (manual dispatch offer flow, dispatch
+  console's nearby-drivers view) - the primary, high-frequency
+  dispatch path (`CandidateSearchService`) already avoids this
+  entirely via Redis GEO search, bounding its Postgres query to a
+  handful of candidate ids rather than scanning the table, so this is
+  real but not the platform's single biggest bottleneck. Added a
+  composite index matching the query's actual filter shape.
+- `notifications` had `userId` indexed alone, but the actual access
+  pattern (a user's notification list, newest first) benefits from a
+  composite `(userId, createdAt)` index. Added.
+
+Confirmed both indexes are genuinely created on a fresh boot (checked
+directly via `pg_indexes`), full regression clean.
+
 ## Availability endpoint - unrecognized values no longer crash the server
 
 Real robustness gap found while investigating a live bug report: `PATCH

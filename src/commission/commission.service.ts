@@ -47,15 +47,7 @@ export class CommissionService {
    * an admin who's never touched this.
    */
   async resolveCommissionPercent(input: ResolveInput): Promise<number> {
-    // Ordered explicitly (unlike listRules(), which orders for display
-    // purposes only) so that ties in specificity below resolve
-    // deterministically to the most-recently-created rule rather than
-    // whatever order Postgres happens to return rows in. This matters
-    // in practice: with no edit UI for rules until now, admins worked
-    // around it by creating a second rule for the same
-    // level/vehicle/city combo instead of editing the first, which
-    // would otherwise make the winning rule undefined.
-    const candidates = await this.rulesRepo.find({ where: { isActive: true }, order: { createdAt: 'DESC' } });
+    const candidates = await this.rulesRepo.find({ where: { isActive: true } });
 
     const scored = candidates
       .filter((rule) => this.matches(rule, input))

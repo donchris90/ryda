@@ -17,6 +17,15 @@ export enum EtaSource {
 export interface RankedCandidate extends CandidateResult {
   etaMinutes: number;
   etaSource: EtaSource;
+  /** Final weighted score this candidate was sorted by - higher is better. */
+  score: number;
+  /** The individual 0-1 components score was computed from, for debugging/observability - not re-derivable from score alone once weights are combined. */
+  scoreBreakdown: {
+    etaScore: number;
+    ratingScore: number;
+    cancellationScore: number;
+    acceptanceScore: number;
+  };
 }
 
 export interface RankingOutcome {

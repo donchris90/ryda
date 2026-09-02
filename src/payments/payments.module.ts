@@ -5,12 +5,13 @@ import { SavedCard } from './entities/saved-card.entity';
 import { PaymentsService } from './payments.service';
 import { PaymentsController } from './payments.controller';
 import { PaystackService } from './paystack/paystack.service';
+import { PaystackReconciliationService } from './paystack-reconciliation.service';
 import { WalletsModule } from '../wallets/wallets.module';
 
 @Module({
   imports: [TypeOrmModule.forFeature([PaymentRecord, SavedCard]), forwardRef(() => WalletsModule)],
-  providers: [PaymentsService, PaystackService],
+  providers: [PaymentsService, PaystackService, PaystackReconciliationService],
   controllers: [PaymentsController],
-  exports: [PaymentsService, PaystackService],
+  exports: [PaymentsService, PaystackService, PaystackReconciliationService],
 })
 export class PaymentsModule {}

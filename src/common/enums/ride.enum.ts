@@ -1,12 +1,6 @@
 export enum RideStatus {
   SCHEDULED = 'scheduled',
   REQUESTED = 'requested',
-  // Pool candidate sitting in the batch-matching window, waiting to see
-  // if a compatible partner request shows up before it either pairs off
-  // (-> SEARCHING, now carrying a poolGroupId) or the window expires and
-  // it falls back to a normal solo request (-> SEARCHING, unpooled).
-  // See PoolMatchingService. Never used for non-pooled rides.
-  POOL_MATCHING = 'pool_matching',
   SEARCHING = 'searching',
   ACCEPTED = 'accepted',
   ARRIVING = 'arriving',

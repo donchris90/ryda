@@ -4,7 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, Repository, Between } from 'typeorm';
+import { Repository, Between } from 'typeorm';
 import { Wallet } from './entities/wallet.entity';
 import { WalletTransaction } from './entities/wallet-transaction.entity';
 import {
@@ -76,79 +76,51 @@ export class WalletsService {
     referenceId?: string,
     description?: string,
   ): Promise<Wallet> {
-    const wallet = await this.walletsRepo.manager.transaction((manager) =>
-      this.creditWithManager(manager, walletId, amount, category, referenceId, description),
-    );
-    this.events.emit('wallet.updated', { walletId: wallet.id, userId: wallet.userId, direction: 'credit', amount, category });
-    this.metricsService.walletTransactionsTotal.inc({ direction: 'credit', category });
-    return wallet;
-  }
-
-  /**
-   * Same credit logic as `credit()`, but runs inside a transaction the
-   * *caller* already opened, rather than starting its own. This exists
-   * specifically so a caller like PaymentsService.markSuccessFromWebhook
-   * can make "mark this payment settled" and "credit the wallet for it"
-   * a single atomic unit — see that method's comment for why splitting
-   * them into two separate transactions is a real bug (a crash between
-   * the two leaves the payment marked SUCCESS with the credit never
-   * applied, and unrecoverable, since a retried webhook would then see
-   * the payment as already-processed and skip crediting again).
-   *
-   * Deliberately doesn't emit `wallet.updated`/increment metrics itself —
-   * those should only fire once the *caller's* transaction actually
-   * commits, not from inside it. Callers using this variant are
-   * responsible for emitting/incrementing after their transaction
-   * resolves, the same way markSuccessFromWebhook emits `payment.confirmed`
-   * only after its own transaction returns.
-   */
-  async creditWithManager(
-    manager: EntityManager,
-    walletId: string,
-    amount: number,
-    category: TransactionCategory,
-    referenceId?: string,
-    description?: string,
-  ): Promise<Wallet> {
     if (amount <= 0) throw new BadRequestException('Amount must be positive');
 
-    const wallet = await manager.findOne(Wallet, {
-      where: { id: walletId },
-      lock: { mode: 'pessimistic_write' },
-    });
-    if (!wallet) throw new NotFoundException('Wallet not found');
+    return this.walletsRepo.manager.transaction(async (manager) => {
+      const wallet = await manager.findOne(Wallet, {
+        where: { id: walletId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!wallet) throw new NotFoundException('Wallet not found');
 
-    const newBalance = parseFloat(wallet.balance) + amount;
+      const newBalance = parseFloat(wallet.balance) + amount;
 
-    // Enforced on top-ups only, not on earnings/bonuses/cashback settling
-    // in — a wallet limit is an AML/funding-source control, not something
-    // that should block a driver from being paid for a completed trip.
-    if (category === TransactionCategory.TOPUP) {
-      const maxBalance = await this.settingsService.getNumber(
-        SETTING_KEYS.WALLET_MAX_BALANCE,
-        10_000_000,
-      );
-      if (newBalance > maxBalance) {
-        throw new BadRequestException(
-          `Top-up would exceed the maximum wallet balance of ${maxBalance}`,
+      // Enforced on top-ups only, not on earnings/bonuses/cashback settling
+      // in — a wallet limit is an AML/funding-source control, not something
+      // that should block a driver from being paid for a completed trip.
+      if (category === TransactionCategory.TOPUP) {
+        const maxBalance = await this.settingsService.getNumber(
+          SETTING_KEYS.WALLET_MAX_BALANCE,
+          10_000_000,
         );
+        if (newBalance > maxBalance) {
+          throw new BadRequestException(
+            `Top-up would exceed the maximum wallet balance of ${maxBalance}`,
+          );
+        }
       }
-    }
 
-    wallet.balance = newBalance.toFixed(2);
-    await manager.save(wallet);
+      wallet.balance = newBalance.toFixed(2);
+      await manager.save(wallet);
 
-    await manager.save(WalletTransaction, {
-      walletId: wallet.id,
-      direction: TransactionDirection.CREDIT,
-      category,
-      amount: amount.toFixed(2),
-      balanceAfter: wallet.balance,
-      referenceId,
-      description,
+      await manager.save(WalletTransaction, {
+        walletId: wallet.id,
+        direction: TransactionDirection.CREDIT,
+        category,
+        amount: amount.toFixed(2),
+        balanceAfter: wallet.balance,
+        referenceId,
+        description,
+      });
+
+      return wallet;
+    }).then((w) => {
+      this.events.emit('wallet.updated', { walletId: w.id, userId: w.userId, direction: 'credit', amount, category });
+      this.metricsService.walletTransactionsTotal.inc({ direction: 'credit', category });
+      return w;
     });
-
-    return wallet;
   }
 
   async debit(

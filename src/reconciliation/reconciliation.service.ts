@@ -67,42 +67,6 @@ export class ReconciliationService {
     return this.repo.find({ where: { status: ReconciliationStatus.PENDING }, order: { createdAt: 'ASC' } });
   }
 
-  /**
-   * Aggregate totals for the admin reconciliation dashboard. "Overdue" is
-   * deliberately not broken out as its own bucket — nothing in this module
-   * currently tracks a due date per debt (they're settled opportunistically
-   * whenever the wallet next gets credited, not against a deadline), so an
-   * "overdue" figure would have no real definition behind it yet.
-   */
-  async getSummary(): Promise<{
-    pendingCount: number;
-    pendingTotal: string;
-    settledCount: number;
-    settledTotal: string;
-    writtenOffCount: number;
-    writtenOffTotal: string;
-    driversWithPendingDebt: number;
-  }> {
-    const [pending, settled, writtenOff] = await Promise.all([
-      this.repo.find({ where: { status: ReconciliationStatus.PENDING } }),
-      this.repo.find({ where: { status: ReconciliationStatus.SETTLED } }),
-      this.repo.find({ where: { status: ReconciliationStatus.WRITTEN_OFF } }),
-    ]);
-
-    const sum = (rows: CashReconciliation[]) =>
-      rows.reduce((total, r) => total + parseFloat(r.amountOwed), 0).toFixed(2);
-
-    return {
-      pendingCount: pending.length,
-      pendingTotal: sum(pending),
-      settledCount: settled.length,
-      settledTotal: sum(settled),
-      writtenOffCount: writtenOff.length,
-      writtenOffTotal: sum(writtenOff),
-      driversWithPendingDebt: new Set(pending.map((r) => r.driverId).filter(Boolean)).size,
-    };
-  }
-
   async writeOff(id: string, adminUserId: string, reason: string): Promise<CashReconciliation> {
     const item = await this.repo.findOne({ where: { id } });
     if (!item) throw new NotFoundException('Reconciliation item not found');

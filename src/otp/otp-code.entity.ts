@@ -3,6 +3,7 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 
 export enum OtpPurpose {
   PHONE_VERIFICATION = 'phone_verification',
   WALLET_TRANSFER = 'wallet_transfer',
+  WALLET_WITHDRAWAL = 'wallet_withdrawal',
 }
 
 @Entity('otp_codes')

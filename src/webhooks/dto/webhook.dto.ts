@@ -1,4 +1,4 @@
-import { ArrayNotEmpty, IsArray, IsOptional, IsString, IsUrl } from 'class-validator';
+import { ArrayNotEmpty, IsArray, IsString, IsUrl } from 'class-validator';
 
 export class CreateWebhookSubscriptionDto {
   @IsString()
@@ -11,20 +11,4 @@ export class CreateWebhookSubscriptionDto {
   @ArrayNotEmpty()
   @IsString({ each: true })
   events: string[];
-}
-
-export class UpdateWebhookSubscriptionDto {
-  @IsOptional()
-  @IsString()
-  partnerName?: string;
-
-  @IsOptional()
-  @IsUrl({ require_tld: false })
-  url?: string;
-
-  @IsOptional()
-  @IsArray()
-  @ArrayNotEmpty()
-  @IsString({ each: true })
-  events?: string[];
 }

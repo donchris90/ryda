@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { EntityManager, Repository } from 'typeorm';
+import { MoreThan, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { PaymentRecord, PaymentStatus } from './entities/payment-record.entity';
 import { SavedCard } from './entities/saved-card.entity';
@@ -112,8 +112,32 @@ export class PaymentsService {
     if (amount < minAmount)
       throw new BadRequestException(`Minimum top-up amount is ₦${minAmount}.`);
 
+    // Narrow double-tap/retry guard - not the same shared-OTP
+    // correctness risk as transfer/withdrawal (each top-up gets its
+    // own independent Paystack checkout session, so a stray duplicate
+    // can't accidentally get confirmed instead of the real one), but a
+    // double-tap still genuinely creates a second, separate pending
+    // checkout for the same amount that could confuse the user or,
+    // if they somehow complete both, double-charge them. 15s window is
+    // deliberately narrow so it only catches an accidental repeat tap,
+    // not a genuine retry after a failed first attempt made moments later.
+    const veryRecentDuplicate = await this.paymentsRepo.findOne({
+      where: {
+        userId,
+        amount: amount.toFixed(2),
+        status: PaymentStatus.PENDING,
+        createdAt: MoreThan(new Date(Date.now() - 15_000)),
+      },
+      order: { createdAt: 'DESC' },
+    });
+    if (veryRecentDuplicate) {
+      throw new ConflictException(
+        'A top-up for this amount was just started — check your payment options, or wait a moment before trying again.',
+      );
+    }
+
     const reference = `wallet-topup-${randomUUID()}`;
-    await this.paymentsRepo.save(
+    const record = await this.paymentsRepo.save(
       this.paymentsRepo.create({
         rideId: null,
         userId,
@@ -124,24 +148,36 @@ export class PaymentsService {
       }),
     );
 
-    const init = await this.paystack.initializeTransaction({
-      email,
-      amountKobo: Math.round(amount * 100),
-      reference,
-      channels: ['card', 'bank_transfer', 'ussd'],
-      metadata: { purpose: 'wallet_topup', userId },
-      // Without this, Paystack shows its own generic success page in
-      // the browser with no automatic way back into the app — the
-      // user has to manually switch back, and the wallet doesn't
-      // visibly update until they do. This deep-links straight back
-      // to the passenger app (see rydapassengerapp:// scheme in
-      // app.config.js), where a Linking listener catches it and
-      // triggers a real balance refresh, not just relying on
-      // useFocusEffect firing whenever the user happens to return.
-      callbackUrl: 'rydapassengerapp://wallet-topup-complete',
-    });
+    try {
+      const init = await this.paystack.initializeTransaction({
+        email,
+        amountKobo: Math.round(amount * 100),
+        reference,
+        channels: ['card', 'bank_transfer', 'ussd'],
+        metadata: { purpose: 'wallet_topup', userId },
+        // Without this, Paystack shows its own generic success page in
+        // the browser with no automatic way back into the app — the
+        // user has to manually switch back, and the wallet doesn't
+        // visibly update until they do. This deep-links straight back
+        // to the passenger app (see rydapassengerapp:// scheme in
+        // app.config.js), where a Linking listener catches it and
+        // triggers a real balance refresh, not just relying on
+        // useFocusEffect firing whenever the user happens to return.
+        callbackUrl: 'rydapassengerapp://wallet-topup-complete',
+      });
 
-    return { authorizationUrl: init.authorizationUrl, reference };
+      return { authorizationUrl: init.authorizationUrl, reference };
+    } catch (err) {
+      // The initialize call itself failed (network/Paystack downtime) -
+      // mark it FAILED rather than leaving an orphaned PENDING record
+      // that nothing would ever resolve, and that would otherwise
+      // block a genuine retry via the duplicate-guard above.
+      record.status = PaymentStatus.FAILED;
+      record.failureReason = err instanceof Error ? err.message : 'Could not initialize top-up';
+      await this.paymentsRepo.save(record);
+      throw err;
+    }
+
   }
 
   /**
@@ -151,13 +187,6 @@ export class PaymentsService {
    * anything in the webhook payload itself — the signature check
    * already prevents a tampered payload, but crediting from our own
    * record is the more robust pattern regardless.
-   */
-  /**
-   * Was called separately by the webhook controller after
-   * markSuccessFromWebhook() returned — kept as a thin wrapper (still
-   * used nowhere else) but no longer the actual crediting path for the
-   * webhook itself. See markSuccessFromWebhook()'s comment for why that
-   * split was a real bug.
    */
   async creditWalletFromTopUp(record: PaymentRecord): Promise<void> {
     const wallet = await this.walletsService.getByUserId(record.userId);
@@ -552,35 +581,10 @@ export class PaymentsService {
    * was a replay — every side effect (wallet credit, event emission,
    * card tokenization) must be skipped in that case.
    */
-  /**
-   * Marks a payment settled from Paystack's `charge.success` webhook, and —
-   * when `purpose === 'wallet_topup'` — credits the wallet in the SAME
-   * database transaction as that status flip, not as a separate step
-   * afterward.
-   *
-   * That used to be two transactions: this one flipped the payment to
-   * SUCCESS, and the controller called creditWalletFromTopUp() as a
-   * separate follow-up step once this one returned. If the process
-   * crashed, the wallet service was briefly down, or that second call
-   * simply threw, the payment was left permanently marked SUCCESS with
-   * the wallet never credited — real money charged by Paystack, gone
-   * from the passenger's perspective. Worse, it was unrecoverable:
-   * Paystack retries a webhook that didn't 200, but the retry's first
-   * step is this method, which would see status already SUCCESS and
-   * return `alreadyProcessed: true` — so the controller would skip
-   * crediting again on every subsequent retry, forever.
-   *
-   * Doing both in one transaction means the two outcomes are now
-   * genuinely coupled: if crediting throws, the whole transaction rolls
-   * back, the payment's status reverts to whatever it was before (not
-   * SUCCESS), and Paystack's retry actually gets another real attempt at
-   * both instead of silently losing the credit.
-   */
   async markSuccessFromWebhook(
     reference: string,
     gatewayReference: string,
-    purpose?: string,
-  ): Promise<{ record: PaymentRecord; alreadyProcessed: boolean; creditedWalletId?: string } | null> {
+  ): Promise<{ record: PaymentRecord; alreadyProcessed: boolean } | null> {
     const result = await this.paymentsRepo.manager.transaction(
       async (manager) => {
         const record = await manager.findOne(PaymentRecord, {
@@ -596,13 +600,7 @@ export class PaymentsService {
         record.status = PaymentStatus.SUCCESS;
         record.gatewayReference = gatewayReference;
         const saved = await manager.save(record);
-
-        let creditedWalletId: string | undefined;
-        if (purpose === 'wallet_topup') {
-          creditedWalletId = await this.creditWalletFromTopUpWithManager(manager, saved);
-        }
-
-        return { record: saved, alreadyProcessed: false as const, creditedWalletId };
+        return { record: saved, alreadyProcessed: false as const };
       },
     );
 
@@ -613,44 +611,7 @@ export class PaymentsService {
       });
     }
 
-    // wallet.updated fires here rather than inside creditWithManager()
-    // itself, on purpose — it should only go out once this outer
-    // transaction has actually committed, not from inside it (see
-    // WalletsService.creditWithManager()'s comment). NOTE: the
-    // walletTransactionsTotal Prometheus counter that credit() normally
-    // increments alongside this event is NOT incremented on this path —
-    // PaymentsService doesn't have MetricsService wired in, and adding
-    // it wasn't worth the extra module coupling just for this counter.
-    // A wallet-topup-via-webhook credit is real and correct either way;
-    // it just won't show up in that particular metric.
-    if (result && !result.alreadyProcessed && purpose === 'wallet_topup') {
-      this.events.emit('wallet.updated', {
-        walletId: result.creditedWalletId,
-        userId: result.record.userId,
-        direction: 'credit',
-        amount: parseFloat(result.record.amount),
-        category: TransactionCategory.TOPUP,
-      });
-    }
-
     return result;
-  }
-
-  /** The atomic-with-the-status-flip half of markSuccessFromWebhook() above. */
-  private async creditWalletFromTopUpWithManager(
-    manager: EntityManager,
-    record: PaymentRecord,
-  ): Promise<string> {
-    const wallet = await this.walletsService.getByUserId(record.userId);
-    await this.walletsService.creditWithManager(
-      manager,
-      wallet.id,
-      parseFloat(record.amount),
-      TransactionCategory.TOPUP,
-      record.reference,
-      'Wallet top-up',
-    );
-    return wallet.id;
   }
 
   async markFailedFromWebhook(

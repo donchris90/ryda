@@ -257,31 +257,6 @@ describe('CandidateSearchService', () => {
     expect(result.candidates.map((c) => c.driverUserId)).toEqual(['nice-suv']);
   });
 
-  it('excludes a plain car when the ride requires an accessible vehicle, even though a plain car normally matches Economy', async () => {
-    addOnlineDriver('plain-car', 3, { category: VehicleCategory.CAR });
-
-    const result = await service.search(rideInput({ rideCategory: RideCategory.ECONOMY, requiresAccessibleVehicle: true }));
-
-    expect(result.candidates).toHaveLength(0);
-  });
-
-  it('includes a WHEELCHAIR_ACCESSIBLE vehicle when the ride requires an accessible vehicle, regardless of tier', async () => {
-    addOnlineDriver('accessible-driver', 3, { category: VehicleCategory.WHEELCHAIR_ACCESSIBLE });
-
-    const economyResult = await service.search(
-      rideInput({ rideCategory: RideCategory.ECONOMY, requiresAccessibleVehicle: true }),
-    );
-    expect(economyResult.candidates.map((c) => c.driverUserId)).toEqual(['accessible-driver']);
-  });
-
-  it('excludes a WHEELCHAIR_ACCESSIBLE vehicle for Comfort when accessibility is not required and it has no admin approval', async () => {
-    addOnlineDriver('accessible-driver', 3, { category: VehicleCategory.WHEELCHAIR_ACCESSIBLE });
-
-    const result = await service.search(rideInput({ rideCategory: RideCategory.COMFORT }));
-
-    expect(result.candidates).toHaveLength(0);
-  });
-
   it('excludes an incompatible courier vehicle type (bike cannot cover a van-sized request)', async () => {
     addOnlineDriver('biker', 3, { category: VehicleCategory.MOTORCYCLE });
 

@@ -22,7 +22,6 @@ export enum FraudFlagSeverity {
 
 export enum FraudFlagStatus {
   OPEN = 'open',
-  ESCALATED = 'escalated',
   REVIEWED = 'reviewed',
   DISMISSED = 'dismissed',
 }

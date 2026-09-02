@@ -6,7 +6,7 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { UserRole } from '../common/enums/user-role.enum';
 import { User } from '../users/entities/user.entity';
 import { PromotionsService } from './promotions.service';
-import { CreateCampaignDto, CreatePromotionDto, UpdatePromotionDto, ValidatePromoDto } from './dto/promotions.dto';
+import { CreateCampaignDto, CreatePromotionDto, ValidatePromoDto } from './dto/promotions.dto';
 import { Audit } from '../audit/decorators/audit.decorator';
 import { RequirePermission } from '../common/permissions/require-permission.decorator';
 import { PermissionsGuard } from '../common/permissions/permissions.guard';
@@ -53,22 +53,6 @@ export class PromotionsController {
     return this.promotionsService.setActive(id, isActive === 'true');
   }
 
-  @Patch('admin/promotions/:id')
-  @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
-  @Roles(UserRole.ADMIN, UserRole.MARKETING, UserRole.SUPER_ADMIN)
-  @RequirePermission(Permission.PROMOTIONS_MANAGE)
-  @Audit('promotion.update')
-  update(@Param('id') id: string, @Body() dto: UpdatePromotionDto) {
-    return this.promotionsService.updatePromotion(id, dto);
-  }
-
-  @Get('admin/promotions/:id/stats')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.MARKETING, UserRole.SUPER_ADMIN)
-  stats(@Param('id') id: string) {
-    return this.promotionsService.getStats(id);
-  }
-
   @Get('admin/campaigns')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.MARKETING, UserRole.SUPER_ADMIN)
@@ -81,13 +65,5 @@ export class PromotionsController {
   @Roles(UserRole.ADMIN, UserRole.MARKETING, UserRole.SUPER_ADMIN)
   createCampaign(@Body() dto: CreateCampaignDto) {
     return this.promotionsService.createCampaign(dto);
-  }
-
-  @Patch('admin/campaigns/:id/active/:isActive')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.MARKETING, UserRole.SUPER_ADMIN)
-  @Audit('campaign.status_change')
-  setCampaignActive(@Param('id') id: string, @Param('isActive') isActive: string) {
-    return this.promotionsService.setCampaignActive(id, isActive === 'true');
   }
 }

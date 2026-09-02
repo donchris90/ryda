@@ -13,36 +13,13 @@ export const FEATURE_KEYS = {
   AI_DISPATCH: 'ai_dispatch',
 } as const;
 
-const DEFAULT_FLAGS: Array<{ key: string; name: string; description: string }> =
-  [
-    {
-      key: FEATURE_KEYS.RIDE_SHARING,
-      name: 'Ride Sharing',
-      description:
-        'Ride pooling — batch-matches compatible Economy requests into a shared trip at a discount before dispatching a driver. See PoolMatchingService.',
-    },
-    {
-      key: FEATURE_KEYS.AIRPORT_MODULE,
-      name: 'Airport Module',
-      description: 'Airport registry, geofence detection, driver pickup queue',
-    },
-    {
-      key: FEATURE_KEYS.LOGISTICS,
-      name: 'Logistics',
-      description: 'Parcel/food/grocery/pharmacy/courier delivery',
-    },
-    {
-      key: FEATURE_KEYS.PROMOTIONS,
-      name: 'Promotions',
-      description: 'Promo code redemption on ride requests',
-    },
-    {
-      key: FEATURE_KEYS.AI_DISPATCH,
-      name: 'AI Dispatch',
-      description:
-        'Weighted driver ranking in smart dispatch (falls back to plain nearest-first when off)',
-    },
-  ];
+const DEFAULT_FLAGS: Array<{ key: string; name: string; description: string }> = [
+  { key: FEATURE_KEYS.RIDE_SHARING, name: 'Ride Sharing', description: 'Carpooling / shared rides (not yet implemented — reserved key)' },
+  { key: FEATURE_KEYS.AIRPORT_MODULE, name: 'Airport Module', description: 'Airport registry, geofence detection, driver pickup queue' },
+  { key: FEATURE_KEYS.LOGISTICS, name: 'Logistics', description: 'Parcel/food/grocery/pharmacy/courier delivery' },
+  { key: FEATURE_KEYS.PROMOTIONS, name: 'Promotions', description: 'Promo code redemption on ride requests' },
+  { key: FEATURE_KEYS.AI_DISPATCH, name: 'AI Dispatch', description: 'Weighted driver ranking in smart dispatch (falls back to plain nearest-first when off)' },
+];
 
 @Injectable()
 export class FeatureFlagsService implements OnModuleInit {
@@ -71,11 +48,7 @@ export class FeatureFlagsService implements OnModuleInit {
     return this.repo.find({ order: { key: 'ASC' } });
   }
 
-  async upsert(
-    key: string,
-    updatedBy: string,
-    dto: UpsertFeatureFlagDto,
-  ): Promise<FeatureFlag> {
+  async upsert(key: string, updatedBy: string, dto: UpsertFeatureFlagDto): Promise<FeatureFlag> {
     let flag = await this.repo.findOne({ where: { key } });
     if (!flag) {
       flag = this.repo.create({ key, name: dto.name ?? key });

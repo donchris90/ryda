@@ -106,6 +106,8 @@ function buildService(overrides: Record<string, any> = {}) {
     ...overrides.metrics,
   };
 
+  const events = { emit: jest.fn(), ...overrides.events };
+
   const service = new AutoDispatchService(
     ridesRepo as any,
     candidateSearchService as any,
@@ -113,9 +115,10 @@ function buildService(overrides: Record<string, any> = {}) {
     dispatchService as any,
     config as any,
     metrics as any,
+    events as any,
   );
 
-  return { service, ridesRepo, candidateSearchService, driverRankingService, dispatchService, config, metrics };
+  return { service, ridesRepo, candidateSearchService, driverRankingService, dispatchService, config, metrics, events };
 }
 
 describe('AutoDispatchService', () => {

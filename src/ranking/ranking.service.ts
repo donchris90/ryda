@@ -1,9 +1,15 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { In, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
-import { GoogleMapsService, DistanceMatrixElement } from '../maps/google-maps.service';
+import { GoogleMapsService, DirectionsResult } from '../maps/google-maps.service';
 import { MetricsService } from '../observability/metrics.service';
 import { CandidateResult } from '../candidate-search/candidate-search.types';
+import { RideOffer, RideOfferStatus } from '../dispatch/entities/ride-offer.entity';
 import { EtaSource, RankedCandidate, RankingOutcome } from './ranking.types';
+
+/** Candidate shape before scoring runs - score/scoreBreakdown filled in afterward. */
+type UnscoredCandidate = Omit<RankedCandidate, 'score' | 'scoreBreakdown'>;
 
 /**
  * Ranks an already-eligible candidate pool by road ETA. This is
@@ -27,6 +33,8 @@ export class DriverRankingService {
     private readonly googleMaps: GoogleMapsService,
     private readonly config: ConfigService,
     private readonly metrics: MetricsService,
+    @InjectRepository(RideOffer)
+    private readonly offersRepo: Repository<RideOffer>,
   ) {}
 
   /**
@@ -52,80 +60,114 @@ export class DriverRankingService {
     const shortlisted = candidates.slice(0, etaCandidateLimit);
     const skipped = candidates.slice(etaCandidateLimit);
 
-    // Single Distance Matrix call for the whole shortlist (many
-    // origins -> one destination) instead of one getDirections() call
-    // per candidate. routingCallsMade now counts underlying HTTP calls
-    // to Google (0 or 1 here), not candidates attempted — the
-    // candidate-level outcome is still fully captured by
-    // routingFailures/fallbackUsed below, and no caller of rank()
-    // reads routingCallsMade today (see RankingOutcome doc comment).
     let routingCallsMade = 0;
     let routingFailures = 0;
     let fallbackUsed = false;
 
-    const stopTimer = this.metrics.etaCalculationDurationSeconds.startTimer();
-    let matrixResults: DistanceMatrixElement[] | null = null;
-    try {
-      routingCallsMade += 1;
-      matrixResults = await this.googleMaps.getDistanceMatrix(
-        shortlisted.map((candidate) => ({ lat: candidate.lat, lng: candidate.lng })),
-        pickup,
-      );
-    } catch (err) {
-      // GoogleMapsService.getDistanceMatrix() already catches its own
-      // failures and resolves null — this catch is belt-and-braces in
-      // case that contract ever changes. Ranking must never throw
-      // because a routing call misbehaved.
-      this.logger.warn(`Unexpected error calling Distance Matrix: ${(err as Error).message}`);
-    } finally {
-      stopTimer();
-    }
+    const rankedShortlist: UnscoredCandidate[] = await Promise.all(
+      shortlisted.map(async (candidate) => {
+        routingCallsMade += 1;
+        const stopTimer = this.metrics.etaCalculationDurationSeconds.startTimer();
+        let directions: DirectionsResult | null = null;
+        try {
+          directions = await this.googleMaps.getDirections({ lat: candidate.lat, lng: candidate.lng }, pickup);
+        } catch (err) {
+          // GoogleMapsService.getDirections() already catches its own
+          // failures and resolves null — this catch is belt-and-braces
+          // in case that contract ever changes. Ranking must never throw
+          // because a routing call misbehaved.
+          this.logger.warn(
+            `Unexpected error calling routing API for driver ${candidate.driverUserId}: ${(err as Error).message}`,
+          );
+        } finally {
+          stopTimer();
+        }
 
-    const rankedShortlist: RankedCandidate[] = shortlisted.map((candidate, index) => {
-      // matrixResults is null when the WHOLE call failed (not
-      // configured, network error, top-level Google error status) -
-      // every candidate falls back in that case. Otherwise each index
-      // has its own element result/null per DistanceMatrixElement's
-      // per-origin failure contract.
-      const element = matrixResults?.[index] ?? null;
+        if (directions) {
+          return { ...candidate, etaMinutes: directions.durationMin, etaSource: EtaSource.ROUTING };
+        }
 
-      if (element) {
-        return { ...candidate, etaMinutes: element.durationMin, etaSource: EtaSource.ROUTING };
-      }
+        routingFailures += 1;
+        fallbackUsed = true;
+        this.metrics.rankingRoutingFailuresTotal.inc();
+        this.logger.warn(
+          `Routing ETA unavailable for driver ${candidate.driverUserId} — using distance-based fallback, not treating it as a real routing result`,
+        );
 
-      routingFailures += 1;
-      fallbackUsed = true;
-      this.metrics.rankingRoutingFailuresTotal.inc();
-      this.logger.warn(
-        `Routing ETA unavailable for driver ${candidate.driverUserId} — using distance-based fallback, not treating it as a real routing result`,
-      );
-
-      return {
-        ...candidate,
-        etaMinutes: this.fallbackEtaMinutes(candidate.distanceKm),
-        etaSource: EtaSource.FALLBACK_DISTANCE,
-      };
-    });
+        return {
+          ...candidate,
+          etaMinutes: this.fallbackEtaMinutes(candidate.distanceKm),
+          etaSource: EtaSource.FALLBACK_DISTANCE,
+        };
+      }),
+    );
 
     // Candidates beyond the ETA shortlist were never routed — they still
     // get a ranked entry (so a caller with a very small eligible pool
     // isn't silently missing drivers), just always via the fallback
     // formula, clearly labeled as such.
-    const rankedSkipped: RankedCandidate[] = skipped.map((candidate) => ({
+    const rankedSkipped: UnscoredCandidate[] = skipped.map((candidate) => ({
       ...candidate,
       etaMinutes: this.fallbackEtaMinutes(candidate.distanceKm),
       etaSource: EtaSource.FALLBACK_DISTANCE,
     }));
     if (rankedSkipped.length > 0) fallbackUsed = true;
 
-    const ranked = [...rankedShortlist, ...rankedSkipped];
+    const ranked: RankedCandidate[] = [...rankedShortlist, ...rankedSkipped].map((c) => ({
+      ...c,
+      score: 0,
+      scoreBreakdown: { etaScore: 0, ratingScore: 0, cancellationScore: 0, acceptanceScore: 0 },
+    }));
+
+    const acceptanceRateByDriver = await this.getAcceptanceRates(ranked.map((c) => c.driverUserId));
+    const weights = this.config.get('dispatch.ranking') ?? {};
+    const etaWeight = weights.etaWeight ?? 0.6;
+    const ratingWeight = weights.ratingWeight ?? 0.2;
+    const cancellationWeight = weights.cancellationWeight ?? 0.1;
+    const acceptanceWeight = weights.acceptanceWeight ?? 0.1;
+    const minTripsForCancellationSignal = weights.minTripsForCancellationSignal ?? 5;
+    const minOffersForAcceptanceSignal = weights.minOffersForAcceptanceSignal ?? 5;
+
+    for (const candidate of ranked) {
+      // Bounded (0,1], never negative, never zero even for a very large
+      // ETA - a smooth, simple normalization rather than an arbitrary
+      // cutoff. Lower ETA -> score closer to 1.
+      const etaScore = 1 / (1 + candidate.etaMinutes);
+
+      // Ratings in this system are 0-5.
+      const ratingScore = candidate.rating / 5;
+
+      // "Do not unfairly discriminate against drivers" applies most
+      // sharply here - a driver with only 1-2 trips shouldn't be
+      // scored on a cancellation rate that's really just noise. Below
+      // the configured minimum, treat as neutral (no penalty, no
+      // bonus) rather than guessing from too little data.
+      const cancellationScore =
+        candidate.totalTrips < minTripsForCancellationSignal
+          ? 1
+          : 1 - candidate.cancelledTrips / candidate.totalTrips;
+
+      const acceptance = acceptanceRateByDriver.get(candidate.driverUserId);
+      const acceptanceScore =
+        !acceptance || acceptance.decidedCount < minOffersForAcceptanceSignal
+          ? 1
+          : acceptance.acceptedCount / acceptance.decidedCount;
+
+      candidate.score =
+        etaWeight * etaScore +
+        ratingWeight * ratingScore +
+        cancellationWeight * cancellationScore +
+        acceptanceWeight * acceptanceScore;
+      candidate.scoreBreakdown = { etaScore, ratingScore, cancellationScore, acceptanceScore };
+    }
 
     ranked.sort((a, b) => {
+      if (a.score !== b.score) return b.score - a.score; // higher score first
+      // Deterministic tie-break when scores land equal: fall back to
+      // ETA, then distance, then driver id, so ranking order never
+      // depends on Promise.all completion order or object insertion
+      // order.
       if (a.etaMinutes !== b.etaMinutes) return a.etaMinutes - b.etaMinutes;
-      // Deterministic tie-break when ETAs land equal (common with the
-      // fallback formula, which is a pure function of distance): fall
-      // back to distance, then driver id, so ranking order never depends
-      // on Promise.all completion order or object insertion order.
       if (a.distanceKm !== b.distanceKm) return a.distanceKm - b.distanceKm;
       return a.driverUserId.localeCompare(b.driverUserId);
     });
@@ -136,6 +178,44 @@ export class DriverRankingService {
     this.metrics.rankingRankedCount.observe(ranked.length);
 
     return { ranked, routingCallsMade, routingFailures, fallbackUsed };
+  }
+
+  /**
+   * One batched query for every candidate being ranked, not one query
+   * per candidate - same cost discipline as the ETA/routing step above.
+   * decidedCount excludes PENDING (no decision made yet) and SUPERSEDED
+   * (the ride moved on for a reason unrelated to this driver's own
+   * behavior, e.g. an admin cancelling the offer) - neither reflects
+   * whether this driver actually accepted or turned down real offers.
+   */
+  private async getAcceptanceRates(
+    driverUserIds: string[],
+  ): Promise<Map<string, { acceptedCount: number; decidedCount: number }>> {
+    const uniqueIds = [...new Set(driverUserIds)];
+    if (uniqueIds.length === 0) return new Map();
+
+    const rows = await this.offersRepo
+      .createQueryBuilder('offer')
+      .select('offer.driverUserId', 'driverUserId')
+      .addSelect('offer.status', 'status')
+      .addSelect('COUNT(*)', 'count')
+      .where('offer.driverUserId IN (:...ids)', { ids: uniqueIds })
+      .andWhere('offer.status IN (:...statuses)', {
+        statuses: [RideOfferStatus.ACCEPTED, RideOfferStatus.DECLINED, RideOfferStatus.EXPIRED],
+      })
+      .groupBy('offer.driverUserId')
+      .addGroupBy('offer.status')
+      .getRawMany<{ driverUserId: string; status: RideOfferStatus; count: string }>();
+
+    const result = new Map<string, { acceptedCount: number; decidedCount: number }>();
+    for (const row of rows) {
+      const entry = result.get(row.driverUserId) ?? { acceptedCount: 0, decidedCount: 0 };
+      const count = parseInt(row.count, 10);
+      entry.decidedCount += count;
+      if (row.status === RideOfferStatus.ACCEPTED) entry.acceptedCount += count;
+      result.set(row.driverUserId, entry);
+    }
+    return result;
   }
 
   /**

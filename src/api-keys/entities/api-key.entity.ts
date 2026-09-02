@@ -34,11 +34,6 @@ export class ApiKey {
   @Column({ type: 'timestamp', nullable: true })
   lastUsedAt: Date | null;
 
-  // Optional hard expiry — checked in ApiKeysService.validate() on every
-  // request, same as isActive. Null means "no expiry".
-  @Column({ type: 'timestamp', nullable: true })
-  expiresAt: Date | null;
-
   @CreateDateColumn()
   createdAt: Date;
 }

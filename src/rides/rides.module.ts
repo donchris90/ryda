@@ -4,6 +4,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { Ride } from './entities/ride.entity';
 import { RidesService } from './rides.service';
 import { RidesController } from './rides.controller';
+import { AdminDispatchController } from './admin-dispatch.controller';
 import { FareService } from './fare.service';
 import { ScheduledRideProcessor } from './processors/scheduled-ride.processor';
 import { DriversModule } from '../drivers/drivers.module';
@@ -25,7 +26,6 @@ import { ReconciliationModule } from '../reconciliation/reconciliation.module';
 import { ObservabilityModule } from '../observability/observability.module';
 import { CandidateSearchModule } from '../candidate-search/candidate-search.module';
 import { RankingModule } from '../ranking/ranking.module';
-import { PoolingModule } from '../pooling/pooling.module';
 
 @Module({
   imports: [
@@ -50,10 +50,9 @@ import { PoolingModule } from '../pooling/pooling.module';
     ObservabilityModule,
     CandidateSearchModule,
     RankingModule,
-    PoolingModule,
   ],
   providers: [RidesService, FareService, ScheduledRideProcessor],
-  controllers: [RidesController],
+  controllers: [RidesController, AdminDispatchController],
   exports: [RidesService, FareService],
 })
 export class RidesModule {}

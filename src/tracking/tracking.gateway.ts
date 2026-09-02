@@ -15,13 +15,13 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Ride } from '../rides/entities/ride.entity';
-import { DeliveryOrder } from '../logistics/entities/delivery-order.entity';
+import { RideStatus } from '../common/enums/ride.enum';
+import { DeliveryOrder, DeliveryStatus } from '../logistics/entities/delivery-order.entity';
 import { SupportTicket } from '../support/entities/support-ticket.entity';
 import { SUPPORT_STAFF_ROLES } from '../support/support.service';
-import { UserRole } from '../common/enums/user-role.enum';
-import { ADMIN_LIKE_ROLES } from '../common/enums/user-role.enum';
+import { UserRole, SAFETY_OPS_ROLES } from '../common/enums/user-role.enum';
 
-const ADMIN_LIKE_SOCKET_ROLES = [...ADMIN_LIKE_ROLES, UserRole.DISPATCHER];
+const ADMIN_LIKE_SOCKET_ROLES = SAFETY_OPS_ROLES;
 
 interface AuthedSocket extends Socket {
   data: { userId?: string; role?: string };
@@ -175,6 +175,56 @@ export class TrackingGateway
     return 'admin:live';
   }
 
+  /**
+   * Separate from admin:live deliberately - that room is a high-volume
+   * stream of every driver's location, all the time. An admin watching
+   * the safety center for SOS/incident alerts shouldn't need to also
+   * subscribe to the full live-fleet firehose just to get them.
+   */
+  @SubscribeMessage('subscribe:admin-safety')
+  async handleSubscribeAdminSafety(@ConnectedSocket() client: AuthedSocket) {
+    if (!ADMIN_LIKE_SOCKET_ROLES.includes(client.data.role as UserRole)) {
+      return { error: 'Not authorized' };
+    }
+    await client.join(this.adminSafetyRoom());
+    return { subscribed: true };
+  }
+
+  @SubscribeMessage('unsubscribe:admin-safety')
+  async handleUnsubscribeAdminSafety(@ConnectedSocket() client: AuthedSocket) {
+    await client.leave(this.adminSafetyRoom());
+    return { unsubscribed: true };
+  }
+
+  /**
+   * Real gap closed here: EmergencyService.triggerSos() already emitted
+   * this event, but nothing broadcast it anywhere an admin/dispatcher
+   * could see it happen live - they'd only ever find out by manually
+   * polling GET /admin/emergency/incidents/active. Now any admin/
+   * dispatcher watching the safety center sees an SOS the instant it's
+   * pressed, not whenever they next happen to refresh.
+   */
+  @OnEvent('incident.sos_triggered')
+  broadcastSosAlert(payload: {
+    incidentId: string;
+    userId: string;
+    rideId: string | null;
+    lat: number | null;
+    lng: number | null;
+  }): void {
+    this.server.to(this.adminSafetyRoom()).emit('admin:sos', payload);
+  }
+
+  /** Same reasoning as broadcastSosAlert() - an escalation is exactly as time-sensitive as the original SOS. */
+  @OnEvent('incident.escalated')
+  broadcastIncidentEscalated(payload: { incidentId: string; escalatedBy: string; reason: string }): void {
+    this.server.to(this.adminSafetyRoom()).emit('admin:incident-escalated', payload);
+  }
+
+  private adminSafetyRoom(): string {
+    return 'admin:safety';
+  }
+
   @SubscribeMessage('subscribe:ticket')
   async handleSubscribeTicket(
     @ConnectedSocket() client: AuthedSocket,
@@ -223,6 +273,73 @@ export class TrackingGateway
       .to(this.roomForDelivery(deliveryId))
       .emit('driver:location', { deliveryId, ...payload });
   }
+
+  /**
+   * Real gap closed here: a client already has this exact socket open
+   * for live location during an active ride, but previously had no way
+   * to learn the ride's own status changed except by polling - the
+   * passenger app currently re-polls every 5s for exactly this. Maps
+   * the internal status to an explicit, named client event rather than
+   * forwarding the raw status string, per "do not expose arbitrary
+   * internal events to clients."
+   */
+  @OnEvent('ride.status_changed')
+  broadcastRideStatus(payload: {
+    rideId: string;
+    status: RideStatus;
+    passengerId: string;
+    driverId: string | null;
+  }): void {
+    const event = TrackingGateway.RIDE_STATUS_EVENTS[payload.status];
+    if (!event) return; // a status with no client-facing meaning (e.g. SCHEDULED) - nothing to tell a live subscriber
+    this.server.to(this.roomFor(payload.rideId)).emit(event, {
+      rideId: payload.rideId,
+      status: payload.status,
+    });
+  }
+
+  /** Delivery equivalent of broadcastRideStatus() - same reasoning, same "why" applies to the delivery tracking screen. */
+  @OnEvent('delivery.status_changed')
+  broadcastDeliveryStatus(payload: {
+    deliveryId: string;
+    status: DeliveryStatus;
+    customerId: string;
+    driverId: string | null;
+  }): void {
+    const event = TrackingGateway.DELIVERY_STATUS_EVENTS[payload.status];
+    if (!event) return;
+    this.server.to(this.roomForDelivery(payload.deliveryId)).emit(event, {
+      deliveryId: payload.deliveryId,
+      status: payload.status,
+    });
+  }
+
+  /**
+   * Explicit ride status -> client event name map, matching Batch 3's
+   * named event list where a direct equivalent exists (ride.assigned,
+   * ride.driver_arrived, ride.started, ride.completed, ride.cancelled)
+   * plus one this platform genuinely needs beyond that list
+   * (ride.no_driver_found) - REQUESTED/SEARCHING intentionally has no
+   * entry, since "searching" is the client's own initial state before
+   * anything has happened yet, not a transition worth a push.
+   */
+  private static readonly RIDE_STATUS_EVENTS: Partial<Record<RideStatus, string>> = {
+    [RideStatus.ACCEPTED]: 'ride:assigned',
+    [RideStatus.ARRIVED]: 'ride:driver_arrived',
+    [RideStatus.IN_PROGRESS]: 'ride:started',
+    [RideStatus.COMPLETED]: 'ride:completed',
+    [RideStatus.CANCELLED]: 'ride:cancelled',
+    [RideStatus.NO_DRIVER_FOUND]: 'ride:no_driver_found',
+  };
+
+  private static readonly DELIVERY_STATUS_EVENTS: Partial<Record<DeliveryStatus, string>> = {
+    [DeliveryStatus.ACCEPTED]: 'delivery:assigned',
+    [DeliveryStatus.PICKUP_ARRIVED]: 'delivery:pickup_arrived',
+    [DeliveryStatus.PICKED_UP]: 'delivery:picked_up',
+    [DeliveryStatus.IN_TRANSIT]: 'delivery:in_transit',
+    [DeliveryStatus.DELIVERED]: 'delivery:delivered',
+    [DeliveryStatus.CANCELLED]: 'delivery:cancelled',
+  };
 
   /**
    * ChatService emits this after saving a message — broadcast to the same

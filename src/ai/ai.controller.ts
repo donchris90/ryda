@@ -31,11 +31,15 @@ export class AiController {
   }
 
   @Get('surge')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.DISPATCHER, UserRole.COUNTRY_ADMIN, UserRole.CITY_MANAGER)
   surge(@Query('city') city?: string) {
     return this.pricingService.calculateSurge(city);
   }
 
   @Get('eta')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.DISPATCHER, UserRole.COUNTRY_ADMIN, UserRole.CITY_MANAGER)
   eta(
     @Query('driverLat') driverLat: string,
     @Query('driverLng') driverLng: string,

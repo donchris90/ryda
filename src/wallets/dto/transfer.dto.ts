@@ -1,6 +1,4 @@
 import { IsEmail, IsNumber, IsOptional, IsPhoneNumber, IsString, IsUUID, Length, Min, ValidateIf } from 'class-validator';
-import { Transform } from 'class-transformer';
-import { normalizeNigerianPhone } from '../../common/utils/phone.util';
 
 // Accepts EITHER recipientPhone or recipientEmail, not both required -
 // the old app build (still installed on some devices) sends phone,
@@ -10,8 +8,7 @@ import { normalizeNigerianPhone } from '../../common/utils/phone.util';
 // when both are given, since that's the current standard identifier.
 export class InitiateTransferDto {
   @ValidateIf((o) => !o.recipientEmail)
-  @Transform(({ value }) => (typeof value === 'string' ? normalizeNigerianPhone(value) : value))
-  @IsPhoneNumber('NG')
+  @IsPhoneNumber()
   recipientPhone?: string;
 
   @ValidateIf((o) => !o.recipientPhone)

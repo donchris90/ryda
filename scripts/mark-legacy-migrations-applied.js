@@ -1,23 +1,10 @@
-// One-off script — run once, then delete. Marks migrations that already
-// exist in this database (because they were originally applied via
-// TypeORM's `synchronize: true`, before this project switched to
-// tracked migrations) as "already run", without executing their SQL
-// again. This lets `npm run migration:run` skip straight to whatever
-// is genuinely new.
-//
-// Usage (PowerShell), from the backend folder, same env vars as
-// migration:run:
-//   node scripts/mark-legacy-migrations-applied.js
-
-const { Client } = require('pg');
+﻿const { Client } = require('pg');
 
 const ALREADY_APPLIED = [
   { timestamp: 1785688241033, name: 'InitialSchema1785688241033' },
   { timestamp: 1787610731738, name: 'MultiRoleAndRideCategoryTrim1787610731738' },
   { timestamp: 1787825914745, name: 'AddRideDispatchMode1787825914745' },
   { timestamp: 1787900000000, name: 'AddDeliveryDispatchMode1787900000000' },
-  // Deliberately NOT including AddDriverServiceCapabilities1788000000000 —
-  // that one is genuinely new and still needs to actually run.
 ];
 
 async function main() {
@@ -35,8 +22,6 @@ async function main() {
   await client.connect();
 
   try {
-    // Matches exactly what TypeORM itself creates on first migration:run —
-    // safe to run even if this table doesn't exist yet.
     await client.query(`
       CREATE TABLE IF NOT EXISTS "migrations" (
         "id" SERIAL NOT NULL,

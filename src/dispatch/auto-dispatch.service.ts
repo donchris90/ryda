@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
-import { OnEvent } from '@nestjs/event-emitter';
+import { OnEvent, EventEmitter2 } from '@nestjs/event-emitter';
 import { Ride } from '../rides/entities/ride.entity';
 import { RideStatus } from '../common/enums/ride.enum';
 import { CandidateSearchService } from '../candidate-search/candidate-search.service';
@@ -50,6 +50,7 @@ export class AutoDispatchService {
     private readonly dispatchService: DispatchService,
     private readonly config: ConfigService,
     private readonly metrics: MetricsService,
+    private readonly events: EventEmitter2,
   ) {}
 
   /**
@@ -115,7 +116,6 @@ export class AutoDispatchService {
       domain: DispatchDomain.RIDE,
       mode: DispatchMode.AUTO,
       rideCategory: ride.category,
-      requiresAccessibleVehicle: ride.requiresAccessibleVehicle,
       excludeDriverUserIds,
       minCandidates: 1,
       limit: candidateFetchLimit,
@@ -174,6 +174,12 @@ export class AutoDispatchService {
       this.logger.warn(
         `AUTO dispatch exhausted: rideId=${ride.id} dispatchMode=auto maxRadiusKm reached with no eligible driver — marked NO_DRIVER_FOUND`,
       );
+      this.events.emit('ride.status_changed', {
+        rideId: ride.id,
+        status: RideStatus.NO_DRIVER_FOUND,
+        passengerId: ride.passengerId,
+        driverId: ride.driverId,
+      });
     }
   }
 }

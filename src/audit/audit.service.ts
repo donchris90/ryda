@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Between, LessThanOrEqual, MoreThanOrEqual, Repository } from 'typeorm';
+import { Between, Repository } from 'typeorm';
 import { AuditLog } from './entities/audit-log.entity';
 
 export interface AuditLogFilters {
@@ -53,16 +53,8 @@ export class AuditService {
     if (filters.actorUserId) qb.andWhere('log.actorUserId = :actorUserId', { actorUserId: filters.actorUserId });
     if (filters.action) qb.andWhere('log.action = :action', { action: filters.action });
     if (filters.targetId) qb.andWhere('log.targetId = :targetId', { targetId: filters.targetId });
-    // Previously required both `from` and `to` to be set together, silently
-    // ignoring a single-ended date filter entirely — a real gap for the
-    // admin audit-log page, where filtering "everything since March 1st"
-    // (no end date) is a normal query.
     if (filters.from && filters.to) {
       qb.andWhere({ createdAt: Between(filters.from, filters.to) });
-    } else if (filters.from) {
-      qb.andWhere({ createdAt: MoreThanOrEqual(filters.from) });
-    } else if (filters.to) {
-      qb.andWhere({ createdAt: LessThanOrEqual(filters.to) });
     }
 
     qb.skip((page - 1) * pageSize).take(pageSize);

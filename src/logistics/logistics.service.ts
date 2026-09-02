@@ -28,7 +28,6 @@ import {
   DriverApprovalStatus,
 } from '../common/enums/driver-status.enum';
 import { DriverService, isOnlineForService } from '../common/enums/driver-service.enum';
-import { UserRole } from '../common/enums/user-role.enum';
 import { haversineDistanceKm } from '../common/utils/geo.util';
 import { DriversService } from '../drivers/drivers.service';
 import { VehiclesService } from '../vehicles/vehicles.service';
@@ -46,6 +45,7 @@ import {
 } from '../settings/settings.service';
 import { DeliveryVehicleTypesService } from './delivery-vehicle-types.service';
 import { canVehicleCoverDelivery } from '../common/vehicle-capacity-match.util';
+import { VehicleStatus } from '../common/enums/vehicle.enum';
 import { CandidateSearchService } from '../candidate-search/candidate-search.service';
 import {
   DispatchDomain,
@@ -53,7 +53,6 @@ import {
 } from '../candidate-search/candidate-search.types';
 import { DriverRankingService } from '../ranking/ranking.service';
 import { MetricsService } from '../observability/metrics.service';
-import { PromotionsService } from '../promotions/promotions.service';
 
 export interface DeliveryFareBreakdown {
   baseFare: number;
@@ -85,15 +84,6 @@ export interface CourierCandidateResult {
   distanceKm: number;
 }
 
-// Same roster rides.service.ts's STAFF_ROLES uses — staff who can see
-// any ride can see any delivery, for the same support/ops reasons.
-const STAFF_ROLES = [
-  UserRole.ADMIN,
-  UserRole.SUPER_ADMIN,
-  UserRole.SUPPORT_AGENT,
-  UserRole.DISPATCHER,
-];
-
 @Injectable()
 export class LogisticsService {
   private readonly logger = new Logger(LogisticsService.name);
@@ -117,7 +107,6 @@ export class LogisticsService {
     private readonly driverRankingService: DriverRankingService,
     private readonly events: EventEmitter2,
     private readonly metrics: MetricsService,
-    private readonly promotionsService: PromotionsService,
   ) {}
 
   async estimateFare(dto: EstimateDeliveryDto): Promise<DeliveryFareBreakdown> {
@@ -244,6 +233,7 @@ export class LogisticsService {
     });
 
     const saved = await this.ordersRepo.save(order);
+    this.emitDeliveryStatusChanged(saved);
 
     // MANUAL ("choose a courier") deliberately does NOT broadcast here —
     // notifying every eligible driver the moment the order exists would
@@ -463,51 +453,19 @@ export class LogisticsService {
     return this.acceptDelivery(orderId, driverUserId);
   }
 
+  /** Delivery equivalent of RidesService.emitStatusChanged() - see that method's doc comment for why this is a separate, new event rather than reusing the existing delivery.* ones. */
+  private emitDeliveryStatusChanged(order: DeliveryOrder): void {
+    this.events.emit('delivery.status_changed', {
+      deliveryId: order.id,
+      status: order.status,
+      customerId: order.customerId,
+      driverId: order.driverId,
+    });
+  }
+
   async findById(id: string): Promise<DeliveryOrder> {
     const order = await this.ordersRepo.findOne({ where: { id } });
     if (!order) throw new NotFoundException('Delivery order not found');
-    return order;
-  }
-
-  /**
-   * Authorization-checked lookup for the customer-/driver-facing detail
-   * endpoint (GET /deliveries/:id) — findById() above is the plain,
-   * unchecked repository read used internally by every other method here
-   * once it's already established the caller is entitled to this order
-   * (via customerId/driverId match, an explicit select-courier ownership
-   * check, etc). The controller was calling findById() directly, with no
-   * ownership check of any kind — any authenticated user, passenger or
-   * driver, could fetch any delivery's full detail (pickup/dropoff
-   * addresses, both contacts' names and phone numbers, item description
-   * and value, COD amount) by id alone, which is a real IDOR: mirrors
-   * exactly the gap rides.service.ts's getForUser() exists to close for
-   * the equivalent ride endpoint.
-   *
-   * Deliberately narrower than rides' getForUser(): rides also admits a
-   * driver with a live *offer* on the ride, because a targeted offer is
-   * the one case where a driver legitimately needs to see ride detail
-   * before deciding whether to accept. Deliveries have no equivalent
-   * offer/reservation record for a not-yet-assigned driver (see
-   * acceptDelivery()'s doc comment — broadcast, first-accept-wins, by
-   * design) — extending the same exception here for "any eligible
-   * candidate" would mean re-running the live candidate search just to
-   * authorize a read, and would defeat the entire point of MANUAL orders
-   * not broadcasting to begin with (a driver could learn full detail of
-   * a delivery they were never offered). So until this order has an
-   * assigned driver, only the customer who placed it (or staff) can see it.
-   */
-  async getForUser(
-    orderId: string,
-    requesterId: string,
-    requesterRole: UserRole,
-  ): Promise<DeliveryOrder> {
-    const order = await this.findById(orderId);
-    const isParticipant =
-      order.customerId === requesterId || order.driverId === requesterId;
-    const isStaff = STAFF_ROLES.includes(requesterRole);
-    if (!isParticipant && !isStaff) {
-      throw new ForbiddenException("You don't have access to this delivery");
-    }
     return order;
   }
 
@@ -615,6 +573,11 @@ export class LogisticsService {
     const vehicle = await this.vehiclesService.findById(
       driverProfile.activeVehicleId,
     );
+    if (vehicle.status !== VehicleStatus.ACTIVE) {
+      throw new BadRequestException(
+        `Your registered vehicle is ${vehicle.status.replace(/_/g, ' ')}, not active - it needs to be approved before you can accept deliveries.`,
+      );
+    }
     if (!canVehicleCoverDelivery(vehicle.category, order.vehicleType)) {
       throw new BadRequestException(
         `Your registered vehicle can't cover a ${order.vehicleType} delivery. A larger vehicle is required.`,
@@ -664,6 +627,7 @@ export class LogisticsService {
     // reserveOnlineDriverForTrip()'s doc comment in drivers.service.ts
     // for why this can't happen any earlier.
     this.driversService.emitReservedForTrip(reservedProfile);
+    this.emitDeliveryStatusChanged(saved);
 
     return saved;
   }
@@ -679,7 +643,9 @@ export class LogisticsService {
       );
     }
     order.status = DeliveryStatus.PICKUP_ARRIVED;
-    return this.ordersRepo.save(order);
+    const saved = await this.ordersRepo.save(order);
+    this.emitDeliveryStatusChanged(saved);
+    return saved;
   }
 
   async markPickedUp(
@@ -697,7 +663,9 @@ export class LogisticsService {
     }
     order.status = DeliveryStatus.PICKED_UP;
     order.pickedUpAt = new Date();
-    return this.ordersRepo.save(order);
+    const saved = await this.ordersRepo.save(order);
+    this.emitDeliveryStatusChanged(saved);
+    return saved;
   }
 
   async markInTransit(
@@ -711,7 +679,9 @@ export class LogisticsService {
       );
     }
     order.status = DeliveryStatus.IN_TRANSIT;
-    return this.ordersRepo.save(order);
+    const saved = await this.ordersRepo.save(order);
+    this.emitDeliveryStatusChanged(saved);
+    return saved;
   }
 
   /**
@@ -753,141 +723,117 @@ export class LogisticsService {
     const commissionAmount = this.round(totalFare * (commissionPercent / 100));
     const driverEarnings = this.round(totalFare - commissionAmount);
 
-    const previousStatus = order.status;
     order.status = DeliveryStatus.DELIVERED;
     order.deliveredAt = new Date();
     order.commissionPercent = commissionPercent.toFixed(2);
     order.commissionAmount = commissionAmount.toFixed(2);
     order.driverEarnings = driverEarnings.toFixed(2);
     await this.ordersRepo.save(order);
+    this.emitDeliveryStatusChanged(order);
 
-    try {
-      if (order.paymentMethod === PaymentMethod.WALLET) {
-        const customerWallet = await this.walletsService.getByUserId(
-          order.customerId,
-        );
-        await this.walletsService.debit(
-          customerWallet.id,
-          totalFare,
-          TransactionCategory.DELIVERY_PAYMENT,
-          order.id,
-          `Delivery payment for order ${order.id}`,
-        );
-        await this.settleDriverEarningsAfterPayerCharged(
-          order,
-          driverProfile,
-          driverEarnings,
-          commissionPercent,
-        );
-      } else if (order.paymentMethod === PaymentMethod.CASH) {
-        // COD or plain cash — either way the driver collected cash directly,
-        // so only the commission owed is debited from them (or their fleet).
-        // Falls back to a tracked reconciliation debt (auto-settles on the
-        // next wallet credit) rather than blocking delivery completion if
-        // the balance can't cover it right now — same pattern as rides.
-        if (driverProfile.fleetCompanyId) {
-          try {
-            await this.fleetService.debitFleetCommission(
-              driverProfile.fleetCompanyId,
-              commissionAmount,
-              order.id,
-            );
-          } catch {
-            await this.reconciliationService.recordDebt(
-              null,
-              driverProfile.fleetCompanyId,
-              order.id,
-              commissionAmount,
-            );
-          }
-        } else {
-          const driverWallet =
-            await this.walletsService.getByUserId(driverUserId);
-          try {
-            await this.walletsService.debit(
-              driverWallet.id,
-              commissionAmount,
-              TransactionCategory.COMMISSION,
-              order.id,
-              `Commission owed on delivery ${order.id} (${commissionPercent}%)`,
-            );
-          } catch {
-            await this.reconciliationService.recordDebt(
-              driverUserId,
-              null,
-              order.id,
-              commissionAmount,
-            );
-          }
-        }
-        order.earningsSettled = true;
-        await this.ordersRepo.save(order);
-      } else if (order.paymentMethod === PaymentMethod.CARD) {
-        const customer = await this.usersService.findById(order.customerId);
-        if (!customer.email) {
-          throw new BadRequestException(
-            'Add an email to your account before paying by card',
+    if (order.paymentMethod === PaymentMethod.WALLET) {
+      const customerWallet = await this.walletsService.getByUserId(
+        order.customerId,
+      );
+      await this.walletsService.debit(
+        customerWallet.id,
+        totalFare,
+        TransactionCategory.DELIVERY_PAYMENT,
+        order.id,
+        `Delivery payment for order ${order.id}`,
+      );
+      await this.creditDriverEarnings(
+        order,
+        driverProfile,
+        driverEarnings,
+        commissionPercent,
+      );
+    } else if (order.paymentMethod === PaymentMethod.CASH) {
+      // COD or plain cash — either way the driver collected cash directly,
+      // so only the commission owed is debited from them (or their fleet).
+      // Falls back to a tracked reconciliation debt (auto-settles on the
+      // next wallet credit) rather than blocking delivery completion if
+      // the balance can't cover it right now — same pattern as rides.
+      if (driverProfile.fleetCompanyId) {
+        try {
+          await this.fleetService.debitFleetCommission(
+            driverProfile.fleetCompanyId,
+            commissionAmount,
+            order.id,
+          );
+        } catch {
+          await this.reconciliationService.recordDebt(
+            null,
+            driverProfile.fleetCompanyId,
+            order.id,
+            commissionAmount,
           );
         }
-        const payment = await this.paymentsService.chargeSavedCard(
-          order.id,
-          order.customerId,
-          customer.email,
-          totalFare,
-        );
-        if (payment.status !== PaymentStatus.SUCCESS) {
-          throw new BadRequestException(
-            payment.failureReason ?? 'Card payment failed',
+      } else {
+        const driverWallet =
+          await this.walletsService.getByUserId(driverUserId);
+        try {
+          await this.walletsService.debit(
+            driverWallet.id,
+            commissionAmount,
+            TransactionCategory.COMMISSION,
+            order.id,
+            `Commission owed on delivery ${order.id} (${commissionPercent}%)`,
+          );
+        } catch {
+          await this.reconciliationService.recordDebt(
+            driverUserId,
+            null,
+            order.id,
+            commissionAmount,
           );
         }
-        await this.settleDriverEarningsAfterPayerCharged(
-          order,
-          driverProfile,
-          driverEarnings,
-          commissionPercent,
-        );
-      } else if (order.paymentMethod === PaymentMethod.CORPORATE) {
-        const account = await this.corporateService.getAccountForEmployee(
-          order.customerId,
-        );
-        if (!account)
-          throw new BadRequestException(
-            'Customer is not linked to a corporate account',
-          );
-        await this.corporateService.debitForRide(account.id, totalFare, order.id);
-        await this.settleDriverEarningsAfterPayerCharged(
-          order,
-          driverProfile,
-          driverEarnings,
-          commissionPercent,
+      }
+      order.earningsSettled = true;
+      await this.ordersRepo.save(order);
+    } else if (order.paymentMethod === PaymentMethod.CARD) {
+      const customer = await this.usersService.findById(order.customerId);
+      if (!customer.email) {
+        throw new BadRequestException(
+          'Add an email to your account before paying by card',
         );
       }
-    } catch (err) {
-      // Same failure mode rides.service.ts's completeRide() was fixed for:
-      // without this, a payment failure here (e.g. insufficient wallet
-      // balance, declined card, no email on file) left the order
-      // permanently stuck marked DELIVERED with no payment ever taken.
-      // Reverting puts the order back in a genuinely consistent,
-      // retryable state rather than needing a manual database fix.
-      order.status = previousStatus;
-      order.deliveredAt = null;
-      order.commissionPercent = null;
-      order.commissionAmount = null;
-      order.driverEarnings = null;
-      await this.ordersRepo.save(order);
-      throw err;
+      const payment = await this.paymentsService.chargeSavedCard(
+        order.id,
+        order.customerId,
+        customer.email,
+        totalFare,
+      );
+      if (payment.status !== PaymentStatus.SUCCESS) {
+        throw new BadRequestException(
+          payment.failureReason ?? 'Card payment failed',
+        );
+      }
+      await this.creditDriverEarnings(
+        order,
+        driverProfile,
+        driverEarnings,
+        commissionPercent,
+      );
+    } else if (order.paymentMethod === PaymentMethod.CORPORATE) {
+      const account = await this.corporateService.getAccountForEmployee(
+        order.customerId,
+      );
+      if (!account)
+        throw new BadRequestException(
+          'Customer is not linked to a corporate account',
+        );
+      await this.corporateService.debitForRide(account.id, totalFare, order.id);
+      await this.creditDriverEarnings(
+        order,
+        driverProfile,
+        driverEarnings,
+        commissionPercent,
+      );
     }
 
     await this.driversService.recordTripOutcome(driverProfile.id, 'completed');
     await this.driversService.restoreAvailabilityAfterTrip(driverUserId);
-    // Same gap as rides.service.ts's completeRide() had before it was
-    // fixed: grantReferralBonusIfEligible() is generic per user account,
-    // not ride-specific, but nothing on the delivery side ever called
-    // it for either party. Covering both here for parity with rides -
-    // a courier-only customer or driver account should get the same
-    // "your first completed trip" referral honor a rider/driver does.
-    await this.promotionsService.grantReferralBonusIfEligible(order.customerId);
-    await this.promotionsService.grantReferralBonusIfEligible(driverUserId);
 
     this.events.emit('delivery.delivered', {
       customerId: order.customerId,
@@ -981,31 +927,9 @@ export class LogisticsService {
         reason: order.cancelReason,
       });
     }
+    this.emitDeliveryStatusChanged(order);
 
     return order;
-  }
-
-  private async settleDriverEarningsAfterPayerCharged(
-    order: DeliveryOrder,
-    driverProfile: { userId: string; fleetCompanyId: string | null },
-    driverEarnings: number,
-    commissionPercent: number,
-  ): Promise<void> {
-    try {
-      await this.creditDriverEarnings(
-        order,
-        driverProfile,
-        driverEarnings,
-        commissionPercent,
-      );
-    } catch (err) {
-      this.events.emit('driver_earnings.credit_failed', {
-        orderId: order.id,
-        driverId: driverProfile.userId,
-        amount: driverEarnings,
-        reason: err instanceof Error ? err.message : 'Unknown error crediting driver earnings',
-      });
-    }
   }
 
   private async creditDriverEarnings(

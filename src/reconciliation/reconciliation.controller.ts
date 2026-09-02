@@ -6,13 +6,17 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { UserRole } from '../common/enums/user-role.enum';
 import { User } from '../users/entities/user.entity';
 import { ReconciliationService } from './reconciliation.service';
-import { WriteOffDto } from './dto/reconciliation.dto';
+import { LedgerAuditService } from './ledger-audit.service';
+import { WriteOffDto, ResolveDiscrepancyDto } from './dto/reconciliation.dto';
 import { Audit } from '../audit/decorators/audit.decorator';
 
 @Controller()
 @UseGuards(JwtAuthGuard)
 export class ReconciliationController {
-  constructor(private readonly reconciliationService: ReconciliationService) {}
+  constructor(
+    private readonly reconciliationService: ReconciliationService,
+    private readonly ledgerAuditService: LedgerAuditService,
+  ) {}
 
   @Get('reconciliation/mine')
   @UseGuards(RolesGuard)
@@ -23,13 +27,6 @@ export class ReconciliationController {
       this.reconciliationService.listForDriver(user.id),
     ]);
     return { summary, items };
-  }
-
-  @Get('admin/reconciliation/summary')
-  @UseGuards(RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCE)
-  summary() {
-    return this.reconciliationService.getSummary();
   }
 
   @Get('admin/reconciliation/pending')
@@ -58,19 +55,33 @@ export class ReconciliationController {
     return this.reconciliationService.writeOff(id, user.id, dto.reason);
   }
 
-  /**
-   * Manually re-runs the same oldest-first settlement sweep that normally
-   * fires automatically off the `wallet.updated` event — useful when an
-   * admin wants to retry immediately after e.g. investigating a driver's
-   * balance, instead of waiting for their next wallet credit to trigger it.
-   * Reuses ReconciliationService.attemptSettle() directly; no new
-   * settlement logic here.
-   */
-  @Post('admin/reconciliation/driver/:driverId/attempt-settle')
+  @Post('admin/ledger-audit/scan')
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCE)
-  @Audit('reconciliation.attempt_settle')
-  attemptSettle(@Param('driverId') driverId: string) {
-    return this.reconciliationService.attemptSettle(driverId);
+  @Audit('ledger_audit.manual_scan')
+  runScan() {
+    return this.ledgerAuditService.runQuickScan();
+  }
+
+  @Get('admin/ledger-audit/discrepancies')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCE)
+  listDiscrepancies() {
+    return this.ledgerAuditService.listOpenDiscrepancies();
+  }
+
+  @Get('admin/ledger-audit/wallet/:walletId')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCE)
+  checkWallet(@Param('walletId') walletId: string) {
+    return this.ledgerAuditService.checkWalletChain(walletId);
+  }
+
+  @Patch('admin/ledger-audit/discrepancies/:id/resolve')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCE)
+  @Audit('ledger_audit.resolve_discrepancy')
+  resolveDiscrepancy(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: ResolveDiscrepancyDto) {
+    return this.ledgerAuditService.resolve(id, user.id, dto.note);
   }
 }

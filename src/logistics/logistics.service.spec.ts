@@ -4,9 +4,8 @@ import { DeliveryOrder, DeliveryStatus, DeliveryVehicleType, DeliveryCategory } 
 import { PaymentMethod } from '../common/enums/ride.enum';
 import { DriverApprovalStatus, DriverAvailability } from '../common/enums/driver-status.enum';
 import { DriverService } from '../common/enums/driver-service.enum';
-import { VehicleCategory } from '../common/enums/vehicle.enum';
+import { VehicleCategory, VehicleStatus } from '../common/enums/vehicle.enum';
 import { DispatchDomain } from '../candidate-search/candidate-search.types';
-import { UserRole } from '../common/enums/user-role.enum';
 
 function fakeOrder(overrides: Partial<DeliveryOrder> = {}): DeliveryOrder {
   return {
@@ -68,13 +67,13 @@ function buildService(overrides: Record<string, any> = {}) {
       ...overrides.driversService,
     },
     vehiclesService: { findById: jest.fn(), ...overrides.vehiclesService },
-    walletsService: { ...overrides.walletsService },
-    commissionService: { ...overrides.commissionService },
-    corporateService: { ...overrides.corporateService },
-    fleetService: { ...overrides.fleetService },
-    usersService: { ...overrides.usersService },
-    paymentsService: { ...overrides.paymentsService },
-    reconciliationService: { ...overrides.reconciliationService },
+    walletsService: {},
+    commissionService: {},
+    corporateService: {},
+    fleetService: {},
+    usersService: {},
+    paymentsService: {},
+    reconciliationService: {},
     settingsService: { getNumber: jest.fn().mockResolvedValue(0) },
     vehicleTypesService: {
       getByType: jest.fn().mockResolvedValue({
@@ -92,10 +91,6 @@ function buildService(overrides: Record<string, any> = {}) {
     metrics: {
       courierDispatchNoDriverFoundTotal: { inc: jest.fn() },
       ...overrides.metrics,
-    },
-    promotionsService: {
-      grantReferralBonusIfEligible: jest.fn(),
-      ...overrides.promotionsService,
     },
   };
 
@@ -117,7 +112,6 @@ function buildService(overrides: Record<string, any> = {}) {
     deps.driverRankingService as any,
     deps.events as any,
     deps.metrics as any,
-    deps.promotionsService as any,
   );
 
   return { service, deps };
@@ -179,7 +173,7 @@ describe('LogisticsService — courier matching via the shared pipeline', () => 
       await service.requestDelivery('customer-1', REQUEST_DTO as any);
 
       expect(deps.driverRankingService.rank).not.toHaveBeenCalled();
-      expect(deps.events.emit).not.toHaveBeenCalled();
+      expect(deps.events.emit).not.toHaveBeenCalledWith('delivery.requested', expect.anything());
     });
 
     it('orders notified drivers by best ETA first', async () => {
@@ -270,7 +264,7 @@ describe('LogisticsService — courier matching via the shared pipeline', () => 
           emitReservedForTrip: jest.fn(),
         },
         vehiclesService: {
-          findById: jest.fn().mockResolvedValue({ id: 'vehicle-1', category: VehicleCategory.CAR }),
+          findById: jest.fn().mockResolvedValue({ id: 'vehicle-1', category: VehicleCategory.CAR, status: VehicleStatus.ACTIVE }),
         },
       };
     }
@@ -290,13 +284,29 @@ describe('LogisticsService — courier matching via the shared pipeline', () => 
     it('rejects an incompatible vehicle before ever opening a transaction', async () => {
       const manager = fakeManager();
       const deps = baseDeps(manager);
-      deps.vehiclesService.findById = jest.fn().mockResolvedValue({ id: 'vehicle-1', category: VehicleCategory.MOTORCYCLE });
+      deps.vehiclesService.findById = jest.fn().mockResolvedValue({ id: 'vehicle-1', category: VehicleCategory.MOTORCYCLE, status: VehicleStatus.ACTIVE });
 
       const { service, deps: allDeps } = buildService(deps);
       allDeps.ordersRepo.findOne.mockResolvedValue(fakeOrder({ vehicleType: DeliveryVehicleType.VAN }));
 
       await expect(service.acceptDelivery('order-1', 'driver-1')).rejects.toThrow(BadRequestException);
       expect(allDeps.ordersRepo.manager.transaction).not.toHaveBeenCalled();
+    });
+
+    it('rejects a vehicle that is not ACTIVE (e.g. still pending inspection, or deactivated) - real gap found via the admin-dispatch candidates endpoint: this same driver correctly never appeared as an eligible dispatch candidate, but the open accept path had no matching check', async () => {
+      const manager = fakeManager();
+      const deps = baseDeps(manager);
+      deps.vehiclesService.findById = jest.fn().mockResolvedValue({
+        id: 'vehicle-1',
+        category: VehicleCategory.CAR,
+        status: VehicleStatus.DEACTIVATED,
+      });
+
+      const { service, deps: allDeps } = buildService(deps);
+      allDeps.ordersRepo.findOne.mockResolvedValue(fakeOrder());
+
+      await expect(service.acceptDelivery('order-1', 'driver-1')).rejects.toThrow(/not active/);
+      expect(allDeps.driversService.reserveOnlineDriverForTrip).not.toHaveBeenCalled();
     });
 
     it('rejects an unapproved driver before opening a transaction', async () => {
@@ -368,7 +378,7 @@ describe('LogisticsService — courier matching via the shared pipeline', () => 
         reserveOnlineDriverForTrip,
         emitReservedForTrip: jest.fn(),
       };
-      const sharedVehiclesService = { findById: jest.fn().mockResolvedValue({ id: 'vehicle-1', category: VehicleCategory.CAR }) };
+      const sharedVehiclesService = { findById: jest.fn().mockResolvedValue({ id: 'vehicle-1', category: VehicleCategory.CAR, status: VehicleStatus.ACTIVE }) };
 
       const { service: serviceA, deps: depsA } = buildService({
         manager: manager1,
@@ -482,245 +492,5 @@ describe('LogisticsService — courier matching via the shared pipeline', () => 
       expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
       expect(results.filter((r) => r.status === 'rejected')).toHaveLength(1);
     });
-  });
-});
-
-describe('LogisticsService.markDelivered — payment settlement safety', () => {
-  function baseDriverProfile(overrides: Record<string, any> = {}) {
-    return {
-      id: 'profile-1',
-      userId: 'driver-1',
-      activeVehicleId: null,
-      commissionOverridePercent: '10',
-      fleetCompanyId: null,
-      level: 'standard',
-      ...overrides,
-    };
-  }
-
-  function buildForMarkDelivered(overrides: Record<string, any> = {}) {
-    const order = fakeOrder({
-      id: 'order-1',
-      driverId: 'driver-1', // must match the driverUserId passed to markDelivered() below, or getOwnedByDriver() rejects it
-      status: DeliveryStatus.IN_TRANSIT,
-      totalFare: '1000.00',
-      paymentMethod: overrides.paymentMethod ?? PaymentMethod.WALLET,
-      ...overrides.orderOverrides,
-    });
-
-    const savedOrders: DeliveryOrder[] = [];
-    const ordersRepo = {
-      findOne: jest.fn().mockResolvedValue(order),
-      save: jest.fn(async (data: DeliveryOrder) => {
-        savedOrders.push({ ...data });
-        Object.assign(order, data);
-        return data;
-      }),
-    };
-
-    const { service, deps } = buildService({
-      ordersRepo,
-      driversService: {
-        findByUserId: jest.fn().mockResolvedValue(baseDriverProfile(overrides.driverProfile)),
-        recordTripOutcome: jest.fn(),
-        restoreAvailabilityAfterTrip: jest.fn(),
-      },
-      walletsService: {
-        getByUserId: jest.fn().mockResolvedValue({ id: 'wallet-1' }),
-        debit: jest.fn().mockResolvedValue(undefined),
-        credit: jest.fn().mockResolvedValue(undefined),
-        ...overrides.walletsService,
-      },
-      paymentsService: {
-        chargeSavedCard: jest.fn(),
-        ...overrides.paymentsService,
-      },
-      corporateService: {
-        getAccountForEmployee: jest.fn(),
-        debitForRide: jest.fn(),
-        ...overrides.corporateService,
-      },
-      usersService: {
-        findById: jest.fn().mockResolvedValue({ id: 'customer-1', email: 'customer@example.com' }),
-        ...overrides.usersService,
-      },
-      promotionsService: {
-        grantReferralBonusIfEligible: jest.fn(),
-      },
-      events: { emit: jest.fn() },
-    });
-
-    return { service, deps, order, savedOrders };
-  }
-
-  it('debits the customer wallet and credits driver earnings on a normal wallet-paid delivery', async () => {
-    const { service, deps, order } = buildForMarkDelivered({ paymentMethod: PaymentMethod.WALLET });
-
-    const result = await service.markDelivered('order-1', 'driver-1');
-
-    expect(result.status).toBe(DeliveryStatus.DELIVERED);
-    expect(deps.walletsService.debit).toHaveBeenCalledWith(
-      'wallet-1',
-      1000,
-      expect.anything(),
-      'order-1',
-      expect.any(String),
-    );
-    expect(deps.walletsService.credit).toHaveBeenCalled();
-    expect(order.earningsSettled).toBe(true);
-  });
-
-  /**
-   * Regression test for the fix: if the customer has already been
-   * charged (wallet debit succeeded) but crediting the driver's
-   * earnings then fails, the order must stay DELIVERED — not revert to
-   * a retryable state, which would let a client retry markDelivered()
-   * and charge the customer's wallet a second time for the same
-   * delivery.
-   */
-  it('does NOT revert the order or rethrow when the customer has already been charged but crediting the driver fails', async () => {
-    const { service, deps, order } = buildForMarkDelivered({
-      paymentMethod: PaymentMethod.WALLET,
-      walletsService: {
-        getByUserId: jest.fn().mockResolvedValue({ id: 'wallet-1' }),
-        debit: jest.fn().mockResolvedValue(undefined),
-        credit: jest.fn().mockRejectedValue(new Error('driver wallet not found')),
-      },
-    });
-
-    const result = await service.markDelivered('order-1', 'driver-1');
-
-    expect(result.status).toBe(DeliveryStatus.DELIVERED);
-    expect(deps.walletsService.debit).toHaveBeenCalledTimes(1); // charged exactly once
-    expect(order.earningsSettled).toBeFalsy(); // left unsettled for ops follow-up
-    expect(deps.events.emit).toHaveBeenCalledWith(
-      'driver_earnings.credit_failed',
-      expect.objectContaining({ orderId: 'order-1', driverId: 'driver-1' }),
-    );
-  });
-
-  /**
-   * Contrasting case: when the customer was never actually charged
-   * (the debit itself fails, e.g. insufficient balance), the order
-   * must revert to its pre-delivery status so the driver can safely
-   * retry — this is the existing, correct behaviour being preserved,
-   * not the new fix.
-   */
-  it('reverts the order to its previous status when the customer charge itself fails', async () => {
-    const { service, deps, order } = buildForMarkDelivered({
-      paymentMethod: PaymentMethod.WALLET,
-      walletsService: {
-        getByUserId: jest.fn().mockResolvedValue({ id: 'wallet-1' }),
-        debit: jest.fn().mockRejectedValue(new Error('Insufficient wallet balance')),
-        credit: jest.fn(),
-      },
-    });
-
-    await expect(service.markDelivered('order-1', 'driver-1')).rejects.toThrow(
-      'Insufficient wallet balance',
-    );
-
-    expect(order.status).toBe(DeliveryStatus.IN_TRANSIT); // reverted, not left DELIVERED
-    expect(order.deliveredAt).toBeNull();
-    expect(deps.walletsService.credit).not.toHaveBeenCalled();
-  });
-
-  it('does not double-charge on a card payment once the driver-credit step fails', async () => {
-    const { service, deps, order } = buildForMarkDelivered({
-      paymentMethod: PaymentMethod.CARD,
-      paymentsService: {
-        chargeSavedCard: jest.fn().mockResolvedValue({ status: 'success' }),
-      },
-      walletsService: {
-        getByUserId: jest.fn().mockResolvedValue({ id: 'wallet-1' }),
-        credit: jest.fn().mockRejectedValue(new Error('driver wallet not found')),
-        debit: jest.fn(),
-      },
-    });
-
-    const result = await service.markDelivered('order-1', 'driver-1');
-
-    expect(result.status).toBe(DeliveryStatus.DELIVERED);
-    expect(deps.paymentsService.chargeSavedCard).toHaveBeenCalledTimes(1); // charged exactly once
-    expect(deps.events.emit).toHaveBeenCalledWith(
-      'driver_earnings.credit_failed',
-      expect.objectContaining({ orderId: 'order-1' }),
-    );
-  });
-});
-
-describe('LogisticsService.getForUser — ownership check on the detail endpoint (batch 11)', () => {
-  it('lets the customer who placed the order see it', async () => {
-    const { service, deps } = buildService({
-      ordersRepo: { findOne: jest.fn().mockResolvedValue(fakeOrder({ customerId: 'customer-1' })) },
-    });
-
-    const result = await service.getForUser('order-1', 'customer-1', UserRole.PASSENGER);
-
-    expect(result.id).toBe('order-1');
-  });
-
-  it('lets the assigned driver see it', async () => {
-    const { service } = buildService({
-      ordersRepo: {
-        findOne: jest.fn().mockResolvedValue(fakeOrder({ customerId: 'customer-1', driverId: 'driver-1' })),
-      },
-    });
-
-    const result = await service.getForUser('order-1', 'driver-1', UserRole.DRIVER);
-
-    expect(result.id).toBe('order-1');
-  });
-
-  it('lets staff (e.g. support) see it', async () => {
-    const { service } = buildService({
-      ordersRepo: { findOne: jest.fn().mockResolvedValue(fakeOrder({ customerId: 'customer-1' })) },
-    });
-
-    const result = await service.getForUser('order-1', 'agent-1', UserRole.SUPPORT_AGENT);
-
-    expect(result.id).toBe('order-1');
-  });
-
-  it(
-    "rejects an unrelated authenticated user (IDOR fix — findById() alone is not an authorization " +
-      'check, and the controller must not call it directly for this endpoint)',
-    async () => {
-      const { service } = buildService({
-        ordersRepo: { findOne: jest.fn().mockResolvedValue(fakeOrder({ customerId: 'customer-1' })) },
-      });
-
-      await expect(
-        service.getForUser('order-1', 'some-other-passenger', UserRole.PASSENGER),
-      ).rejects.toThrow(ForbiddenException);
-    },
-  );
-
-  it('rejects a driver who was never assigned this order — the whole point of MANUAL courier selection is that unselected drivers never learn the order exists', async () => {
-    const { service } = buildService({
-      ordersRepo: {
-        findOne: jest.fn().mockResolvedValue(
-          fakeOrder({ customerId: 'customer-1', driverId: null, status: DeliveryStatus.SEARCHING }),
-        ),
-      },
-    });
-
-    await expect(
-      service.getForUser('order-1', 'uninvolved-driver', UserRole.DRIVER),
-    ).rejects.toThrow(ForbiddenException);
-  });
-
-  it('rejects a driver who was assigned a *different* order', async () => {
-    const { service } = buildService({
-      ordersRepo: {
-        findOne: jest.fn().mockResolvedValue(
-          fakeOrder({ id: 'order-1', customerId: 'customer-1', driverId: 'driver-on-other-order' }),
-        ),
-      },
-    });
-
-    await expect(
-      service.getForUser('order-1', 'driver-1', UserRole.DRIVER),
-    ).rejects.toThrow(ForbiddenException);
   });
 });

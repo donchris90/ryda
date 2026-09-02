@@ -7,8 +7,10 @@ import { AppModule } from './app.module';
 import {
   assertProductionSecretsAreSet,
   assertProductionStorageIsConfigured,
+  assertProductionPaymentsAreConfigured,
 } from './config/env.validation';
 import { StorageService } from './storage/storage.service';
+import { PaystackService } from './payments/paystack/paystack.service';
 
 async function bootstrap() {
   // Buffer Nest's bootstrap logs until the real pino logger
@@ -35,6 +37,9 @@ async function bootstrap() {
     storage.isS3Configured(),
     storage.isR2Configured(),
   );
+
+  const paystack = app.get(PaystackService);
+  assertProductionPaymentsAreConfigured(config.get('nodeEnv')!, paystack.isConfigured());
 
   const corsOrigins = config.get<string[]>('corsOrigins')!;
   if (config.get('nodeEnv') === 'production') {

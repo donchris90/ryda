@@ -17,6 +17,7 @@ import {
 } from '../../common/enums/driver-status.enum';
 
 @Entity('driver_profiles')
+@Index(['approvalStatus', 'availability', 'locationUpdatedAt'])
 export class DriverProfile {
   @PrimaryGeneratedColumn('uuid')
   id: string;

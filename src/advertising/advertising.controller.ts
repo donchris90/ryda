@@ -76,14 +76,6 @@ export class AdvertisingController {
     return this.advertisingService.setCampaignStatus(id, status);
   }
 
-  @Get('admin/ads/campaigns/:id/analytics')
-  @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
-  @Roles(...ADMIN_ROLES)
-  @RequirePermission(Permission.ADS_MANAGE)
-  campaignAnalytics(@Param('id') id: string) {
-    return this.advertisingService.getCampaignAnalytics(id);
-  }
-
   @Get('admin/ads/banners')
   @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
   @Roles(...ADMIN_ROLES)
@@ -125,14 +117,5 @@ export class AdvertisingController {
   @Audit('sponsored_location.create')
   createSponsoredLocation(@Body() dto: CreateSponsoredLocationDto) {
     return this.advertisingService.createSponsoredLocation(dto);
-  }
-
-  @Patch('admin/ads/sponsored-locations/:id/active/:isActive')
-  @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
-  @Roles(...ADMIN_ROLES)
-  @RequirePermission(Permission.ADS_MANAGE)
-  @Audit('sponsored_location.status_change')
-  setSponsoredLocationActive(@Param('id') id: string, @Param('isActive') isActive: string) {
-    return this.advertisingService.setSponsoredLocationActive(id, isActive === 'true');
   }
 }

@@ -26,6 +26,17 @@ export class ResolveIncidentDto {
   notes: string;
 }
 
+export class EscalateIncidentDto {
+  @IsString()
+  reason: string;
+}
+
+export class RespondIncidentDto {
+  @IsOptional()
+  @IsString()
+  notes?: string;
+}
+
 export class AddIncidentNoteDto {
   @IsString()
   note: string;
@@ -34,4 +45,10 @@ export class AddIncidentNoteDto {
 export class ForceCancelRideDto {
   @IsString()
   reason: string;
+}
+
+export class ReviewRiskAlertDto {
+  @IsOptional()
+  @IsString()
+  notes?: string;
 }

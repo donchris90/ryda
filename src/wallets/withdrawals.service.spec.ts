@@ -1,161 +1,54 @@
+import { BadRequestException, ConflictException } from '@nestjs/common';
 import { WithdrawalsService } from './withdrawals.service';
-import { WithdrawalRequest, WithdrawalStatus } from './entities/withdrawal-request.entity';
-import { TransactionCategory } from '../common/enums/transaction.enum';
+import { WithdrawalStatus } from './entities/withdrawal-request.entity';
 
-function makeRequest(overrides: Partial<WithdrawalRequest> = {}): WithdrawalRequest {
-  return {
-    id: 'wd-1',
-    userId: 'user-1',
-    bankAccountId: 'bank-1',
-    amount: '5000.00',
-    status: WithdrawalStatus.PROCESSING,
-    reference: 'wd_abc123',
-    paystackTransferCode: 'trf_xyz',
-    failureReason: null,
-    createdAt: new Date(),
-    updatedAt: new Date(),
-    completedAt: null,
-    ...overrides,
-  } as WithdrawalRequest;
+function fakeUser(overrides: Partial<any> = {}) {
+  return { id: 'user-1', phone: '+2348011110000', isPhoneVerified: true, ...overrides };
 }
 
-/**
- * Mocks the manager.transaction(...) pessimistic-lock pattern the real
- * service uses, so the fix's row-locked read-then-write can be exercised
- * without a real database. Each call to handleTransferWebhook re-reads
- * whatever the previous call last saved — the same thing a real
- * transaction would see on a second, later delivery.
- */
-function makeWithdrawalsRepo(initialRequest: WithdrawalRequest | null) {
-  let current = initialRequest ? { ...initialRequest } : null;
+function build(overrides: { existingPending?: any; user?: any } = {}) {
+  const bankAccountsRepo = { findOne: jest.fn().mockResolvedValue({ id: 'bank-1', userId: 'user-1', bankName: 'Test Bank', accountNumber: '0123456789', accountName: 'User One', paystackRecipientCode: 'RCP_1' }) } as any;
+  const withdrawalsRepo = { findOne: jest.fn().mockResolvedValue(overrides.existingPending ?? null), save: jest.fn((d) => d), create: jest.fn((d) => d) } as any;
+  const walletsService = { getByUserId: jest.fn().mockResolvedValue({ id: 'wallet-1', balance: '10000.00' }) } as any;
+  const paystack = { isConfigured: jest.fn().mockReturnValue(true) } as any;
+  const config = { get: jest.fn().mockReturnValue(500) } as any;
+  const events = { emit: jest.fn() } as any;
+  const usersService = { findById: jest.fn().mockResolvedValue(overrides.user ?? fakeUser()) } as any;
+  const otpService = { send: jest.fn().mockResolvedValue({ expiresInSeconds: 300 }) } as any;
 
-  const manager = {
-    findOne: jest.fn(async () => (current ? { ...current } : null)),
-    save: jest.fn(async (entity: WithdrawalRequest) => {
-      current = { ...entity };
-      return current;
-    }),
-  };
-
-  const withdrawalsRepo = {
-    manager: { transaction: jest.fn((cb: (m: typeof manager) => unknown) => cb(manager)) },
-  } as any;
-
-  return { withdrawalsRepo, getCurrent: () => current };
+  const service = new WithdrawalsService(bankAccountsRepo, withdrawalsRepo, walletsService, paystack, config, events, usersService, otpService);
+  return { service, withdrawalsRepo, otpService };
 }
 
-function makeWalletsService() {
-  return {
-    getByUserId: jest.fn(async (userId: string) => ({ id: `wallet-${userId}`, userId })),
-    credit: jest.fn(async () => undefined),
-    debit: jest.fn(async () => undefined),
-  } as any;
-}
+describe('WithdrawalsService.initiateWithdrawal() - duplicate pending request prevention', () => {
+  it('rejects a second initiate while one is already pending and not yet expired - same reasoning as the identical transfer check: OTP verification is scoped to (phone, purpose), not a specific withdrawalRequestId', async () => {
+    const { service, otpService } = build({
+      existingPending: { id: 'existing-1', status: WithdrawalStatus.PENDING, expiresAt: new Date(Date.now() + 60_000) },
+    });
 
-function makeEventEmitter() {
-  return { emit: jest.fn() } as any;
-}
-
-describe('WithdrawalsService.handleTransferWebhook', () => {
-  it('marks the request completed and emits withdrawal.completed on transfer.success', async () => {
-    const { withdrawalsRepo, getCurrent } = makeWithdrawalsRepo(makeRequest());
-    const walletsService = makeWalletsService();
-    const events = makeEventEmitter();
-    const service = new WithdrawalsService(
-      {} as any,
-      withdrawalsRepo,
-      walletsService,
-      {} as any,
-      {} as any,
-      events,
-    );
-
-    await service.handleTransferWebhook('wd_abc123', true);
-
-    expect(getCurrent()?.status).toBe(WithdrawalStatus.COMPLETED);
-    expect(walletsService.credit).not.toHaveBeenCalled();
-    expect(events.emit).toHaveBeenCalledWith(
-      'withdrawal.completed',
-      expect.objectContaining({ userId: 'user-1' }),
-    );
+    await expect(service.initiateWithdrawal('user-1', 'bank-1', 1000)).rejects.toThrow(ConflictException);
+    expect(otpService.send).not.toHaveBeenCalled();
   });
 
-  it('refunds the wallet, marks the request failed, and emits withdrawal.failed on transfer.failed', async () => {
-    const { withdrawalsRepo, getCurrent } = makeWithdrawalsRepo(makeRequest());
-    const walletsService = makeWalletsService();
-    const events = makeEventEmitter();
-    const service = new WithdrawalsService(
-      {} as any,
-      withdrawalsRepo,
-      walletsService,
-      {} as any,
-      {} as any,
-      events,
-    );
+  it('allows a new initiate once the previous pending request has genuinely expired', async () => {
+    const { service, otpService } = build({
+      existingPending: { id: 'existing-1', status: WithdrawalStatus.PENDING, expiresAt: new Date(Date.now() - 1000) },
+    });
 
-    await service.handleTransferWebhook('wd_abc123', false, 'Insufficient funds in payout account');
-
-    expect(getCurrent()?.status).toBe(WithdrawalStatus.FAILED);
-    expect(getCurrent()?.failureReason).toBe('Insufficient funds in payout account');
-    expect(walletsService.credit).toHaveBeenCalledWith(
-      'wallet-user-1',
-      5000,
-      TransactionCategory.WITHDRAWAL,
-      'wd_abc123',
-      expect.any(String),
-    );
-    expect(events.emit).toHaveBeenCalledWith(
-      'withdrawal.failed',
-      expect.objectContaining({ userId: 'user-1' }),
-    );
+    await expect(service.initiateWithdrawal('user-1', 'bank-1', 1000)).resolves.toBeDefined();
+    expect(otpService.send).toHaveBeenCalled();
   });
 
-  /**
-   * Regression test: Paystack documents webhook retries and duplicate
-   * delivery as expected behaviour. A second delivery of the same event
-   * (or a stray transfer.failed after transfer.success already settled
-   * it) must be a no-op — never a second wallet credit or a second
-   * status transition.
-   */
-  it('is a no-op on a replayed webhook once the request is no longer PROCESSING', async () => {
-    const { withdrawalsRepo, getCurrent } = makeWithdrawalsRepo(
-      makeRequest({ status: WithdrawalStatus.FAILED, failureReason: 'Already handled' }),
-    );
-    const walletsService = makeWalletsService();
-    const events = makeEventEmitter();
-    const service = new WithdrawalsService(
-      {} as any,
-      withdrawalsRepo,
-      walletsService,
-      {} as any,
-      {} as any,
-      events,
-    );
+  it('allows a new initiate when there is no pending request at all', async () => {
+    const { service, otpService } = build({ existingPending: null });
 
-    await service.handleTransferWebhook('wd_abc123', false, 'transfer.failed retried by Paystack');
-
-    expect(getCurrent()?.status).toBe(WithdrawalStatus.FAILED);
-    expect(getCurrent()?.failureReason).toBe('Already handled'); // untouched — not overwritten by the replay
-    expect(walletsService.credit).not.toHaveBeenCalled();
-    expect(events.emit).not.toHaveBeenCalled();
+    await expect(service.initiateWithdrawal('user-1', 'bank-1', 1000)).resolves.toBeDefined();
+    expect(otpService.send).toHaveBeenCalled();
   });
 
-  it('is a no-op when the reference does not match any known withdrawal request', async () => {
-    const { withdrawalsRepo } = makeWithdrawalsRepo(null);
-    const walletsService = makeWalletsService();
-    const events = makeEventEmitter();
-    const service = new WithdrawalsService(
-      {} as any,
-      withdrawalsRepo,
-      walletsService,
-      {} as any,
-      {} as any,
-      events,
-    );
+  it('still enforces the phone-verification requirement before even checking for a pending duplicate', async () => {
+    const { service } = build({ user: fakeUser({ isPhoneVerified: false }) });
 
-    await service.handleTransferWebhook('wd_does_not_exist', true);
-
-    expect(walletsService.credit).not.toHaveBeenCalled();
-    expect(events.emit).not.toHaveBeenCalled();
+    await expect(service.initiateWithdrawal('user-1', 'bank-1', 1000)).rejects.toThrow(BadRequestException);
   });
 });

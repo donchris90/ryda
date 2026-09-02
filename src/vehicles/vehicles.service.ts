@@ -50,16 +50,6 @@ export class VehiclesService {
     return this.vehiclesRepo.save(vehicle);
   }
 
-  // Driver-uploaded photo of their own vehicle, shown to a passenger
-  // choosing a driver on the MANUAL selection screen (see
-  // RidesService.findSelectableDrivers()) - same pattern as
-  // UsersService.setProfilePhoto() for the driver's own photo.
-  async setPhoto(vehicleId: string, url: string): Promise<Vehicle> {
-    const vehicle = await this.findById(vehicleId);
-    vehicle.photoUrl = url;
-    return this.vehiclesRepo.save(vehicle);
-  }
-
   async listByFleet(fleetCompanyId: string): Promise<Vehicle[]> {
     return this.vehiclesRepo.find({ where: { fleetCompanyId } });
   }

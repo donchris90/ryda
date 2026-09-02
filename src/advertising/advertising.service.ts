@@ -46,44 +46,6 @@ export class AdvertisingService {
     return this.campaignsRepo.save(campaign);
   }
 
-  /**
-   * Rolls up the banners and sponsored locations tagged with this
-   * campaignId. There is no spend-tracking anywhere in this module — only
-   * a `budget` figure set at campaign creation — so this deliberately does
-   * NOT report a "spend" number; that would have to be invented rather
-   * than computed. CTR is derived straight from stored impressions/clicks.
-   */
-  async getCampaignAnalytics(id: string): Promise<{
-    campaign: AdCampaign;
-    banners: { total: number; impressions: number; clicks: number; ctr: number };
-    sponsoredLocations: { total: number; impressions: number };
-  }> {
-    const campaign = await this.campaignsRepo.findOne({ where: { id } });
-    if (!campaign) throw new NotFoundException('Campaign not found');
-
-    const [banners, locations] = await Promise.all([
-      this.bannersRepo.find({ where: { campaignId: id } }),
-      this.locationsRepo.find({ where: { campaignId: id } }),
-    ]);
-
-    const impressions = banners.reduce((sum, b) => sum + b.impressions, 0);
-    const clicks = banners.reduce((sum, b) => sum + b.clicks, 0);
-
-    return {
-      campaign,
-      banners: {
-        total: banners.length,
-        impressions,
-        clicks,
-        ctr: impressions > 0 ? Math.round((clicks / impressions) * 10000) / 100 : 0,
-      },
-      sponsoredLocations: {
-        total: locations.length,
-        impressions: locations.reduce((sum, l) => sum + l.impressions, 0),
-      },
-    };
-  }
-
   // ---- Banner ads ----
 
   async createBanner(dto: CreateBannerAdDto): Promise<BannerAd> {
@@ -139,13 +101,6 @@ export class AdvertisingService {
 
   async listAllSponsoredLocations(): Promise<SponsoredLocation[]> {
     return this.locationsRepo.find({ order: { createdAt: 'DESC' } });
-  }
-
-  async setSponsoredLocationActive(id: string, isActive: boolean): Promise<SponsoredLocation> {
-    const location = await this.locationsRepo.findOne({ where: { id } });
-    if (!location) throw new NotFoundException('Sponsored location not found');
-    location.isActive = isActive;
-    return this.locationsRepo.save(location);
   }
 
   /** Sponsored pins within their own radius of the given map point — verified with real distance math, not a bounding box. */

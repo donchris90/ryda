@@ -3,7 +3,7 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../users/entities/user.entity';
 import { WithdrawalsService } from './withdrawals.service';
-import { AddBankAccountDto, RequestWithdrawalDto } from './dto/withdrawals.dto';
+import { AddBankAccountDto, RequestWithdrawalDto, ConfirmWithdrawalDto } from './dto/withdrawals.dto';
 
 @Controller('wallet')
 @UseGuards(JwtAuthGuard)
@@ -30,9 +30,14 @@ export class WithdrawalsController {
     return this.withdrawalsService.removeBankAccount(user.id, id);
   }
 
-  @Post('withdraw')
-  requestWithdrawal(@CurrentUser() user: User, @Body() dto: RequestWithdrawalDto) {
-    return this.withdrawalsService.requestWithdrawal(user.id, dto.bankAccountId, dto.amount);
+  @Post('withdraw/initiate')
+  initiateWithdrawal(@CurrentUser() user: User, @Body() dto: RequestWithdrawalDto) {
+    return this.withdrawalsService.initiateWithdrawal(user.id, dto.bankAccountId, dto.amount);
+  }
+
+  @Post('withdraw/confirm')
+  confirmWithdrawal(@CurrentUser() user: User, @Body() dto: ConfirmWithdrawalDto) {
+    return this.withdrawalsService.confirmWithdrawal(user.id, dto.withdrawalRequestId, dto.otpCode);
   }
 
   @Get('withdrawals/mine')

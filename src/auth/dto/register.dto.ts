@@ -8,25 +8,17 @@ import {
   IsString,
   MinLength,
 } from 'class-validator';
-import { Transform } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { UserRole } from '../../common/enums/user-role.enum';
-import { normalizeNigerianPhone } from '../../common/utils/phone.util';
 
 export class RegisterDto {
   @ApiProperty({ example: 'ada@example.com' })
   @IsEmail()
   email: string;
 
-  @ApiPropertyOptional({
-    example: '08011112222',
-    description:
-      'Optional — used for ride communication and emergency contact, not for account verification. ' +
-      'Local Nigerian format (e.g. 08011112222) works fine; +234 is not required.',
-  })
+  @ApiPropertyOptional({ example: '+2348011112222', description: 'Optional — used for ride communication and emergency contact, not for account verification.' })
   @IsOptional()
-  @Transform(({ value }) => (typeof value === 'string' ? normalizeNigerianPhone(value) : value))
-  @IsPhoneNumber('NG')
+  @IsPhoneNumber()
   phone?: string;
 
   @ApiProperty({ example: 'Passw0rd!', minLength: 8 })

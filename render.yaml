@@ -28,24 +28,7 @@ services:
     # Without this flag, `npm run build` fails because `nest` doesn't
     # exist yet. Found by tracing a real failed deploy, not assumed.
     buildCommand: npm install --include=dev && npm run build
-    # fix-delivery-dispatch-mode-column.js runs before migration:run on
-    # every boot — no Render Shell needed (the free plan doesn't include
-    # one). It's a plain `node` script (no ts-node needed) that checks
-    # pg_type/information_schema directly and only creates what's
-    # actually missing, so it's a safe no-op on every boot after the
-    # first time it fixes anything. This exists specifically because
-    # AddDeliveryDispatchMode1787900000000 may already be (incorrectly)
-    # recorded as applied in the `migrations` table — see that script's
-    # own header comment — which would make migration:run silently skip
-    # the one statement that actually fixes the column, even though
-    # migration:run itself now runs on every deploy too.
-    #
-    # migration:run then runs on every boot after that — it's idempotent
-    # (TypeORM tracks what's already applied, and each migration file
-    # additionally guards its own DDL), so running it on every deploy is
-    # always safe and is what keeps the schema in sync with the entities
-    # going forward.
-    startCommand: node scripts/fix-null-emails.js && node scripts/fix-delivery-dispatch-mode-column.js && npm run migration:run && npm run start:prod
+    startCommand: node scripts/fix-null-emails.js && npm run start:prod
     healthCheckPath: /api/v1/health
     envVars:
       - key: NODE_ENV

@@ -8,10 +8,11 @@ import {
 } from 'typeorm';
 
 export enum WithdrawalStatus {
-  PENDING = 'pending', // requested, transfer not yet initiated with Paystack
-  PROCESSING = 'processing', // transfer initiated, waiting on Paystack's webhook
+  PENDING = 'pending', // requested, OTP not yet confirmed - the actual debit/Paystack transfer has NOT happened yet at this point
+  PROCESSING = 'processing', // OTP confirmed, transfer initiated, waiting on Paystack's webhook
   COMPLETED = 'completed', // transfer.success
   FAILED = 'failed', // transfer.failed or transfer.reversed — wallet already refunded by the time this is set
+  EXPIRED = 'expired', // OTP window closed before confirmation - no money ever moved
 }
 
 @Entity('withdrawal_requests')
@@ -53,4 +54,9 @@ export class WithdrawalRequest {
 
   @Column({ type: 'timestamp', nullable: true })
   completedAt: Date | null;
+
+  // Only meaningful while status is PENDING - the deadline for OTP
+  // confirmation before this request expires with no money ever moved.
+  @Column({ type: 'timestamp', nullable: true })
+  expiresAt: Date | null;
 }

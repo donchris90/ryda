@@ -1,4 +1,4 @@
-import { IsNumber, IsString, Min } from 'class-validator';
+import { IsNumber, IsString, IsUUID, Length, Min } from 'class-validator';
 
 export class AddBankAccountDto {
   @IsString()
@@ -18,4 +18,13 @@ export class RequestWithdrawalDto {
   @IsNumber()
   @Min(0.01)
   amount: number;
+}
+
+export class ConfirmWithdrawalDto {
+  @IsUUID()
+  withdrawalRequestId: string;
+
+  @IsString()
+  @Length(4, 8)
+  otpCode: string;
 }

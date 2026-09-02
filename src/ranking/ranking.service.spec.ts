@@ -17,12 +17,34 @@ function candidate(overrides: Partial<CandidateResult> = {}): CandidateResult {
     distanceKm: 2,
     rating: 4.8,
     level: DriverLevel.STANDARD,
+    totalTrips: 0,
+    cancelledTrips: 0,
     ...overrides,
   };
 }
 
-function fakeConfig(etaCandidateLimit = 8) {
-  return { get: (key: string) => (key === 'dispatch.etaCandidateLimit' ? etaCandidateLimit : undefined) } as any;
+/** Empty offers repo query builder - returns zero rows, so acceptance rate defaults to neutral for every candidate unless a test wires up real rows. */
+function fakeOffersRepo(rows: any[] = []) {
+  const qb: any = {
+    select: jest.fn().mockReturnThis(),
+    addSelect: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    groupBy: jest.fn().mockReturnThis(),
+    addGroupBy: jest.fn().mockReturnThis(),
+    getRawMany: jest.fn().mockResolvedValue(rows),
+  };
+  return { createQueryBuilder: jest.fn(() => qb) } as any;
+}
+
+function fakeConfig(etaCandidateLimit = 8, rankingOverrides: Record<string, number> = {}) {
+  return {
+    get: (key: string) => {
+      if (key === 'dispatch.etaCandidateLimit') return etaCandidateLimit;
+      if (key === 'dispatch.ranking') return rankingOverrides;
+      return undefined;
+    },
+  } as any;
 }
 
 /** Minimal metrics fake — just enough surface for DriverRankingService's calls. */
@@ -37,13 +59,13 @@ function fakeMetrics() {
 }
 
 describe('DriverRankingService', () => {
-  let googleMaps: { getDistanceMatrix: jest.Mock };
+  let googleMaps: { getDirections: jest.Mock };
   let metrics: ReturnType<typeof fakeMetrics>;
 
-  function build(etaCandidateLimit = 8) {
-    googleMaps = { getDistanceMatrix: jest.fn() };
+  function build(etaCandidateLimit = 8, offersRepo = fakeOffersRepo(), rankingOverrides: Record<string, number> = {}) {
+    googleMaps = { getDirections: jest.fn() };
     metrics = fakeMetrics();
-    return new DriverRankingService(googleMaps as any, fakeConfig(etaCandidateLimit), metrics);
+    return new DriverRankingService(googleMaps as any, fakeConfig(etaCandidateLimit, rankingOverrides), metrics, offersRepo);
   }
 
   it('a shorter road ETA beats a shorter straight-line distance', async () => {
@@ -56,14 +78,12 @@ describe('DriverRankingService', () => {
       lng: PICKUP.lng,
     });
 
-    // One batched call for the whole shortlist — results are aligned
-    // by index to the origins array (same order as the candidates
-    // array passed into rank()).
-    googleMaps.getDistanceMatrix.mockImplementation(async (origins: { lat: number; lng: number }[]) =>
-      origins.map((origin) =>
-        origin.lat === closeButSlow.lat ? { distanceKm: 2.0, durationMin: 17 } : { distanceKm: 3.2, durationMin: 9 },
-      ),
-    );
+    googleMaps.getDirections.mockImplementation(async (origin: { lat: number; lng: number }) => {
+      if (origin.lat === closeButSlow.lat) {
+        return { distanceKm: 2.0, durationMin: 17, polyline: null };
+      }
+      return { distanceKm: 3.2, durationMin: 9, polyline: null };
+    });
 
     const outcome = await service.rank(PICKUP, [closeButSlow, fartherButFast]);
 
@@ -78,20 +98,19 @@ describe('DriverRankingService', () => {
     const b = candidate({ driverUserId: 'b' });
     const c = candidate({ driverUserId: 'c' });
 
-    googleMaps.getDistanceMatrix.mockResolvedValueOnce([
-      { distanceKm: 1, durationMin: 12 },
-      { distanceKm: 1, durationMin: 4 },
-      { distanceKm: 1, durationMin: 8 },
-    ]);
+    googleMaps.getDirections
+      .mockResolvedValueOnce({ distanceKm: 1, durationMin: 12, polyline: null })
+      .mockResolvedValueOnce({ distanceKm: 1, durationMin: 4, polyline: null })
+      .mockResolvedValueOnce({ distanceKm: 1, durationMin: 8, polyline: null });
 
     const outcome = await service.rank(PICKUP, [a, b, c]);
 
     expect(outcome.ranked.map((r) => r.etaMinutes)).toEqual([4, 8, 12]);
   });
 
-  it('falls back to a distance-based ETA when Distance Matrix returns null (whole call failed), without crashing', async () => {
+  it('falls back to a distance-based ETA when the routing API returns null, without crashing', async () => {
     const service = build();
-    googleMaps.getDistanceMatrix.mockResolvedValue(null);
+    googleMaps.getDirections.mockResolvedValue(null);
 
     const outcome = await service.rank(PICKUP, [candidate({ distanceKm: 14 })]);
 
@@ -103,9 +122,9 @@ describe('DriverRankingService', () => {
     expect(outcome.routingFailures).toBe(1);
   });
 
-  it('falls back gracefully if the Distance Matrix call throws outright', async () => {
+  it('falls back gracefully if the routing call throws outright', async () => {
     const service = build();
-    googleMaps.getDistanceMatrix.mockRejectedValue(new Error('network blew up'));
+    googleMaps.getDirections.mockRejectedValue(new Error('network blew up'));
 
     const outcome = await expect(service.rank(PICKUP, [candidate()])).resolves.toBeDefined();
     const result = await service.rank(PICKUP, [candidate()]);
@@ -125,12 +144,10 @@ describe('DriverRankingService', () => {
       lng: PICKUP.lng,
     });
 
-    // Element-level failure: the whole Distance Matrix call succeeds,
-    // but only one origin gets a real route back (the other is null,
-    // mirroring Google returning a non-OK per-element status).
-    googleMaps.getDistanceMatrix.mockImplementation(async (origins: { lat: number; lng: number }[]) =>
-      origins.map((origin) => (origin.lat === routed.lat ? { distanceKm: 1, durationMin: 10 } : null)),
-    );
+    googleMaps.getDirections.mockImplementation(async (origin: { lat: number; lng: number }) => {
+      if (origin.lat === routed.lat) return { distanceKm: 1, durationMin: 10, polyline: null };
+      return null;
+    });
 
     const outcome = await service.rank(PICKUP, [routed, fallback]);
 
@@ -140,11 +157,9 @@ describe('DriverRankingService', () => {
     expect(fallbackEntry.etaSource).toBe(EtaSource.FALLBACK_DISTANCE);
   });
 
-  it('only routes the configured candidate limit in a single batched call, not every candidate', async () => {
+  it('only calls the routing API for the configured candidate limit, not every candidate', async () => {
     const service = build(3);
-    googleMaps.getDistanceMatrix.mockImplementation(async (origins: { lat: number; lng: number }[]) =>
-      origins.map(() => ({ distanceKm: 1, durationMin: 5 })),
-    );
+    googleMaps.getDirections.mockResolvedValue({ distanceKm: 1, durationMin: 5, polyline: null });
 
     const candidates = Array.from({ length: 20 }, (_, i) =>
       candidate({ driverUserId: `driver-${i}`, distanceKm: i + 1 }),
@@ -152,10 +167,8 @@ describe('DriverRankingService', () => {
 
     const outcome = await service.rank(PICKUP, candidates);
 
-    // One HTTP call total (batched), carrying only the 3 shortlisted origins.
-    expect(googleMaps.getDistanceMatrix).toHaveBeenCalledTimes(1);
-    expect(googleMaps.getDistanceMatrix.mock.calls[0][0]).toHaveLength(3);
-    expect(outcome.routingCallsMade).toBe(1);
+    expect(googleMaps.getDirections).toHaveBeenCalledTimes(3);
+    expect(outcome.routingCallsMade).toBe(3);
     // The other 17 still get a ranked (fallback) entry — none are silently dropped.
     expect(outcome.ranked).toHaveLength(20);
   });
@@ -165,7 +178,7 @@ describe('DriverRankingService', () => {
 
     const outcome = await service.rank(PICKUP, []);
 
-    expect(googleMaps.getDistanceMatrix).not.toHaveBeenCalled();
+    expect(googleMaps.getDirections).not.toHaveBeenCalled();
     expect(outcome.ranked).toEqual([]);
     expect(outcome.routingCallsMade).toBe(0);
   });
@@ -174,10 +187,7 @@ describe('DriverRankingService', () => {
     const service = build();
     const a = candidate({ driverUserId: 'zzz', distanceKm: 2 });
     const b = candidate({ driverUserId: 'aaa', distanceKm: 2 });
-    googleMaps.getDistanceMatrix.mockResolvedValue([
-      { distanceKm: 2, durationMin: 10 },
-      { distanceKm: 2, durationMin: 10 },
-    ]);
+    googleMaps.getDirections.mockResolvedValue({ distanceKm: 2, durationMin: 10, polyline: null });
 
     const outcome = await service.rank(PICKUP, [a, b]);
 
@@ -186,11 +196,10 @@ describe('DriverRankingService', () => {
 
   it('records routing-call and fallback counts accurately across a mixed batch', async () => {
     const service = build(5);
-    googleMaps.getDistanceMatrix.mockResolvedValueOnce([
-      { distanceKm: 1, durationMin: 5 },
-      null,
-      { distanceKm: 1, durationMin: 6 },
-    ]);
+    googleMaps.getDirections
+      .mockResolvedValueOnce({ distanceKm: 1, durationMin: 5, polyline: null })
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ distanceKm: 1, durationMin: 6, polyline: null });
 
     const outcome = await service.rank(PICKUP, [
       candidate({ driverUserId: 'x1' }),
@@ -198,9 +207,90 @@ describe('DriverRankingService', () => {
       candidate({ driverUserId: 'x3' }),
     ]);
 
-    // One underlying HTTP call handled all 3 candidates.
-    expect(outcome.routingCallsMade).toBe(1);
+    expect(outcome.routingCallsMade).toBe(3);
     expect(outcome.routingFailures).toBe(1);
     expect(outcome.fallbackUsed).toBe(true);
+  });
+
+  describe('multi-factor scoring', () => {
+    it('a meaningfully better rating outranks a very slightly worse ETA', async () => {
+      const service = build();
+      const fasterButLowerRated = candidate({ driverUserId: 'fast-low', distanceKm: 2, rating: 3.0, totalTrips: 0 });
+      const slightlySlowerButTopRated = candidate({ driverUserId: 'slow-top', distanceKm: 2, rating: 5.0, totalTrips: 0 });
+      googleMaps.getDirections
+        .mockResolvedValueOnce({ distanceKm: 2, durationMin: 5, polyline: null })
+        .mockResolvedValueOnce({ distanceKm: 2, durationMin: 5.5, polyline: null });
+
+      const outcome = await service.rank(PICKUP, [fasterButLowerRated, slightlySlowerButTopRated]);
+
+      expect(outcome.ranked[0].driverUserId).toBe('slow-top');
+    });
+
+    it('a driver with a real, established cancellation history scores lower than an equally-fast driver with a clean record', async () => {
+      const service = build();
+      const cleanRecord = candidate({ driverUserId: 'clean', distanceKm: 2, totalTrips: 20, cancelledTrips: 0 });
+      const frequentCanceller = candidate({ driverUserId: 'canceller', distanceKm: 2, totalTrips: 20, cancelledTrips: 10 });
+      googleMaps.getDirections.mockResolvedValue({ distanceKm: 2, durationMin: 5, polyline: null });
+
+      const outcome = await service.rank(PICKUP, [frequentCanceller, cleanRecord]);
+
+      expect(outcome.ranked[0].driverUserId).toBe('clean');
+      expect(outcome.ranked[0].scoreBreakdown.cancellationScore).toBeGreaterThan(
+        outcome.ranked[1].scoreBreakdown.cancellationScore,
+      );
+    });
+
+    it('does NOT penalize a brand-new driver for one cancelled trip out of very few - "do not unfairly discriminate against drivers"', async () => {
+      const service = build();
+      // 1 cancelled out of 1 trip is a 100% raw cancellation rate - but
+      // with only 1 trip of history, that's noise, not a real signal.
+      const newDriverOneCancel = candidate({ driverUserId: 'new-driver', distanceKm: 2, totalTrips: 1, cancelledTrips: 1 });
+      googleMaps.getDirections.mockResolvedValue({ distanceKm: 2, durationMin: 5, polyline: null });
+
+      const outcome = await service.rank(PICKUP, [newDriverOneCancel]);
+
+      expect(outcome.ranked[0].scoreBreakdown.cancellationScore).toBe(1);
+    });
+
+    it('acceptance rate genuinely comes from real ride_offers data and affects the final ranking', async () => {
+      const offersRepo = fakeOffersRepo([
+        { driverUserId: 'reliable', status: 'accepted', count: '9' },
+        { driverUserId: 'reliable', status: 'declined', count: '1' },
+        { driverUserId: 'flaky', status: 'accepted', count: '1' },
+        { driverUserId: 'flaky', status: 'expired', count: '9' },
+      ]);
+      const service = build(8, offersRepo);
+      const reliable = candidate({ driverUserId: 'reliable', distanceKm: 2 });
+      const flaky = candidate({ driverUserId: 'flaky', distanceKm: 2 });
+      googleMaps.getDirections.mockResolvedValue({ distanceKm: 2, durationMin: 5, polyline: null });
+
+      const outcome = await service.rank(PICKUP, [flaky, reliable]);
+
+      expect(outcome.ranked[0].driverUserId).toBe('reliable');
+      expect(outcome.ranked[0].scoreBreakdown.acceptanceScore).toBeCloseTo(0.9);
+      expect(outcome.ranked[1].scoreBreakdown.acceptanceScore).toBeCloseTo(0.1);
+    });
+
+    it('weights are genuinely configurable - an operator can make rating dominate over ETA', async () => {
+      // With default weights, the faster driver should normally win.
+      const faster = candidate({ driverUserId: 'faster', distanceKm: 2, rating: 3.0, totalTrips: 0 });
+      const slowerButBetterRated = candidate({ driverUserId: 'better-rated', distanceKm: 2, rating: 5.0, totalTrips: 0 });
+
+      const defaultService = build();
+      googleMaps.getDirections
+        .mockResolvedValueOnce({ distanceKm: 2, durationMin: 3, polyline: null })
+        .mockResolvedValueOnce({ distanceKm: 2, durationMin: 20, polyline: null });
+      const defaultOutcome = await defaultService.rank(PICKUP, [faster, slowerButBetterRated]);
+      expect(defaultOutcome.ranked[0].driverUserId).toBe('faster');
+
+      // With ETA weight turned off entirely and rating dominant, the
+      // better-rated driver should now win despite being much slower.
+      const ratingDominantService = build(8, fakeOffersRepo(), { etaWeight: 0, ratingWeight: 1 });
+      googleMaps.getDirections
+        .mockResolvedValueOnce({ distanceKm: 2, durationMin: 3, polyline: null })
+        .mockResolvedValueOnce({ distanceKm: 2, durationMin: 20, polyline: null });
+      const ratingDominantOutcome = await ratingDominantService.rank(PICKUP, [faster, slowerButBetterRated]);
+      expect(ratingDominantOutcome.ranked[0].driverUserId).toBe('better-rated');
+    });
   });
 });

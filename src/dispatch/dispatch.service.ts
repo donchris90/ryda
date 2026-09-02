@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { LessThan, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Interval } from '@nestjs/schedule';
 import { EventEmitter2 } from '@nestjs/event-emitter';
@@ -11,6 +11,9 @@ import { DriversService } from '../drivers/drivers.service';
 import { DispatchAiService } from '../ai/dispatch-ai.service';
 import { FeatureFlagsService, FEATURE_KEYS } from '../feature-flags/feature-flags.service';
 import { MetricsService } from '../observability/metrics.service';
+import { CandidateSearchService } from '../candidate-search/candidate-search.service';
+import { DriverRankingService } from '../ranking/ranking.service';
+import { DispatchDomain, DispatchMode } from '../candidate-search/candidate-search.types';
 
 /**
  * Adds a "smart dispatch" layer on top of the existing broadcast-accept
@@ -36,6 +39,8 @@ export class DispatchService {
     private readonly config: ConfigService,
     private readonly events: EventEmitter2,
     private readonly metricsService: MetricsService,
+    private readonly candidateSearchService: CandidateSearchService,
+    private readonly driverRankingService: DriverRankingService,
   ) {}
 
   /**
@@ -247,6 +252,54 @@ export class DispatchService {
    * already genuinely expired. expiresAt is the actual source of
    * truth; status is just where the sweep's cleanup eventually lands.
    */
+  /**
+   * Full offer history for a ride, oldest first - every driver ever
+   * offered it and what happened (pending/accepted/declined/expired/
+   * superseded), for an operator debugging "why hasn't this ride been
+   * picked up." Real gap found during audit: this data was always
+   * being recorded correctly in ride_offers, there was just no way for
+   * an admin to actually see it.
+   */
+  async getDispatchTimeline(rideId: string): Promise<RideOffer[]> {
+    return this.offersRepo.find({ where: { rideId }, order: { offeredAt: 'ASC' } });
+  }
+
+  /**
+   * Re-runs the exact same eligibility pipeline live dispatch uses
+   * (CandidateSearchService) for this ride's current pickup/category -
+   * not a stored snapshot, so it reflects who's eligible right now,
+   * which is what an operator actually needs when a ride is stuck.
+   * Deliberately does not create an offer or touch the ride - purely
+   * informational.
+   */
+  async getCandidatesForRide(ride: Ride) {
+    const excludeDriverUserIds = await this.getTriedDriverUserIds(ride.id);
+    const searchOutcome = await this.candidateSearchService.search({
+      pickup: { lat: ride.pickupLat, lng: ride.pickupLng },
+      domain: DispatchDomain.RIDE,
+      mode: DispatchMode.MANUAL,
+      rideCategory: ride.category,
+      excludeDriverUserIds,
+      minCandidates: 1,
+      limit: this.config.get<number>('dispatch.candidateFetchLimit') ?? 50,
+    });
+
+    // Same ranking a real AUTO offer would use - an operator debugging
+    // "why hasn't driver X been offered this ride" needs to see the
+    // actual order/score, not just who's eligible.
+    const rankingOutcome = await this.driverRankingService.rank(
+      { lat: ride.pickupLat, lng: ride.pickupLng },
+      searchOutcome.candidates,
+    );
+
+    return { ...searchOutcome, candidates: rankingOutcome.ranked };
+  }
+
+  /** Admin-initiated cancellation of whatever offer is currently pending on this ride, if any. Idempotent - see withdrawOffer(). */
+  async adminCancelOffer(rideId: string): Promise<void> {
+    await this.withdrawOffer(rideId);
+  }
+
   private isLive(offer: RideOffer): boolean {
     return offer.status === RideOfferStatus.PENDING && offer.expiresAt.getTime() > Date.now();
   }
@@ -302,55 +355,26 @@ export class DispatchService {
    *     candidate. It re-checks the ride's current status/dispatchMode
    *     itself before doing anything, so this sweep doesn't need to know
    *     which rides are AUTO — it just reports every expiry uniformly.
-   *
-   * This is one atomic conditional UPDATE, not a find-then-save round
-   * trip. An earlier version read PENDING + time-expired rows, flipped
-   * `.status` on the in-memory objects, then called save() — which is a
-   * blind full-entity `UPDATE ... WHERE id = $1` with no guard on the
-   * row's *current* status. In the window between that read and that
-   * write, a driver's markAccepted() (or markDeclined()/withdrawOffer())
-   * could land its own targeted `WHERE status = 'pending'` update on the
-   * very same row — acceptRide() only requires the offer to have been
-   * live at the moment it checked, which can be a moment before this
-   * sweep's read. The old save() would then silently clobber that
-   * genuine ACCEPTED/DECLINED/SUPERSEDED status back to EXPIRED, and
-   * fire a bogus 'ride.offer.expired' for an offer that had actually
-   * just been accepted — corrupting both the offer's own audit trail
-   * and offer_timeout_rate's numerator below. Conditioning the UPDATE
-   * itself on `status = PENDING` closes that window the same way every
-   * other write in this file already does, and as a side effect also
-   * makes two overlapping sweep ticks (if one ever runs past 15s) safe:
-   * whichever's UPDATE commits first wins the row, the other's WHERE
-   * simply matches nothing.
    */
   @Interval(15000)
   async expireStaleOffersAndReassign(): Promise<void> {
     this.lastSweepAt = new Date();
 
-    const result = await this.offersRepo
-      .createQueryBuilder()
-      .update(RideOffer)
-      .set({ status: RideOfferStatus.EXPIRED })
-      .where('status = :pending', { pending: RideOfferStatus.PENDING })
-      .andWhere('expiresAt < :now', { now: new Date() })
-      .returning(['id', 'rideId', 'driverUserId'])
-      .execute();
+    const stale = await this.offersRepo.find({
+      where: { status: RideOfferStatus.PENDING, expiresAt: LessThan(new Date()) },
+    });
+    if (stale.length === 0) return;
 
-    const expired = (result.raw ?? []) as Array<{
-      id: string;
-      rideId: string;
-      driverUserId: string;
-    }>;
-    if (expired.length === 0) return;
+    for (const offer of stale) {
+      offer.status = RideOfferStatus.EXPIRED;
+    }
+    await this.offersRepo.save(stale);
 
     // offer_timeout_rate (batch 9): every offer that times out unanswered,
     // MANUAL or AUTO alike — divide against dispatchOffersTotal in PromQL.
-    // Only offers this UPDATE actually flipped are counted, so an offer
-    // that was accepted/declined out from under the sweep in the same
-    // instant is correctly excluded rather than double-counted.
-    this.metricsService.dispatchOfferTimeoutsTotal.inc(expired.length);
+    this.metricsService.dispatchOfferTimeoutsTotal.inc(stale.length);
 
-    for (const offer of expired) {
+    for (const offer of stale) {
       this.events.emit('ride.offer.expired', { rideId: offer.rideId, driverUserId: offer.driverUserId });
     }
   }

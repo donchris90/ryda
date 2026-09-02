@@ -6,12 +6,7 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
-import {
-  RideCategory,
-  RideStatus,
-  PaymentMethod,
-  CancelledBy,
-} from '../../common/enums/ride.enum';
+import { RideCategory, RideStatus, PaymentMethod, CancelledBy } from '../../common/enums/ride.enum';
 import { DispatchMode } from '../../candidate-search/candidate-search.types';
 
 @Entity('rides')
@@ -126,17 +121,15 @@ export class Ride {
   @Column({ default: false })
   isPinVerified: boolean;
 
+  // Rate-limits verifyPin() - see RidesService.verifyPin()'s doc comment.
+  @Column({ default: 0 })
+  pinAttemptCount: number;
+
   @Column({ default: false })
   usedRealRouting: boolean;
 
   @Column({ default: false })
   isAirportTrip: boolean;
-
-  // See isWheelchairAccessibleVehicle() in ride-vehicle-match.util.ts -
-  // an orthogonal hard requirement on top of `category`, not a third
-  // ride category.
-  @Column({ default: false })
-  requiresAccessibleVehicle: boolean;
 
   // Informational only — no real flight-tracking integration (see Known
   // gaps). Lets the passenger/driver see what flight a pickup is tied to.
@@ -206,34 +199,6 @@ export class Ride {
 
   @Column({ type: 'timestamp', nullable: true })
   cancelledAt: Date | null;
-
-  // ---- Ride pooling (shared rides) ----
-  // True for any ride requested as a pool candidate, whether or not a
-  // partner was ever found — see PoolMatchingService's class doc comment
-  // for the full batch-matching lifecycle. Deliberately a flag rather
-  // than a third RideCategory, same convention as
-  // requiresAccessibleVehicle: pooling is orthogonal to the
-  // Economy/Comfort tier, not a tier itself, and is only ever offered on
-  // ECONOMY.
-  @Column({ default: false })
-  isPooled: boolean;
-
-  // Set once matched with a partner ride (see PoolGroup). Both rides in
-  // a pair share the same poolGroupId; nulled back out if the pairing
-  // unwinds before a driver is assigned (partner cancels, window expires
-  // with only one side, etc). Not a DB foreign key constraint on
-  // purpose — same "loose reference by id" convention this codebase
-  // already uses everywhere else (passengerId, driverId, vehicleId).
-  @Index()
-  @Column({ type: 'varchar', nullable: true })
-  poolGroupId: string | null;
-
-  // How much of totalFare is the pooling discount, stored so it can be
-  // cleanly added back if this ride unpools before a driver is assigned
-  // (see PoolMatchingService.unpoolRide()) without having to recompute
-  // the original solo fare from scratch.
-  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
-  poolDiscountAmount: string;
 
   @CreateDateColumn()
   createdAt: Date;

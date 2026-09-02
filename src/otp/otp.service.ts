@@ -3,15 +3,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { OtpCode, OtpPurpose } from './otp-code.entity';
-import { AfricasTalkingProvider } from '../notifications/providers/africas-talking.provider';
+import { TwilioProvider } from '../notifications/providers/twilio.provider';
 
 const MAX_ATTEMPTS = 5;
-
-// A destination containing '@' is an email (e.g. wallet-transfer OTPs,
-// which are delivered by MailerService using the code this method
-// returns) - anything else is treated as a phone number and is the only
-// case this service ever attempts to SMS directly.
-const isEmailDestination = (destination: string): boolean => destination.includes('@');
 
 @Injectable()
 export class OtpService {
@@ -21,26 +15,10 @@ export class OtpService {
     @InjectRepository(OtpCode)
     private readonly otpRepo: Repository<OtpCode>,
     private readonly config: ConfigService,
-    private readonly africasTalking: AfricasTalkingProvider,
+    private readonly twilio: TwilioProvider,
   ) {}
 
-  /**
-   * `devOnlyCode` is still always returned - some callers (wallet-transfer
-   * confirmation) never SMS the destination at all and instead embed this
-   * value in an email they send themselves, so the field can't simply
-   * disappear once a real SMS provider is configured.
-   *
-   * `smsSent` is the new signal: true only when this method itself just
-   * delivered the code over a real channel. Callers that hand the raw
-   * code straight back in an API response (see AuthService.sendOtp())
-   * must stop doing that once smsSent is true - the code has already
-   * been delivered out-of-band at that point, and echoing it back in the
-   * response would defeat the entire point of sending it by SMS.
-   */
-  async send(
-    destination: string,
-    purpose: OtpPurpose,
-  ): Promise<{ devOnlyCode: string; expiresInSeconds: number; smsSent: boolean }> {
+  async send(destination: string, purpose: OtpPurpose): Promise<{ devOnlyCode: string | null; expiresInSeconds: number; delivered: boolean }> {
     const length = this.config.get<number>('otp.length')!;
     const ttlSeconds = this.config.get<number>('otp.ttlSeconds')!;
     const code = this.generateCode(length);
@@ -54,25 +32,26 @@ export class OtpService {
       }),
     );
 
-    let smsSent = false;
-    if (!isEmailDestination(destination) && this.africasTalking.isConfigured()) {
-      const result = await this.africasTalking.sendSms(
-        destination,
-        `Your Ryda verification code is ${code}. It expires in ${Math.round(ttlSeconds / 60)} minutes.`,
-      );
-      if (result.success) {
-        smsSent = true;
-      } else {
-        // Never fail the calling operation over a delivery problem -
-        // same "log, don't throw" guarantee every other notification
-        // provider in this project follows. The code is still valid and
-        // still returned below, so a dev/staging caller without working
-        // SMS can keep testing the flow end-to-end.
-        this.logger.warn(`SMS OTP send failed for ${purpose}: ${result.error}`);
+    // destination is always a phone number for every current caller
+    // (PHONE_VERIFICATION, WALLET_TRANSFER, WALLET_WITHDRAWAL all pass
+    // dto.phone/user.phone) - attempt real SMS delivery via the same
+    // Twilio account notifications already use, rather than silently
+    // never sending anything.
+    let delivered = false;
+    if (this.twilio.isSmsConfigured()) {
+      const result = await this.twilio.sendSms(destination, `Your Ryda verification code is ${code}. It expires in ${Math.round(ttlSeconds / 60)} minutes. Never share this code with anyone.`);
+      delivered = result.success;
+      if (!result.success) {
+        this.logger.warn(`OTP SMS delivery failed for purpose=${purpose}: ${result.error}`);
       }
+    } else {
+      this.logger.warn('TWILIO not configured — OTP SMS not actually sent (see devOnlyCode fallback in README)');
     }
 
-    return { devOnlyCode: code, expiresInSeconds: ttlSeconds, smsSent };
+    // Only ever surface the real code here when it genuinely wasn't
+    // delivered anywhere else - once SMS delivery succeeds, the code
+    // must not also be readable straight from this response.
+    return { devOnlyCode: delivered ? null : code, expiresInSeconds: ttlSeconds, delivered };
   }
 
   /**

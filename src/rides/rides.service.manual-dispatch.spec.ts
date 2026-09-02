@@ -3,10 +3,9 @@ import { RideStatus, PaymentMethod, RideCategory } from '../common/enums/ride.en
 import { DriverApprovalStatus, DriverAvailability } from '../common/enums/driver-status.enum';
 import { DriverService } from '../common/enums/driver-service.enum';
 import { DriverLevel } from '../common/enums/driver-level.enum';
-import { VehicleCategory } from '../common/enums/vehicle.enum';
+import { VehicleCategory, VehicleStatus } from '../common/enums/vehicle.enum';
 import { DispatchMode } from '../candidate-search/candidate-search.types';
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
-import { UserRole } from '../common/enums/user-role.enum';
 
 function fakeRide(overrides: Partial<any> = {}) {
   return {
@@ -102,8 +101,6 @@ function buildService(overrides: Record<string, any> = {}) {
     googleMaps: {},
     candidateSearchService: { search: jest.fn(), ...overrides.candidateSearchService },
     driverRankingService: { rank: jest.fn(), ...overrides.driverRankingService },
-    poolMatchingService: { requestPool: jest.fn(), propagateDriverAssignment: jest.fn().mockResolvedValue(undefined), onRideCancelledBeforeMatch: jest.fn().mockResolvedValue(undefined), unpoolRide: jest.fn().mockResolvedValue(undefined) },
-    featureFlagsService: { isEnabled: jest.fn().mockResolvedValue(true) },
   };
 
   const service = new RidesService(
@@ -131,8 +128,6 @@ function buildService(overrides: Record<string, any> = {}) {
     deps.googleMaps as any,
     deps.candidateSearchService as any,
     deps.driverRankingService as any,
-    deps.poolMatchingService as any,
-    deps.featureFlagsService as any,
   );
 
   return { service, deps };
@@ -156,7 +151,7 @@ describe('RidesService — manual driver selection', () => {
         fallbackUsed: false,
       });
       deps.usersService.findByIds.mockResolvedValue([
-        { id: 'driver-1', firstName: 'Ada', lastName: 'Okoye', profilePhotoUrl: 'https://cdn.example.com/ada.jpg' },
+        { id: 'driver-1', firstName: 'Ada', lastName: 'Okoye' },
       ]);
       deps.vehiclesService.findById.mockResolvedValue({
         id: 'vehicle-1',
@@ -164,10 +159,9 @@ describe('RidesService — manual driver selection', () => {
         model: 'Corolla',
         color: 'Black',
         plateNumber: 'ABC-123',
-        photoUrl: 'https://cdn.example.com/corolla.jpg',
       });
 
-      const result = await service.findSelectableDrivers('ride-1', 'passenger-1', UserRole.PASSENGER);
+      const result = await service.findSelectableDrivers('ride-1');
 
       expect(result).toEqual([
         {
@@ -178,12 +172,10 @@ describe('RidesService — manual driver selection', () => {
           level: DriverLevel.STANDARD,
           distanceKm: 2,
           etaMinutes: 6,
-          driverPhotoUrl: 'https://cdn.example.com/ada.jpg',
           vehicleMake: 'Toyota',
           vehicleModel: 'Corolla',
           vehicleColor: 'Black',
           vehiclePlateNumber: 'ABC-123',
-          vehiclePhotoUrl: 'https://cdn.example.com/corolla.jpg',
         },
       ]);
 
@@ -203,7 +195,7 @@ describe('RidesService — manual driver selection', () => {
         roundsAttempted: 3,
       });
 
-      const result = await service.findSelectableDrivers('ride-1', 'passenger-1', UserRole.PASSENGER);
+      const result = await service.findSelectableDrivers('ride-1');
 
       expect(result).toEqual([]);
       expect(deps.driverRankingService.rank).not.toHaveBeenCalled();
@@ -300,7 +292,7 @@ describe('RidesService — acceptRide atomic driver reservation', () => {
         emitReservedForTrip: jest.fn(),
       },
       vehiclesService: {
-        findById: jest.fn().mockResolvedValue({ id: 'vehicle-1', category: VehicleCategory.CAR }),
+        findById: jest.fn().mockResolvedValue({ id: 'vehicle-1', category: VehicleCategory.CAR, status: VehicleStatus.ACTIVE }),
       },
     };
   }
@@ -316,6 +308,23 @@ describe('RidesService — acceptRide atomic driver reservation', () => {
     expect(manager.__queryBuilder.execute).toHaveBeenCalled();
     expect(deps.driversService.emitReservedForTrip).toHaveBeenCalledTimes(1);
     expect(result.status).toBe(RideStatus.ACCEPTED);
+  });
+
+  it('rejects acceptance when the driver\'s vehicle exists but is not ACTIVE (e.g. still pending inspection, or deactivated) - real gap found via the admin-dispatch candidates endpoint: this same driver correctly never appeared as an eligible dispatch candidate, but the open accept path had no matching check, so they could still accept directly', async () => {
+    const manager = fakeManager();
+    const deps = baseDeps(manager);
+    deps.vehiclesService.findById = jest.fn().mockResolvedValue({
+      id: 'vehicle-1',
+      category: VehicleCategory.CAR,
+      status: VehicleStatus.PENDING_INSPECTION,
+    });
+    const { service, deps: allDeps } = buildService(deps);
+    allDeps.ridesRepo.findOne.mockResolvedValue(fakeRide());
+
+    await expect(service.acceptRide('ride-1', 'driver-1')).rejects.toThrow(
+      /not active/,
+    );
+    expect(allDeps.driversService.reserveOnlineDriverForTrip).not.toHaveBeenCalled();
   });
 
   it('auto_offer_accept_rate (batch 9): counts an AUTO ride reaching ACCEPTED, but not a MANUAL one', async () => {
@@ -400,7 +409,7 @@ describe('RidesService — acceptRide atomic driver reservation', () => {
         reserveOnlineDriverForTrip,
         emitReservedForTrip: jest.fn(),
       },
-      vehiclesService: { findById: jest.fn().mockResolvedValue({ id: 'vehicle-1', category: VehicleCategory.CAR }) },
+      vehiclesService: { findById: jest.fn().mockResolvedValue({ id: 'vehicle-1', category: VehicleCategory.CAR, status: VehicleStatus.ACTIVE }) },
     });
     depsA.ridesRepo.findOne.mockResolvedValue(fakeRide({ id: 'ride-a' }));
 
@@ -415,7 +424,7 @@ describe('RidesService — acceptRide atomic driver reservation', () => {
         reserveOnlineDriverForTrip,
         emitReservedForTrip: jest.fn(),
       },
-      vehiclesService: { findById: jest.fn().mockResolvedValue({ id: 'vehicle-1', category: VehicleCategory.CAR }) },
+      vehiclesService: { findById: jest.fn().mockResolvedValue({ id: 'vehicle-1', category: VehicleCategory.CAR, status: VehicleStatus.ACTIVE }) },
     });
     depsB.ridesRepo.findOne.mockResolvedValue(fakeRide({ id: 'ride-b' }));
 

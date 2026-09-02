@@ -132,17 +132,6 @@ export default () => ({
     fromNumber: process.env.TWILIO_FROM_NUMBER ?? '',
     whatsappFromNumber: process.env.TWILIO_WHATSAPP_FROM ?? '', // e.g. whatsapp:+14155238886
   },
-  africasTalking: {
-    // Used specifically for OTP SMS delivery — see OtpService /
-    // AfricasTalkingProvider. Independent of the Twilio config above,
-    // which backs general notifications.
-    apiKey: process.env.AFRICASTALKING_API_KEY ?? '',
-    username: process.env.AFRICASTALKING_USERNAME ?? '',
-    senderId: process.env.AFRICASTALKING_SENDER_ID ?? '', // optional shortcode/sender ID
-    baseUrl:
-      process.env.AFRICASTALKING_BASE_URL ??
-      'https://api.africastalking.com/version1',
-  },
   sendgrid: {
     apiKey: process.env.SENDGRID_API_KEY ?? '',
     fromEmail: process.env.SENDGRID_FROM_EMAIL ?? 'no-reply@ryda.example',
@@ -195,42 +184,36 @@ export default () => ({
     // before eligibility filtering. Bounds the PostgreSQL lookup in
     // CandidateSearchService.applyEligibility() to a small, fixed set —
     // never a full online-driver scan.
-    candidateFetchLimit: parseInt(
-      process.env.DISPATCH_CANDIDATE_LIMIT ?? '50',
-      10,
-    ),
+    candidateFetchLimit: parseInt(process.env.DISPATCH_CANDIDATE_LIMIT ?? '50', 10),
     // How many of the (already distance-sorted) eligible candidates get a
     // real routing-API call during ranking. Kept small on purpose — see
     // the cost requirement doc comment in DriverRankingService.rank().
-    etaCandidateLimit: parseInt(
-      process.env.DISPATCH_ETA_CANDIDATE_LIMIT ?? '8',
-      10,
-    ),
-  },
-  pooling: {
-    // How long a pool request waits in POOL_MATCHING for a compatible
-    // partner before falling back to a normal solo dispatch. Matching is
-    // also attempted immediately on request (in case a partner is
-    // already waiting) — this window is only the outer bound, not a
-    // fixed wait every passenger experiences.
-    matchWindowMs: parseInt(process.env.POOL_MATCH_WINDOW_MS ?? '120000', 10),
-    // Two pool requests are only compatible if their pickups are within
-    // this straight-line distance of each other...
-    maxPickupDetourKm: parseFloat(process.env.POOL_MAX_PICKUP_DETOUR_KM ?? '2'),
-    // ...and if pairing them doesn't add more than this fraction of
-    // either rider's own solo trip distance (e.g. 0.35 = pairing can add
-    // at most 35% extra distance to either leg). Approximated with
-    // haversine distance between stops, same "good enough for matching,
-    // not for billing the meter" tradeoff geo.util.ts's doc comment
-    // already makes for fare estimates.
-    maxDetourFraction: parseFloat(
-      process.env.POOL_MAX_DETOUR_FRACTION ?? '0.35',
-    ),
-    // Flat discount applied to each rider's solo fare once pooled,
-    // regardless of how much overlap there actually was. A deliberate
-    // v1 simplification — see PoolMatchingService's class doc comment
-    // for the overlap-weighted pricing this should graduate to later.
-    discountFraction: parseFloat(process.env.POOL_DISCOUNT_FRACTION ?? '0.25'),
+    etaCandidateLimit: parseInt(process.env.DISPATCH_ETA_CANDIDATE_LIMIT ?? '8', 10),
+    ranking: {
+      // Weighted multi-factor score, not pure ETA - see
+      // DriverRankingService.rank(). Each weight applies to a 0-1
+      // "goodness" component (higher always better), summed into a
+      // single score candidates are sorted by, descending. Defaults
+      // keep ETA dominant since pickup speed is what a waiting
+      // passenger actually feels most - these are reasonable starting
+      // points, not a finalized business decision, and are worth
+      // tuning against real acceptance/completion data once there's
+      // enough of it to look at.
+      etaWeight: parseFloat(process.env.DISPATCH_RANKING_ETA_WEIGHT ?? '0.6'),
+      ratingWeight: parseFloat(process.env.DISPATCH_RANKING_RATING_WEIGHT ?? '0.2'),
+      cancellationWeight: parseFloat(process.env.DISPATCH_RANKING_CANCELLATION_WEIGHT ?? '0.1'),
+      acceptanceWeight: parseFloat(process.env.DISPATCH_RANKING_ACCEPTANCE_WEIGHT ?? '0.1'),
+      // A driver's cancellation/acceptance rate isn't meaningful until
+      // they have enough history behind it - one cancelled trip out of
+      // one total is a 100% cancellation rate on paper, but says
+      // nothing real yet. Below this many trips (cancellation) or
+      // offers (acceptance), that factor defaults to neutral (1.0)
+      // instead of penalizing a driver for a small, noisy sample -
+      // the "do not unfairly discriminate against drivers" requirement
+      // applies most sharply to brand-new drivers with little history.
+      minTripsForCancellationSignal: parseInt(process.env.DISPATCH_RANKING_MIN_TRIPS ?? '5', 10),
+      minOffersForAcceptanceSignal: parseInt(process.env.DISPATCH_RANKING_MIN_OFFERS ?? '5', 10),
+    },
   },
   driverLocation: {
     // How old a driver's last GPS fix can be before the live-driver index
@@ -238,10 +221,35 @@ export default () => ({
     // DriversService.findNearby() already hardcodes (2 minutes), kept
     // here so the new index and the legacy Postgres scan agree until the
     // legacy path is retired.
-    staleSeconds: parseInt(
-      process.env.DRIVER_LOCATION_STALE_SECONDS ?? '120',
-      10,
-    ),
+    staleSeconds: parseInt(process.env.DRIVER_LOCATION_STALE_SECONDS ?? '120', 10),
+  },
+  safetyMonitoring: {
+    // Below FraudService's IMPOSSIBLE_SPEED_KMH (250, which flags GPS
+    // spoofing/corrupted data) but well above real, if dangerous,
+    // driving - a genuinely different concern (unsafe driving vs. fake
+    // GPS data), not a duplicate of the fraud check.
+    excessiveSpeedKmh: parseFloat(process.env.SAFETY_EXCESSIVE_SPEED_KMH ?? '130'),
+    // How stale a driver's GPS fix can get mid-trip before it's worth a
+    // human glance - separate from (and shorter than) the dispatch
+    // staleness threshold above, since a driver already on a trip with
+    // a passenger matters more than one sitting idle between rides.
+    gpsStaleSeconds: parseInt(process.env.SAFETY_GPS_STALE_SECONDS ?? '180', 10),
+    // Deliberately generous multipliers, not tight bounds - a normal
+    // traffic jam, a legitimate detour around a closed road, or simply
+    // a slow driver shouldn't trip these. "Do not automatically accuse
+    // users of wrongdoing" applies directly here: false positives cost
+    // more than a late true positive.
+    tripDurationAnomalyMultiplier: parseFloat(process.env.SAFETY_DURATION_MULTIPLIER ?? '2.5'),
+    routeDeviationDistanceMultiplier: parseFloat(process.env.SAFETY_DISTANCE_MULTIPLIER ?? '1.8'),
+    // How long a driver can sit within a small radius mid-trip before
+    // it's worth a look - not immediately, since every trip has brief,
+    // completely normal stops (a red light, dropping something off).
+    unusualStopMinutes: parseInt(process.env.SAFETY_UNUSUAL_STOP_MINUTES ?? '8', 10),
+    unusualStopRadiusMeters: parseFloat(process.env.SAFETY_UNUSUAL_STOP_RADIUS_M ?? '100'),
+    // A ride completed faster than this after starting is worth a
+    // glance - not proof of anything, since a genuinely very short
+    // trip is entirely possible.
+    minPlausibleTripSeconds: parseInt(process.env.SAFETY_MIN_TRIP_SECONDS ?? '60', 10),
   },
   logistics: {
     baseFare: parseFloat(process.env.LOGISTICS_BASE_FARE ?? '300'),

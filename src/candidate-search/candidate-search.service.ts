@@ -14,7 +14,7 @@ import {
 } from '../common/enums/driver-status.enum';
 import { VehicleStatus } from '../common/enums/vehicle.enum';
 import { DriverService, ServiceApprovalStatus, isOnlineForService } from '../common/enums/driver-service.enum';
-import { doesVehicleMatchRideCategory, isWheelchairAccessibleVehicle } from '../common/ride-vehicle-match.util';
+import { doesVehicleMatchRideCategory } from '../common/ride-vehicle-match.util';
 import { canVehicleCoverDelivery } from '../common/vehicle-capacity-match.util';
 import { MetricsService } from '../observability/metrics.service';
 import {
@@ -369,6 +369,8 @@ export class CandidateSearchService {
         distanceKm: distanceByUserId.get(profile.userId) ?? 0,
         rating: parseFloat(profile.rating),
         level: profile.level,
+        totalTrips: profile.totalTrips,
+        cancelledTrips: profile.cancelledTrips,
       });
     }
 
@@ -384,17 +386,10 @@ export class CandidateSearchService {
     input: CandidateSearchInput,
   ): boolean {
     if (input.domain === DispatchDomain.RIDE) {
-      if (!input.rideCategory) return false;
-      // Accessibility supersedes the normal category->vehicle mapping
-      // rather than adding to it: there's one pool of accessible
-      // vehicles, not a separate "accessible economy" vs "accessible
-      // comfort" fleet, so any WHEELCHAIR_ACCESSIBLE vehicle qualifies
-      // once accessibility is required, regardless of tier. The tier
-      // still drives fare via FareService's CATEGORY_MULTIPLIER.
-      if (input.requiresAccessibleVehicle) {
-        return isWheelchairAccessibleVehicle(vehicle);
-      }
-      return doesVehicleMatchRideCategory(vehicle, input.rideCategory);
+      return (
+        !!input.rideCategory &&
+        doesVehicleMatchRideCategory(vehicle, input.rideCategory)
+      );
     }
     if (input.domain === DispatchDomain.COURIER) {
       return (

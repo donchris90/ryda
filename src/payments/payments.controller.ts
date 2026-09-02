@@ -25,6 +25,7 @@ import { PaymentsService } from './payments.service';
 import { PaymentStatus } from './entities/payment-record.entity';
 import { PaymentMethod } from '../common/enums/ride.enum';
 import { PaystackService } from './paystack/paystack.service';
+import { PaystackReconciliationService } from './paystack-reconciliation.service';
 import { RefundPaymentDto, SetDefaultCardDto } from './dto/payments.dto';
 import { Audit } from '../audit/decorators/audit.decorator';
 import { RequirePermission } from '../common/permissions/require-permission.decorator';
@@ -38,6 +39,7 @@ export class PaymentsController {
   constructor(
     private readonly paymentsService: PaymentsService,
     private readonly paystack: PaystackService,
+    private readonly paystackReconciliationService: PaystackReconciliationService,
     @Inject(forwardRef(() => WithdrawalsService))
     private readonly withdrawalsService: WithdrawalsService,
   ) {}
@@ -108,6 +110,33 @@ export class PaymentsController {
   }
 
   /**
+   * Compares this backend's own payment_records against what Paystack's
+   * own transaction list actually shows for the given date range - a
+   * missed webhook (Paystack has it, we don't), a status disagreement,
+   * or an amount mismatch. Read-only: never corrects anything itself.
+   * PAYMENTS_VIEW_ALL (not the refund-specific permission), since this
+   * is a report, not a mutation.
+   */
+  @Get('admin/paystack-reconciliation')
+  @UseGuards(JwtAuthGuard, RolesGuard, PermissionsGuard)
+  @Roles(UserRole.ADMIN, UserRole.FINANCE)
+  @RequirePermission(Permission.PAYMENTS_VIEW_ALL)
+  reconcilePaystack(@Query('from') from: string, @Query('to') to: string) {
+    if (!from || !to) {
+      throw new BadRequestException('Both from and to query params are required (ISO date strings)');
+    }
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+    if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) {
+      throw new BadRequestException('from/to must be valid ISO date strings');
+    }
+    if (fromDate >= toDate) {
+      throw new BadRequestException('from must be before to');
+    }
+    return this.paystackReconciliationService.reconcile(fromDate, toDate);
+  }
+
+  /**
    * Paystack webhook receiver. Signature is verified against the raw
    * request body (see main.ts `rawBody: true`) before anything in the
    * payload is trusted — never process an unverified webhook.
@@ -167,30 +196,27 @@ export class PaymentsController {
     if (!reference) return { received: true };
 
     if (event.event === 'charge.success') {
-      const purpose: string | undefined = event.data.metadata?.purpose;
       const result = await this.paymentsService.markSuccessFromWebhook(
         reference,
         event.data.id?.toString() ?? reference,
-        purpose,
       );
 
       // A replayed/duplicate webhook delivery for an already-settled
       // payment — every side effect below (wallet credit, card save +
       // refund) must run at most once per payment, so skip them entirely
-      // on a replay rather than re-triggering them. Wallet crediting for
-      // purpose === 'wallet_topup' already happened inside
-      // markSuccessFromWebhook() itself, atomically with the status
-      // flip — nothing further to do for that case here.
+      // on a replay rather than re-triggering them.
       if (result?.alreadyProcessed) {
         return { received: true };
       }
 
       const record = result?.record ?? null;
+      const purpose = event.data.metadata?.purpose;
 
-      if (
+      if (record && purpose === 'wallet_topup') {
+        await this.paymentsService.creditWalletFromTopUp(record);
+      } else if (
         record &&
         record.rideId === null &&
-        purpose !== 'wallet_topup' &&
         event.data.authorization?.authorization_code
       ) {
         // Card-verification charges (not tied to a ride) tokenize the card

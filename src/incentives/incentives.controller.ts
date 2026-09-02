@@ -47,11 +47,4 @@ export class IncentivesController {
   setActive(@Param('id') id: string, @Param('isActive') isActive: string) {
     return this.incentivesService.setActive(id, isActive === 'true');
   }
-
-  @Get('admin/incentives/:id/progress')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
-  progress(@Param('id') id: string) {
-    return this.incentivesService.getProgressForIncentive(id);
-  }
 }
