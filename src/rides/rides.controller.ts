@@ -129,6 +129,19 @@ export class RidesController {
     return this.ridesService.getRoute(id, user.id, user.role);
   }
 
+  @ApiOperation({
+    summary: 'Get the shared-ride manifest for a pooled trip',
+    description:
+      'Returns null if this ride isn\'t currently part of an active pool. Otherwise returns the co-rider\'s ' +
+      'first name/status and the combined pickup/dropoff stop sequence, each tagged isMine so the app can ' +
+      'distinguish "your stop" from your pool partner\'s.',
+  })
+  @Get(':id/pool-manifest')
+  @UseGuards(JwtAuthGuard)
+  getPoolManifest(@Param('id') id: string, @CurrentUser() user: User) {
+    return this.ridesService.getPoolManifest(id, user.id, user.role);
+  }
+
   @Post(':id/share')
   @UseGuards(JwtAuthGuard)
   share(@Param('id') id: string, @CurrentUser() user: User) {

@@ -14,7 +14,7 @@ export const FEATURE_KEYS = {
 } as const;
 
 const DEFAULT_FLAGS: Array<{ key: string; name: string; description: string }> = [
-  { key: FEATURE_KEYS.RIDE_SHARING, name: 'Ride Sharing', description: 'Carpooling / shared rides (not yet implemented — reserved key)' },
+  { key: FEATURE_KEYS.RIDE_SHARING, name: 'Ride Sharing', description: 'Carpooling / shared (pooled) rides — gates RidesService.requestRide()\'s pool-matching path' },
   { key: FEATURE_KEYS.AIRPORT_MODULE, name: 'Airport Module', description: 'Airport registry, geofence detection, driver pickup queue' },
   { key: FEATURE_KEYS.LOGISTICS, name: 'Logistics', description: 'Parcel/food/grocery/pharmacy/courier delivery' },
   { key: FEATURE_KEYS.PROMOTIONS, name: 'Promotions', description: 'Promo code redemption on ride requests' },

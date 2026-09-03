@@ -48,6 +48,8 @@ import { DriverRankingService } from '../ranking/ranking.service';
 import { GeofenceService } from '../tracking/geofence/geofence.service';
 import { GeofenceType } from '../tracking/geofence/entities/geofence.entity';
 import { AirportService } from '../airport/airport.service';
+import { PoolMatchingService } from '../pooling/pool-matching.service';
+import { FeatureFlagsService, FEATURE_KEYS } from '../feature-flags/feature-flags.service';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -119,6 +121,8 @@ export class RidesService {
     private readonly driverRankingService: DriverRankingService,
     private readonly geofenceService: GeofenceService,
     private readonly airportService: AirportService,
+    private readonly poolMatchingService: PoolMatchingService,
+    private readonly featureFlagsService: FeatureFlagsService,
   ) {}
 
   async estimateFare(dto: FareEstimateDto) {
@@ -223,11 +227,32 @@ export class RidesService {
       }
     }
 
+    // Pooling only applies to requests being dispatched right now — a
+    // scheduled ride has nothing waiting to pair with yet at booking
+    // time. Feature-flagged so pooling can be turned off platform-wide
+    // (or per-incident) without a redeploy; see PoolMatchingService's
+    // class doc comment for the full lifecycle this kicks off.
+    const pooled =
+      !scheduledAt &&
+      !!dto.wantsPool &&
+      (await this.featureFlagsService.isEnabled(FEATURE_KEYS.RIDE_SHARING));
+
     const ride = this.ridesRepo.create({
       passengerId,
       category: dto.category,
-      status: scheduledAt ? RideStatus.SCHEDULED : RideStatus.SEARCHING,
-      dispatchMode: dto.dispatchMode ?? DispatchMode.MANUAL,
+      status: scheduledAt
+        ? RideStatus.SCHEDULED
+        : pooled
+          ? RideStatus.POOL_MATCHING
+          : RideStatus.SEARCHING,
+      // Pooled rides always resolve via AUTO — either paired and handed
+      // to AutoDispatch as the group's anchor, or unmatched and falling
+      // back to solo AUTO (see PoolMatchingService.resolveWindow()).
+      // There's no MANUAL/pooled combination: a passenger picking a
+      // specific driver from a list isn't compatible with "wait to see
+      // if someone else can share this trip".
+      dispatchMode: pooled ? DispatchMode.AUTO : (dto.dispatchMode ?? DispatchMode.MANUAL),
+      isPooled: pooled,
       scheduledAt,
       pickupLat: dto.pickupLat,
       pickupLng: dto.pickupLng,
@@ -329,7 +354,15 @@ export class RidesService {
     // tryOfferNextCandidate()), so a transient failure here can never
     // fail ride creation — the ride simply stays SEARCHING and the next
     // decline/timeout/retry gets another chance.
-    if (!scheduledAt && savedRide.dispatchMode === DispatchMode.AUTO) {
+    //
+    // Pooled rides skip straight dispatch entirely: they're POOL_MATCHING,
+    // not SEARCHING, and go through PoolMatchingService.requestPool()
+    // instead, which is what eventually calls AutoDispatchService itself
+    // (on the anchor ride, once/if a partner is found or the window
+    // expires unpaired — see that method).
+    if (!scheduledAt && pooled) {
+      void this.poolMatchingService.requestPool(savedRide.id);
+    } else if (!scheduledAt && savedRide.dispatchMode === DispatchMode.AUTO) {
       void this.autoDispatchService.startForRide(savedRide.id);
     }
 
@@ -664,6 +697,59 @@ export class RidesService {
     if (!directions?.polyline) return null;
 
     return { points: decodePolyline(directions.polyline) };
+  }
+
+  /**
+   * The single source of truth for pooled-ride stop/partner detail on
+   * both apps — see PoolMatchingService.pairRides()'s comment on why
+   * this replaced mirroring the co-rider's stops onto `ride.stops`
+   * directly. Returns null for any ride that isn't currently part of an
+   * active pool (never pooled, already unpooled, or the pairing hasn't
+   * happened yet) rather than throwing, since "no manifest" is the
+   * normal state for most rides polling this.
+   */
+  async getPoolManifest(
+    rideId: string,
+    requesterId: string,
+    requesterRole: UserRole,
+  ) {
+    const ride = await this.findById(rideId);
+
+    const isParticipant =
+      ride.passengerId === requesterId || ride.driverId === requesterId;
+    const isStaff = STAFF_ROLES.includes(requesterRole);
+    if (!isParticipant && !isStaff) {
+      throw new ForbiddenException("You don't have access to this ride");
+    }
+
+    if (!ride.poolGroupId) return null;
+
+    const match = await this.poolMatchingService.getGroupAndPartner(ride);
+    if (!match) return null;
+    const { group, partnerRide } = match;
+
+    const partnerUser = await this.usersService.findById(
+      partnerRide.passengerId,
+    );
+
+    return {
+      poolGroupId: group.id,
+      status: group.status,
+      estimatedTotalDistanceKm: group.estimatedTotalDistanceKm,
+      estimatedTotalDurationMin: group.estimatedTotalDurationMin,
+      partnerRideId: partnerRide.id,
+      partnerRideStatus: partnerRide.status,
+      // Only the co-rider's first name — this is a stranger the
+      // passenger/driver is sharing a car with, not someone whose full
+      // profile either side has any reason to see.
+      partnerFirstName: partnerUser.firstName,
+      // isMine lets either app render "your stop" vs "co-rider's stop"
+      // from one shared list without re-deriving it client-side.
+      stops: group.routeSequence.map((stop) => ({
+        ...stop,
+        isMine: stop.rideId === ride.id,
+      })),
+    };
   }
 
   /**
@@ -1162,6 +1248,23 @@ export class RidesService {
       .markAccepted(rideId, driverUserId)
       .catch(() => undefined);
 
+    // Pool hook: this ride is only ever independently dispatched (and
+    // therefore only ever independently accepted) if it's a solo ride
+    // OR the anchor of a pooled pair — the partner ride's driver
+    // assignment is never offered/accepted on its own. Propagate the
+    // just-committed driver/vehicle onto the partner here. Best-effort:
+    // a failure leaves the partner ride still SEARCHING rather than
+    // undoing this (already-committed) acceptance.
+    if (saved.poolGroupId) {
+      await this.poolMatchingService
+        .propagateDriverAssignment(saved)
+        .catch((err) =>
+          this.logger.error(
+            `Failed to propagate pool driver assignment from ride ${saved.id}: ${err}`,
+          ),
+        );
+    }
+
     return saved;
   }
 
@@ -1580,6 +1683,44 @@ export class RidesService {
       throw new BadRequestException(
         'This ride just changed status (it may already have been accepted, completed, or cancelled) — please refresh and try again.',
       );
+    }
+
+    // Pool hook — the cancellation itself already committed above
+    // regardless of what happens here, so every branch is best-effort:
+    // a failure here means a stale/inconsistent pool, never a failed
+    // cancellation.
+    if (originalStatus === RideStatus.POOL_MATCHING) {
+      // Never got as far as pairing — just clear the delayed match-window
+      // job so it doesn't fire pointlessly for a ride that's now cancelled.
+      await this.poolMatchingService
+        .onRideCancelledBeforeMatch(ride.id)
+        .catch(() => undefined);
+    } else if (ride.poolGroupId && originalStatus === RideStatus.SEARCHING) {
+      // Matched with a partner but not yet dispatched — revert the
+      // partner to a normal solo request at full fare and let it
+      // dispatch normally instead of waiting on a pool that's now dead.
+      await this.poolMatchingService
+        .unpoolRide(ride.id, ride.cancelReason ?? 'partner cancelled')
+        .catch((err) =>
+          this.logger.error(`Failed to unpool ride ${ride.id}: ${err}`),
+        );
+    } else if (
+      ride.poolGroupId &&
+      [
+        RideStatus.ACCEPTED,
+        RideStatus.ARRIVING,
+        RideStatus.ARRIVED,
+        RideStatus.IN_PROGRESS,
+      ].includes(originalStatus)
+    ) {
+      // Already dispatched (and, past ACCEPTED, possibly mid-trip) —
+      // the surviving passenger's driver doesn't change, just their fare
+      // and the shared-ride manifest both sides read from.
+      await this.poolMatchingService
+        .unpoolRideMidTrip(ride.id, ride.cancelReason ?? 'partner cancelled')
+        .catch((err) =>
+          this.logger.error(`Failed to unpool mid-trip ride ${ride.id}: ${err}`),
+        );
     }
 
     if (
