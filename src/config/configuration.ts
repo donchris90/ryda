@@ -52,7 +52,10 @@ export default () => ({
       (process.env.DB_SSL ?? 'false') === 'true'
         ? { rejectUnauthorized: false }
         : false,
-    synchronize: (process.env.DB_SYNCHRONIZE ?? 'true') === 'true',
+    // Safe by default: schema changes go through src/database/migrations
+    // only. Explicitly set DB_SYNCHRONIZE=true for local scratch DBs only
+    // — never against a hosted/shared database, seeded or otherwise.
+    synchronize: (process.env.DB_SYNCHRONIZE ?? 'false') === 'true',
   },
   jwt: {
     accessSecret:
