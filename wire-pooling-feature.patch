@@ -1,0 +1,414 @@
+diff --git a/src/common/enums/ride.enum.ts b/src/common/enums/ride.enum.ts
+index 2355770..995624d 100644
+--- a/src/common/enums/ride.enum.ts
++++ b/src/common/enums/ride.enum.ts
+@@ -1,6 +1,11 @@
+ export enum RideStatus {
+   SCHEDULED = 'scheduled',
+   REQUESTED = 'requested',
++  // Batch-matching window for a pooled request, before it either pairs
++  // off (moves to SEARCHING with a poolGroupId, see PoolMatchingService)
++  // or falls back to a normal solo SEARCHING ride when the window
++  // expires unpaired. Added by migration AddRidePoolingColumns.
++  POOL_MATCHING = 'pool_matching',
+   SEARCHING = 'searching',
+   ACCEPTED = 'accepted',
+   ARRIVING = 'arriving',
+diff --git a/src/feature-flags/feature-flags.service.ts b/src/feature-flags/feature-flags.service.ts
+index b45e11d..911a3cb 100644
+--- a/src/feature-flags/feature-flags.service.ts
++++ b/src/feature-flags/feature-flags.service.ts
+@@ -14,7 +14,7 @@ export const FEATURE_KEYS = {
+ } as const;
+ 
+ const DEFAULT_FLAGS: Array<{ key: string; name: string; description: string }> = [
+-  { key: FEATURE_KEYS.RIDE_SHARING, name: 'Ride Sharing', description: 'Carpooling / shared rides (not yet implemented — reserved key)' },
++  { key: FEATURE_KEYS.RIDE_SHARING, name: 'Ride Sharing', description: 'Carpooling / shared (pooled) rides — gates RidesService.requestRide()\'s pool-matching path' },
+   { key: FEATURE_KEYS.AIRPORT_MODULE, name: 'Airport Module', description: 'Airport registry, geofence detection, driver pickup queue' },
+   { key: FEATURE_KEYS.LOGISTICS, name: 'Logistics', description: 'Parcel/food/grocery/pharmacy/courier delivery' },
+   { key: FEATURE_KEYS.PROMOTIONS, name: 'Promotions', description: 'Promo code redemption on ride requests' },
+diff --git a/src/rides/dto/request-ride.dto.ts b/src/rides/dto/request-ride.dto.ts
+index c08f3a2..cfb5ea4 100644
+--- a/src/rides/dto/request-ride.dto.ts
++++ b/src/rides/dto/request-ride.dto.ts
+@@ -85,4 +85,15 @@ export class RequestRideDto {
+   @IsOptional()
+   @IsEnum(DispatchMode)
+   dispatchMode?: DispatchMode;
++
++  @ApiPropertyOptional({
++    description:
++      'Requests a discounted shared (pooled) ride instead of a solo one, if the RIDE_SHARING feature flag is on. ' +
++      'The ride enters a short batch-matching window (see PoolMatchingService) rather than dispatching immediately; ' +
++      'it falls back automatically to a normal solo ride at full fare if no compatible partner is found in time. ' +
++      'Ignored for scheduled rides — pooling only matches requests being dispatched now.',
++  })
++  @IsOptional()
++  @IsBoolean()
++  wantsPool?: boolean;
+ }
+diff --git a/src/rides/entities/ride.entity.ts b/src/rides/entities/ride.entity.ts
+index 4dc9c7a..4f11670 100644
+--- a/src/rides/entities/ride.entity.ts
++++ b/src/rides/entities/ride.entity.ts
+@@ -129,6 +129,22 @@ export class Ride {
+   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+   tipAmount: string;
+ 
++  // ---- Pooling (shared rides) ----
++  // A pooled trip is still two ordinary Ride rows, one per passenger -
++  // see PoolGroup for what's actually shared between them (route
++  // sequence, anchor/partner linkage). Set by PoolMatchingService when
++  // a pool_matching-status ride pairs off; cleared again by
++  // unpoolRide()/unpoolRideMidTrip() if the pairing falls apart.
++  @Column({ default: false })
++  isPooled: boolean;
++
++  @Index()
++  @Column({ type: 'varchar', nullable: true })
++  poolGroupId: string | null;
++
++  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
++  poolDiscountAmount: string;
++
+   // Generated at request time, shown to the passenger, spoken by the
+   // passenger to the driver at pickup — a lightweight anti-fraud check
+   // that this is genuinely the matched driver/passenger pair, not
+diff --git a/src/rides/rides.controller.ts b/src/rides/rides.controller.ts
+index a601c11..9201f96 100644
+--- a/src/rides/rides.controller.ts
++++ b/src/rides/rides.controller.ts
+@@ -129,6 +129,19 @@ export class RidesController {
+     return this.ridesService.getRoute(id, user.id, user.role);
+   }
+ 
++  @ApiOperation({
++    summary: 'Get the shared-ride manifest for a pooled trip',
++    description:
++      'Returns null if this ride isn\'t currently part of an active pool. Otherwise returns the co-rider\'s ' +
++      'first name/status and the combined pickup/dropoff stop sequence, each tagged isMine so the app can ' +
++      'distinguish "your stop" from your pool partner\'s.',
++  })
++  @Get(':id/pool-manifest')
++  @UseGuards(JwtAuthGuard)
++  getPoolManifest(@Param('id') id: string, @CurrentUser() user: User) {
++    return this.ridesService.getPoolManifest(id, user.id, user.role);
++  }
++
+   @Post(':id/share')
+   @UseGuards(JwtAuthGuard)
+   share(@Param('id') id: string, @CurrentUser() user: User) {
+diff --git a/src/rides/rides.module.ts b/src/rides/rides.module.ts
+index ba78b3d..0538b58 100644
+--- a/src/rides/rides.module.ts
++++ b/src/rides/rides.module.ts
+@@ -27,6 +27,7 @@ import { ObservabilityModule } from '../observability/observability.module';
+ import { CandidateSearchModule } from '../candidate-search/candidate-search.module';
+ import { RankingModule } from '../ranking/ranking.module';
+ import { GeofenceModule } from '../tracking/geofence/geofence.module';
++import { PoolingModule } from '../pooling/pooling.module';
+ 
+ @Module({
+   imports: [
+@@ -52,6 +53,10 @@ import { GeofenceModule } from '../tracking/geofence/geofence.module';
+     CandidateSearchModule,
+     RankingModule,
+     GeofenceModule,
++    // Deliberately the only direction this import goes — see
++    // PoolingModule's own doc comment for why it can't import
++    // RidesModule back.
++    PoolingModule,
+   ],
+   providers: [RidesService, FareService, ScheduledRideProcessor],
+   controllers: [RidesController, AdminDispatchController],
+diff --git a/src/rides/rides.service.complete-ride.spec.ts b/src/rides/rides.service.complete-ride.spec.ts
+index 1a5ad11..1f3e8b5 100644
+--- a/src/rides/rides.service.complete-ride.spec.ts
++++ b/src/rides/rides.service.complete-ride.spec.ts
+@@ -92,6 +92,8 @@ function buildService(overrides: Record<string, any> = {}) {
+     googleMaps: {},
+     candidateSearchService: { search: jest.fn() },
+     driverRankingService: { rank: jest.fn() },
++    geofenceService: {},
++    airportService: {},
+     poolMatchingService: { requestPool: jest.fn(), propagateDriverAssignment: jest.fn().mockResolvedValue(undefined), onRideCancelledBeforeMatch: jest.fn().mockResolvedValue(undefined), unpoolRide: jest.fn().mockResolvedValue(undefined) },
+     featureFlagsService: { isEnabled: jest.fn().mockResolvedValue(true) },
+   };
+@@ -121,6 +123,8 @@ function buildService(overrides: Record<string, any> = {}) {
+     deps.googleMaps as any,
+     deps.candidateSearchService as any,
+     deps.driverRankingService as any,
++    deps.geofenceService as any,
++    deps.airportService as any,
+     deps.poolMatchingService as any,
+     deps.featureFlagsService as any,
+   );
+diff --git a/src/rides/rides.service.get-route.spec.ts b/src/rides/rides.service.get-route.spec.ts
+index 5af300f..10b1115 100644
+--- a/src/rides/rides.service.get-route.spec.ts
++++ b/src/rides/rides.service.get-route.spec.ts
+@@ -59,6 +59,8 @@ function buildService(overrides: Record<string, any> = {}) {
+     },
+     candidateSearchService: {},
+     driverRankingService: {},
++    geofenceService: {},
++    airportService: {},
+     poolMatchingService: { requestPool: jest.fn(), propagateDriverAssignment: jest.fn().mockResolvedValue(undefined), onRideCancelledBeforeMatch: jest.fn().mockResolvedValue(undefined), unpoolRide: jest.fn().mockResolvedValue(undefined) },
+     featureFlagsService: { isEnabled: jest.fn().mockResolvedValue(true) },
+   };
+@@ -88,6 +90,8 @@ function buildService(overrides: Record<string, any> = {}) {
+     deps.googleMaps as any,
+     deps.candidateSearchService as any,
+     deps.driverRankingService as any,
++    deps.geofenceService as any,
++    deps.airportService as any,
+     deps.poolMatchingService as any,
+     deps.featureFlagsService as any,
+   );
+diff --git a/src/rides/rides.service.pool-manifest.spec.ts b/src/rides/rides.service.pool-manifest.spec.ts
+index 797cd39..8962cbe 100644
+--- a/src/rides/rides.service.pool-manifest.spec.ts
++++ b/src/rides/rides.service.pool-manifest.spec.ts
+@@ -45,6 +45,8 @@ function buildService(overrides: Record<string, any> = {}) {
+     googleMaps: {},
+     candidateSearchService: {},
+     driverRankingService: {},
++    geofenceService: {},
++    airportService: {},
+     poolMatchingService: {
+       getGroupAndPartner: jest.fn(),
+       ...overrides.poolMatchingService,
+@@ -77,6 +79,8 @@ function buildService(overrides: Record<string, any> = {}) {
+     deps.googleMaps as any,
+     deps.candidateSearchService as any,
+     deps.driverRankingService as any,
++    deps.geofenceService as any,
++    deps.airportService as any,
+     deps.poolMatchingService as any,
+     deps.featureFlagsService as any,
+   );
+diff --git a/src/rides/rides.service.remaining-methods.spec.ts b/src/rides/rides.service.remaining-methods.spec.ts
+index 1d6375d..c95212b 100644
+--- a/src/rides/rides.service.remaining-methods.spec.ts
++++ b/src/rides/rides.service.remaining-methods.spec.ts
+@@ -59,6 +59,8 @@ function buildService(overrides: Record<string, any> = {}) {
+     googleMaps: {},
+     candidateSearchService: { search: jest.fn() },
+     driverRankingService: { rank: jest.fn() },
++    geofenceService: {},
++    airportService: {},
+     poolMatchingService: { requestPool: jest.fn(), propagateDriverAssignment: jest.fn().mockResolvedValue(undefined), onRideCancelledBeforeMatch: jest.fn().mockResolvedValue(undefined), unpoolRide: jest.fn().mockResolvedValue(undefined) },
+     featureFlagsService: { isEnabled: jest.fn().mockResolvedValue(true) },
+   };
+@@ -88,6 +90,8 @@ function buildService(overrides: Record<string, any> = {}) {
+     deps.googleMaps as any,
+     deps.candidateSearchService as any,
+     deps.driverRankingService as any,
++    deps.geofenceService as any,
++    deps.airportService as any,
+     deps.poolMatchingService as any,
+     deps.featureFlagsService as any,
+   );
+diff --git a/src/rides/rides.service.ts b/src/rides/rides.service.ts
+index 4f0acdf..8bacb4e 100644
+--- a/src/rides/rides.service.ts
++++ b/src/rides/rides.service.ts
+@@ -48,6 +48,8 @@ import { DriverRankingService } from '../ranking/ranking.service';
+ import { GeofenceService } from '../tracking/geofence/geofence.service';
+ import { GeofenceType } from '../tracking/geofence/entities/geofence.entity';
+ import { AirportService } from '../airport/airport.service';
++import { PoolMatchingService } from '../pooling/pool-matching.service';
++import { FeatureFlagsService, FEATURE_KEYS } from '../feature-flags/feature-flags.service';
+ import { OnEvent } from '@nestjs/event-emitter';
+ import { InjectQueue } from '@nestjs/bullmq';
+ import { Queue } from 'bullmq';
+@@ -119,6 +121,8 @@ export class RidesService {
+     private readonly driverRankingService: DriverRankingService,
+     private readonly geofenceService: GeofenceService,
+     private readonly airportService: AirportService,
++    private readonly poolMatchingService: PoolMatchingService,
++    private readonly featureFlagsService: FeatureFlagsService,
+   ) {}
+ 
+   async estimateFare(dto: FareEstimateDto) {
+@@ -223,11 +227,32 @@ export class RidesService {
+       }
+     }
+ 
++    // Pooling only applies to requests being dispatched right now — a
++    // scheduled ride has nothing waiting to pair with yet at booking
++    // time. Feature-flagged so pooling can be turned off platform-wide
++    // (or per-incident) without a redeploy; see PoolMatchingService's
++    // class doc comment for the full lifecycle this kicks off.
++    const pooled =
++      !scheduledAt &&
++      !!dto.wantsPool &&
++      (await this.featureFlagsService.isEnabled(FEATURE_KEYS.RIDE_SHARING));
++
+     const ride = this.ridesRepo.create({
+       passengerId,
+       category: dto.category,
+-      status: scheduledAt ? RideStatus.SCHEDULED : RideStatus.SEARCHING,
+-      dispatchMode: dto.dispatchMode ?? DispatchMode.MANUAL,
++      status: scheduledAt
++        ? RideStatus.SCHEDULED
++        : pooled
++          ? RideStatus.POOL_MATCHING
++          : RideStatus.SEARCHING,
++      // Pooled rides always resolve via AUTO — either paired and handed
++      // to AutoDispatch as the group's anchor, or unmatched and falling
++      // back to solo AUTO (see PoolMatchingService.resolveWindow()).
++      // There's no MANUAL/pooled combination: a passenger picking a
++      // specific driver from a list isn't compatible with "wait to see
++      // if someone else can share this trip".
++      dispatchMode: pooled ? DispatchMode.AUTO : (dto.dispatchMode ?? DispatchMode.MANUAL),
++      isPooled: pooled,
+       scheduledAt,
+       pickupLat: dto.pickupLat,
+       pickupLng: dto.pickupLng,
+@@ -329,7 +354,15 @@ export class RidesService {
+     // tryOfferNextCandidate()), so a transient failure here can never
+     // fail ride creation — the ride simply stays SEARCHING and the next
+     // decline/timeout/retry gets another chance.
+-    if (!scheduledAt && savedRide.dispatchMode === DispatchMode.AUTO) {
++    //
++    // Pooled rides skip straight dispatch entirely: they're POOL_MATCHING,
++    // not SEARCHING, and go through PoolMatchingService.requestPool()
++    // instead, which is what eventually calls AutoDispatchService itself
++    // (on the anchor ride, once/if a partner is found or the window
++    // expires unpaired — see that method).
++    if (!scheduledAt && pooled) {
++      void this.poolMatchingService.requestPool(savedRide.id);
++    } else if (!scheduledAt && savedRide.dispatchMode === DispatchMode.AUTO) {
+       void this.autoDispatchService.startForRide(savedRide.id);
+     }
+ 
+@@ -666,6 +699,59 @@ export class RidesService {
+     return { points: decodePolyline(directions.polyline) };
+   }
+ 
++  /**
++   * The single source of truth for pooled-ride stop/partner detail on
++   * both apps — see PoolMatchingService.pairRides()'s comment on why
++   * this replaced mirroring the co-rider's stops onto `ride.stops`
++   * directly. Returns null for any ride that isn't currently part of an
++   * active pool (never pooled, already unpooled, or the pairing hasn't
++   * happened yet) rather than throwing, since "no manifest" is the
++   * normal state for most rides polling this.
++   */
++  async getPoolManifest(
++    rideId: string,
++    requesterId: string,
++    requesterRole: UserRole,
++  ) {
++    const ride = await this.findById(rideId);
++
++    const isParticipant =
++      ride.passengerId === requesterId || ride.driverId === requesterId;
++    const isStaff = STAFF_ROLES.includes(requesterRole);
++    if (!isParticipant && !isStaff) {
++      throw new ForbiddenException("You don't have access to this ride");
++    }
++
++    if (!ride.poolGroupId) return null;
++
++    const match = await this.poolMatchingService.getGroupAndPartner(ride);
++    if (!match) return null;
++    const { group, partnerRide } = match;
++
++    const partnerUser = await this.usersService.findById(
++      partnerRide.passengerId,
++    );
++
++    return {
++      poolGroupId: group.id,
++      status: group.status,
++      estimatedTotalDistanceKm: group.estimatedTotalDistanceKm,
++      estimatedTotalDurationMin: group.estimatedTotalDurationMin,
++      partnerRideId: partnerRide.id,
++      partnerRideStatus: partnerRide.status,
++      // Only the co-rider's first name — this is a stranger the
++      // passenger/driver is sharing a car with, not someone whose full
++      // profile either side has any reason to see.
++      partnerFirstName: partnerUser.firstName,
++      // isMine lets either app render "your stop" vs "co-rider's stop"
++      // from one shared list without re-deriving it client-side.
++      stops: group.routeSequence.map((stop) => ({
++        ...stop,
++        isMine: stop.rideId === ride.id,
++      })),
++    };
++  }
++
+   /**
+    * Called by the driver at pickup — a lightweight anti-fraud check that
+    * they're picking up the actual matched passenger. Deliberately NOT
+@@ -1162,6 +1248,23 @@ export class RidesService {
+       .markAccepted(rideId, driverUserId)
+       .catch(() => undefined);
+ 
++    // Pool hook: this ride is only ever independently dispatched (and
++    // therefore only ever independently accepted) if it's a solo ride
++    // OR the anchor of a pooled pair — the partner ride's driver
++    // assignment is never offered/accepted on its own. Propagate the
++    // just-committed driver/vehicle onto the partner here. Best-effort:
++    // a failure leaves the partner ride still SEARCHING rather than
++    // undoing this (already-committed) acceptance.
++    if (saved.poolGroupId) {
++      await this.poolMatchingService
++        .propagateDriverAssignment(saved)
++        .catch((err) =>
++          this.logger.error(
++            `Failed to propagate pool driver assignment from ride ${saved.id}: ${err}`,
++          ),
++        );
++    }
++
+     return saved;
+   }
+ 
+@@ -1582,6 +1685,44 @@ export class RidesService {
+       );
+     }
+ 
++    // Pool hook — the cancellation itself already committed above
++    // regardless of what happens here, so every branch is best-effort:
++    // a failure here means a stale/inconsistent pool, never a failed
++    // cancellation.
++    if (originalStatus === RideStatus.POOL_MATCHING) {
++      // Never got as far as pairing — just clear the delayed match-window
++      // job so it doesn't fire pointlessly for a ride that's now cancelled.
++      await this.poolMatchingService
++        .onRideCancelledBeforeMatch(ride.id)
++        .catch(() => undefined);
++    } else if (ride.poolGroupId && originalStatus === RideStatus.SEARCHING) {
++      // Matched with a partner but not yet dispatched — revert the
++      // partner to a normal solo request at full fare and let it
++      // dispatch normally instead of waiting on a pool that's now dead.
++      await this.poolMatchingService
++        .unpoolRide(ride.id, ride.cancelReason ?? 'partner cancelled')
++        .catch((err) =>
++          this.logger.error(`Failed to unpool ride ${ride.id}: ${err}`),
++        );
++    } else if (
++      ride.poolGroupId &&
++      [
++        RideStatus.ACCEPTED,
++        RideStatus.ARRIVING,
++        RideStatus.ARRIVED,
++        RideStatus.IN_PROGRESS,
++      ].includes(originalStatus)
++    ) {
++      // Already dispatched (and, past ACCEPTED, possibly mid-trip) —
++      // the surviving passenger's driver doesn't change, just their fare
++      // and the shared-ride manifest both sides read from.
++      await this.poolMatchingService
++        .unpoolRideMidTrip(ride.id, ride.cancelReason ?? 'partner cancelled')
++        .catch((err) =>
++          this.logger.error(`Failed to unpool mid-trip ride ${ride.id}: ${err}`),
++        );
++    }
++
+     if (
+       cancelledBy === CancelledBy.PASSENGER &&
+       driverWasEngaged &&
