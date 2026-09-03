@@ -52,6 +52,7 @@ import {
   DispatchMode,
 } from '../candidate-search/candidate-search.types';
 import { DriverRankingService } from '../ranking/ranking.service';
+import { GeofenceService } from '../tracking/geofence/geofence.service';
 import { MetricsService } from '../observability/metrics.service';
 
 export interface DeliveryFareBreakdown {
@@ -107,6 +108,7 @@ export class LogisticsService {
     private readonly driverRankingService: DriverRankingService,
     private readonly events: EventEmitter2,
     private readonly metrics: MetricsService,
+    private readonly geofenceService: GeofenceService,
   ) {}
 
   async estimateFare(dto: EstimateDeliveryDto): Promise<DeliveryFareBreakdown> {
@@ -182,6 +184,20 @@ export class LogisticsService {
     customerId: string,
     dto: RequestDeliveryDto,
   ): Promise<DeliveryOrder> {
+    // Same enforcement as RidesService.requestRide() - a delivery
+    // pickup/dropoff outside the configured service area shouldn't be
+    // accepted just because a route could technically be calculated.
+    const [pickupServed, dropoffServed] = await Promise.all([
+      this.geofenceService.isWithinServiceArea(dto.pickupLat, dto.pickupLng),
+      this.geofenceService.isWithinServiceArea(dto.dropoffLat, dto.dropoffLng),
+    ]);
+    if (!pickupServed) {
+      throw new BadRequestException('This pickup location is outside our current service area');
+    }
+    if (!dropoffServed) {
+      throw new BadRequestException('This dropoff location is outside our current service area');
+    }
+
     const breakdown = await this.estimateFare(dto);
     const paymentMethod = dto.paymentMethod ?? PaymentMethod.CASH;
     const dispatchMode = dto.dispatchMode ?? DeliveryDispatchMode.AUTO;

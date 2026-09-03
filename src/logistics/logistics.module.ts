@@ -19,6 +19,7 @@ import { ReconciliationModule } from '../reconciliation/reconciliation.module';
 import { SettingsModule } from '../settings/settings.module';
 import { CandidateSearchModule } from '../candidate-search/candidate-search.module';
 import { RankingModule } from '../ranking/ranking.module';
+import { GeofenceModule } from '../tracking/geofence/geofence.module';
 import { ObservabilityModule } from '../observability/observability.module';
 
 @Module({
@@ -44,6 +45,7 @@ import { ObservabilityModule } from '../observability/observability.module';
     CandidateSearchModule,
     RankingModule,
     ObservabilityModule,
+    GeofenceModule,
   ],
   providers: [LogisticsService, DeliveryVehicleTypesService],
   controllers: [LogisticsController, DeliveryVehicleTypesController, AdminDeliveryVehicleTypesController],

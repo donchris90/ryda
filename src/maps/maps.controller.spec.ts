@@ -61,3 +61,29 @@ describe('MapsController.routePreview', () => {
     expect(result).toBeNull();
   });
 });
+
+describe('MapsController.placeDetails', () => {
+  it('passes includeEntrances=false by default', async () => {
+    const { controller, mapsService } = buildController();
+    mapsService.getPlaceDetailsById.mockResolvedValue({ lat: 6.5, lng: 3.3, formattedAddress: 'X' });
+
+    await controller.placeDetails('place123');
+
+    expect(mapsService.getPlaceDetailsById).toHaveBeenCalledWith('place123', false);
+  });
+
+  it('passes includeEntrances=true only when the query param is exactly "true"', async () => {
+    const { controller, mapsService } = buildController();
+    mapsService.getPlaceDetailsById.mockResolvedValue({ lat: 6.5, lng: 3.3, formattedAddress: 'X' });
+
+    await controller.placeDetails('place123', 'true');
+
+    expect(mapsService.getPlaceDetailsById).toHaveBeenCalledWith('place123', true);
+  });
+
+  it('throws when placeId is missing', async () => {
+    const { controller } = buildController();
+
+    await expect(controller.placeDetails(undefined)).rejects.toThrow('placeId is required');
+  });
+});

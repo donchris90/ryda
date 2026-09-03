@@ -102,7 +102,7 @@ export class DriversController {
   @UseGuards(RolesGuard)
   @Roles(UserRole.DRIVER)
   updateLocation(@CurrentUser() user: User, @Body() dto: UpdateLocationDto) {
-    return this.driversService.updateLocation(user.id, dto.lat, dto.lng);
+    return this.driversService.updateLocation(user.id, dto.lat, dto.lng, dto.accuracy, dto.fixTimestamp);
   }
 
   @Patch(':driverId/approval/:status')

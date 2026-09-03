@@ -108,6 +108,17 @@ function buildService(overrides: Record<string, any> = {}) {
 
   const events = { emit: jest.fn(), ...overrides.events };
 
+  const airportService = {
+    findContainingAirport: jest.fn().mockResolvedValue(null),
+    dispatchNext: jest.fn().mockResolvedValue(null),
+    ...overrides.airportService,
+  };
+
+  const driversService = {
+    findByUserId: jest.fn().mockResolvedValue({ availability: 'online_for_rides' }),
+    ...overrides.driversService,
+  };
+
   const service = new AutoDispatchService(
     ridesRepo as any,
     candidateSearchService as any,
@@ -116,9 +127,11 @@ function buildService(overrides: Record<string, any> = {}) {
     config as any,
     metrics as any,
     events as any,
+    airportService as any,
+    driversService as any,
   );
 
-  return { service, ridesRepo, candidateSearchService, driverRankingService, dispatchService, config, metrics, events };
+  return { service, ridesRepo, candidateSearchService, driverRankingService, dispatchService, config, metrics, events, airportService, driversService };
 }
 
 describe('AutoDispatchService', () => {
@@ -322,6 +335,86 @@ describe('AutoDispatchService', () => {
       await service.startForRide('ride-1');
 
       expect(dispatchService.offerToSpecificDriver).toHaveBeenCalledWith('ride-1', 'driver-near', 1);
+    });
+  });
+
+  describe('airport queue dispatch - connecting the airport driver queue to real dispatch', () => {
+    it('offers the ride to the front of the airport queue and skips the normal nearest-driver search entirely', async () => {
+      const { service, airportService, candidateSearchService, dispatchService } = buildService({
+        airportService: {
+          findContainingAirport: jest.fn().mockResolvedValue({ id: 'airport-1', iataCode: 'LOS' }),
+          dispatchNext: jest.fn().mockResolvedValue({ driverUserId: 'queue-driver-1' }),
+        },
+      });
+
+      await service.startForRide('ride-1');
+
+      expect(dispatchService.offerToSpecificDriver).toHaveBeenCalledWith('ride-1', 'queue-driver-1', 0);
+      expect(candidateSearchService.search).not.toHaveBeenCalled();
+      expect(airportService.dispatchNext).toHaveBeenCalledWith('airport-1', RideCategory.ECONOMY);
+    });
+
+    it('passes this specific ride\'s category through to dispatchNext(), not just a fixed default', async () => {
+      const { service, airportService } = buildService({
+        airportService: {
+          findContainingAirport: jest.fn().mockResolvedValue({ id: 'airport-1', iataCode: 'LOS' }),
+          dispatchNext: jest.fn().mockResolvedValue({ driverUserId: 'queue-driver-1' }),
+        },
+        ridesRepo: { findOne: jest.fn().mockResolvedValue(fakeRide({ category: RideCategory.COMFORT })) },
+      });
+
+      await service.startForRide('ride-1');
+
+      expect(airportService.dispatchNext).toHaveBeenCalledWith('airport-1', RideCategory.COMFORT);
+    });
+
+    it('falls through to the normal search when the pickup is not inside any airport geofence', async () => {
+      const { service, candidateSearchService, dispatchService } = buildService({
+        airportService: { findContainingAirport: jest.fn().mockResolvedValue(null) },
+      });
+
+      await service.startForRide('ride-1');
+
+      expect(candidateSearchService.search).toHaveBeenCalled();
+      expect(dispatchService.offerToSpecificDriver).toHaveBeenCalledWith('ride-1', 'driver-1', 2); // normal search's fakeCandidate
+    });
+
+    it('falls through to the normal search when the airport queue is genuinely empty, rather than blocking dispatch', async () => {
+      const { service, candidateSearchService } = buildService({
+        airportService: {
+          findContainingAirport: jest.fn().mockResolvedValue({ id: 'airport-1', iataCode: 'LOS' }),
+          dispatchNext: jest.fn().mockResolvedValue(null),
+        },
+      });
+
+      await service.startForRide('ride-1');
+
+      expect(candidateSearchService.search).toHaveBeenCalled();
+    });
+
+    it('self-heals past a queued driver who went offline without formally leaving the queue', async () => {
+      const { service, driversService, dispatchService } = buildService({
+        airportService: {
+          findContainingAirport: jest.fn().mockResolvedValue({ id: 'airport-1', iataCode: 'LOS' }),
+          dispatchNext: jest
+            .fn()
+            .mockResolvedValueOnce({ driverUserId: 'now-offline-driver' })
+            .mockResolvedValueOnce({ driverUserId: 'genuinely-online-driver' }),
+        },
+        driversService: {
+          findByUserId: jest.fn((userId: string) =>
+            Promise.resolve({
+              availability: userId === 'now-offline-driver' ? 'offline' : 'online_for_rides',
+            }),
+          ),
+        },
+      });
+
+      await service.startForRide('ride-1');
+
+      expect(driversService.findByUserId).toHaveBeenCalledWith('now-offline-driver');
+      expect(driversService.findByUserId).toHaveBeenCalledWith('genuinely-online-driver');
+      expect(dispatchService.offerToSpecificDriver).toHaveBeenCalledWith('ride-1', 'genuinely-online-driver', 0);
     });
   });
 });

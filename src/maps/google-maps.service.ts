@@ -1,10 +1,29 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { haversineDistanceKm } from '../common/utils/geo.util';
+
+export interface AccessPoint {
+  lat: number;
+  lng: number;
+}
 
 export interface GeocodeResult {
   lat: number;
   lng: number;
   formattedAddress: string;
+  /**
+   * Building/compound entrance points from Google's `entrances` Place
+   * field - distinct from the place's own centroid (lat/lng above),
+   * which for anything larger than a single small shop can be tens to
+   * hundreds of metres from the actual door. Only populated when
+   * requested via includeEntrances (see getPlaceDetailsById) - this
+   * field bumps the Place Details call from Google's Pro SKU to its
+   * pricier Enterprise SKU, so callers opt in only where an exact
+   * entrance genuinely matters (confirming a pickup point), not on
+   * every place lookup. undefined when not requested; [] when
+   * requested but Google has no entrance data for this place.
+   */
+  entrances?: AccessPoint[];
 }
 
 export interface PlaceSuggestion {
@@ -15,7 +34,11 @@ export interface PlaceSuggestion {
 export interface DirectionsResult {
   distanceKm: number;
   durationMin: number;
+  /** True when durationMin reflects Google's real-time traffic-aware estimate (duration_in_traffic), not just the historical/typical duration. */
+  isTrafficAware: boolean;
   polyline: string | null;
+  /** Other viable routes Google returned alongside the primary one - empty array when only one route exists or alternatives weren't returned. */
+  alternativeRoutes: Array<{ distanceKm: number; durationMin: number; polyline: string | null }>;
 }
 
 @Injectable()
@@ -23,12 +46,17 @@ export class GoogleMapsService {
   private readonly logger = new Logger(GoogleMapsService.name);
 
   private readonly apiKey: string;
+  private readonly serviceCountryCode: string;
+  private readonly serviceBoundingBox: { minLat: number; maxLat: number; minLng: number; maxLng: number };
 
   private readonly mapsBaseUrl =
     'https://maps.googleapis.com/maps/api';
 
   private readonly placesBaseUrl =
     'https://places.googleapis.com/v1';
+
+  private readonly roadsBaseUrl =
+    'https://roads.googleapis.com/v1';
 
   constructor(
     private readonly config: ConfigService,
@@ -37,6 +65,11 @@ export class GoogleMapsService {
       this.config
         .get<string>('googleMaps.apiKey')
         ?.trim() ?? '';
+
+    this.serviceCountryCode =
+      this.config.get<string>('mapsServiceRegion.countryCode')!;
+    this.serviceBoundingBox =
+      this.config.get('mapsServiceRegion.boundingBox')!;
   }
 
   isConfigured(): boolean {
@@ -58,11 +91,10 @@ export class GoogleMapsService {
   }
 
   /**
-   * Broad Nigeria coordinate check.
-   *
-   * This is only used to determine whether GPS can be used
-   * as a location bias and to prevent obviously foreign
-   * coordinates from being used by Ryda.
+   * Broad service-region coordinate check - configured, not hard-coded
+   * (see mapsServiceRegion.boundingBox). This is only used to
+   * determine whether GPS can be used as a location bias and to
+   * prevent obviously foreign coordinates from being used by Ryda.
    *
    * There is NO Lagos fallback.
    */
@@ -70,17 +102,20 @@ export class GoogleMapsService {
     lat: number,
     lng: number,
   ): boolean {
+    const box = this.serviceBoundingBox;
     return (
       this.isValidCoordinate(lat, lng) &&
-      lat >= 4 &&
-      lat <= 14 &&
-      lng >= 2 &&
-      lng <= 15
+      lat >= box.minLat &&
+      lat <= box.maxLat &&
+      lng >= box.minLng &&
+      lng <= box.maxLng
     );
   }
 
   /**
-   * Validate Google legacy Geocoding API result.
+   * Validate a Google Geocoding result's country against the
+   * configured service country (see mapsServiceRegion.countryCode) -
+   * configured, not hard-coded.
    */
   private isNigeria(result: any): boolean {
     const components =
@@ -98,14 +133,43 @@ export class GoogleMapsService {
         component.types.includes('country'),
     );
 
-    if (
-      country?.short_name === 'NG' ||
-      country?.shortText === 'NG'
-    ) {
-      return true;
-    }
+    const countryCode =
+      country?.short_name ??
+      country?.shortText;
 
-    return false;
+    return countryCode === this.serviceCountryCode;
+  }
+
+  /**
+   * Picks whichever entrance is physically closest to a reference
+   * point (typically the pickup coordinate a passenger actually
+   * dropped their pin on) - a place can have several entrances
+   * (e.g. a mall's north and south doors) and callers generally want
+   * "the door nearest where this person is standing", not just
+   * Google's first-listed one.
+   */
+  nearestAccessPoint(
+    entrances: AccessPoint[] | undefined,
+    refLat: number,
+    refLng: number,
+  ): AccessPoint | null {
+    if (!entrances?.length) return null;
+
+    return entrances.reduce((closest, candidate) => {
+      const candidateDistance = haversineDistanceKm(
+        refLat,
+        refLng,
+        candidate.lat,
+        candidate.lng,
+      );
+      const closestDistance = haversineDistanceKm(
+        refLat,
+        refLng,
+        closest.lat,
+        closest.lng,
+      );
+      return candidateDistance < closestDistance ? candidate : closest;
+    });
   }
 
   /**
@@ -158,11 +222,10 @@ export class GoogleMapsService {
         input: query.trim(),
 
         /**
-         * HARD COUNTRY RESTRICTION.
-         *
-         * Nigeria only.
+         * Country restriction - configured via mapsServiceRegion.countryCode,
+         * not hard-coded (Places Autocomplete wants this lowercase).
          */
-        includedRegionCodes: ['ng'],
+        includedRegionCodes: [this.serviceCountryCode.toLowerCase()],
 
         /**
          * Response language.
@@ -325,9 +388,12 @@ export class GoogleMapsService {
    * Google call only happens once, for whichever one suggestion a
    * person actually selects, not for every suggestion shown.
    */
-  async getPlaceDetailsById(placeId: string): Promise<GeocodeResult | null> {
+  async getPlaceDetailsById(
+    placeId: string,
+    includeEntrances = false,
+  ): Promise<GeocodeResult | null> {
     if (!this.isConfigured() || !placeId?.trim()) return null;
-    return this.getPlaceDetails({ placeId: placeId.trim() });
+    return this.getPlaceDetails({ placeId: placeId.trim() }, includeEntrances);
   }
 
   /**
@@ -337,6 +403,7 @@ export class GoogleMapsService {
    */
   private async getPlaceDetails(
     prediction: any,
+    includeEntrances = false,
   ): Promise<GeocodeResult | null> {
     const placeId =
       prediction?.placeId;
@@ -353,6 +420,19 @@ export class GoogleMapsService {
        *
        * /v1/places/{PLACE_ID}
        */
+      const fieldMask = [
+        'location',
+        'formattedAddress',
+        'addressComponents',
+      ];
+
+      // entrances is an Enterprise-SKU field - only requested when a
+      // caller genuinely needs the door location, not the building
+      // centroid (see GeocodeResult.entrances doc comment).
+      if (includeEntrances) {
+        fieldMask.push('entrances');
+      }
+
       const response = await fetch(
         `${this.placesBaseUrl}/places/${encodeURIComponent(
           placeId,
@@ -365,11 +445,7 @@ export class GoogleMapsService {
               this.apiKey,
 
             'X-Goog-FieldMask':
-              [
-                'location',
-                'formattedAddress',
-                'addressComponents',
-              ].join(','),
+              fieldMask.join(','),
           },
 
           signal:
@@ -423,7 +499,7 @@ export class GoogleMapsService {
         return null;
       }
 
-      return {
+      const geocodeResult: GeocodeResult = {
         lat:
           result.location.latitude,
 
@@ -435,6 +511,27 @@ export class GoogleMapsService {
           prediction?.text?.text ??
           '',
       };
+
+      if (includeEntrances) {
+        // Google returns entrances=[] (not omitted) when it has no
+        // entrance data for this place - preserve that as [], not
+        // undefined, so callers can tell "asked, got nothing" apart
+        // from "didn't ask".
+        geocodeResult.entrances = Array.isArray(result.entrances)
+          ? result.entrances
+              .filter(
+                (entrance: any) =>
+                  Number.isFinite(entrance?.location?.latitude) &&
+                  Number.isFinite(entrance?.location?.longitude),
+              )
+              .map((entrance: any) => ({
+                lat: entrance.location.latitude,
+                lng: entrance.location.longitude,
+              }))
+          : [];
+      }
+
+      return geocodeResult;
     } catch (error) {
       this.logger.warn(
         `Place Details failed for ${placeId}: ${
@@ -470,7 +567,7 @@ export class GoogleMapsService {
             address.trim(),
 
           components:
-            'country:NG',
+            `country:${this.serviceCountryCode}`,
 
           key:
             this.apiKey,
@@ -701,7 +798,7 @@ export class GoogleMapsService {
     }
 
     /**
-     * Do not route outside Nigeria.
+     * Do not route outside the configured service region.
      */
     if (
       !this.isPlausibleNigeriaCoordinate(
@@ -714,7 +811,7 @@ export class GoogleMapsService {
       )
     ) {
       this.logger.warn(
-        'Directions rejected because coordinates are outside Nigeria',
+        'Directions rejected because coordinates are outside the configured service region',
       );
 
       return null;
@@ -728,6 +825,18 @@ export class GoogleMapsService {
 
           destination:
             `${destination.lat},${destination.lng}`,
+
+          // Traffic-aware ETA: Google only returns duration_in_traffic
+          // (its real-time-adjusted estimate) when departure_time is
+          // explicitly supplied - "now" is the only sensible value for
+          // a ride being requested/tracked in real time.
+          departure_time: 'now',
+          traffic_model: 'best_guess',
+
+          // Alternative routes - Google returns more than one entry in
+          // `routes` when it finds a genuinely different viable path,
+          // not padding with near-duplicates.
+          alternatives: 'true',
 
           key:
             this.apiKey,
@@ -763,34 +872,40 @@ export class GoogleMapsService {
         return null;
       }
 
-      const route =
-        json.routes[0];
+      // Extracts one route's leg into the same shape whether it's the
+      // primary route or an alternative - single source of truth for
+      // "how do we read a Google route" rather than duplicating this
+      // logic for the primary route and then again for alternatives.
+      const extractRoute = (route: any): { distanceKm: number; durationMin: number; isTrafficAware: boolean; polyline: string | null } | null => {
+        const leg = route?.legs?.[0];
+        if (!leg?.distance?.value || !leg?.duration?.value) return null;
 
-      const leg =
-        route?.legs?.[0];
+        // duration_in_traffic is only present when Google genuinely had
+        // real-time traffic data for this route - falls back to the
+        // historical/typical duration otherwise, never a guess.
+        const trafficSeconds = leg.duration_in_traffic?.value;
+        const durationSeconds = trafficSeconds ?? leg.duration.value;
 
-      if (
-        !leg?.distance?.value ||
-        !leg?.duration?.value
-      ) {
-        return null;
-      }
+        return {
+          distanceKm: leg.distance.value / 1000,
+          durationMin: Math.ceil(durationSeconds / 60),
+          isTrafficAware: trafficSeconds != null,
+          polyline: route.overview_polyline?.points ?? null,
+        };
+      };
+
+      const primary = extractRoute(json.routes[0]);
+      if (!primary) return null;
+
+      const alternativeRoutes = json.routes
+        .slice(1)
+        .map(extractRoute)
+        .filter((r: any): r is NonNullable<typeof r> => r !== null)
+        .map(({ distanceKm, durationMin, polyline }: any) => ({ distanceKm, durationMin, polyline }));
 
       return {
-        distanceKm:
-          leg.distance.value /
-          1000,
-
-        durationMin:
-          Math.ceil(
-            leg.duration.value /
-              60,
-          ),
-
-        polyline:
-          route
-            .overview_polyline
-            ?.points ?? null,
+        ...primary,
+        alternativeRoutes,
       };
     } catch (error) {
       this.logger.error(
@@ -800,6 +915,57 @@ export class GoogleMapsService {
           : String(error),
       );
 
+      return null;
+    }
+  }
+
+  /**
+   * Snaps a point to the nearest drivable road via Google's Roads API -
+   * useful when a GPS fix or a map tap lands inside a building or
+   * compound rather than on the actual road a driver needs to stop on.
+   * Returns null (never throws) if the API is unreachable, unconfigured,
+   * or genuinely has no road within a reasonable distance - callers
+   * should treat that as "keep the original point", not an error.
+   */
+  async snapToRoad(lat: number, lng: number): Promise<{ lat: number; lng: number; wasSnapped: boolean } | null> {
+    if (!this.isConfigured()) return null;
+    if (!this.isValidCoordinate(lat, lng)) return null;
+
+    try {
+      const params = new URLSearchParams({
+        path: `${lat},${lng}`,
+        interpolate: 'false',
+        key: this.apiKey,
+      });
+
+      const response = await fetch(`${this.roadsBaseUrl}/snapToRoads?${params.toString()}`, {
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (!response.ok) return null;
+
+      const json = await response.json();
+      const snapped = json?.snappedPoints?.[0]?.location;
+      if (!snapped || typeof snapped.latitude !== 'number' || typeof snapped.longitude !== 'number') {
+        return null;
+      }
+
+      // A snap distance under ~5m is noise (GPS jitter, floating point),
+      // not a genuine "this point was off-road" correction - distinguish
+      // the two so callers don't silently nudge a pin that was already
+      // fine.
+      const movedMeters = haversineDistanceKm(lat, lng, snapped.latitude, snapped.longitude) * 1000;
+
+      return {
+        lat: snapped.latitude,
+        lng: snapped.longitude,
+        wasSnapped: movedMeters > 5,
+      };
+    } catch (error) {
+      this.logger.error(
+        'Snap-to-road request failed',
+        error instanceof Error ? error.stack : String(error),
+      );
       return null;
     }
   }

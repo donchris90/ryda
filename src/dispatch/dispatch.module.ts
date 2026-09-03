@@ -11,6 +11,7 @@ import { FeatureFlagsModule } from '../feature-flags/feature-flags.module';
 import { ObservabilityModule } from '../observability/observability.module';
 import { CandidateSearchModule } from '../candidate-search/candidate-search.module';
 import { RankingModule } from '../ranking/ranking.module';
+import { AirportModule } from '../airport/airport.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { RankingModule } from '../ranking/ranking.module';
     // AutoDispatchService's class doc comment.
     CandidateSearchModule,
     RankingModule,
+    AirportModule,
   ],
   providers: [DispatchService, AutoDispatchService],
   controllers: [DispatchController],

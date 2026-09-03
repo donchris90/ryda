@@ -16,6 +16,32 @@ export class RequestRideDto {
   @IsString()
   pickupAddress: string;
 
+  // Nearest Google entrance/access-point to pickupLat/Lng, resolved
+  // client-side via GET /maps/place-details?includeEntrances=true
+  // when the passenger confirmed a place (not a bare map pin - see
+  // GoogleMapsService.nearestAccessPoint()). Optional: most pickups
+  // won't have entrance data, and a plain dropped pin never will.
+  @IsOptional()
+  @IsNumber()
+  pickupEntranceLat?: number;
+
+  @IsOptional()
+  @IsNumber()
+  pickupEntranceLng?: number;
+
+  // Resolved client-side via GET /airports/detect and, if the
+  // passenger picked a specific terminal/zone, GET /airports/:id/zones
+  // - see RidesService.requestRide() for the eligibility check and
+  // zone-name resolution this triggers. Neither is required: most
+  // rides aren't airport pickups at all.
+  @IsOptional()
+  @IsString()
+  pickupAirportId?: string;
+
+  @IsOptional()
+  @IsString()
+  pickupZoneId?: string;
+
   @IsNumber()
   dropoffLat: number;
 

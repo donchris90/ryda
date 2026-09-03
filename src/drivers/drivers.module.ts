@@ -14,6 +14,7 @@ import { DriverAnalyticsController } from './driver-analytics.controller';
 import { FraudModule } from '../fraud/fraud.module';
 import { PassengersModule } from '../passengers/passengers.module';
 import { StorageModule } from '../storage/storage.module';
+import { TrackingModule } from '../tracking/tracking.module';
 
 @Module({
   imports: [
@@ -28,6 +29,7 @@ import { StorageModule } from '../storage/storage.module';
     FraudModule,
     PassengersModule,
     StorageModule,
+    TrackingModule,
   ],
   providers: [DriversService, DriverDocumentsService, DriverAnalyticsService],
   controllers: [DriversController, DriverAnalyticsController],

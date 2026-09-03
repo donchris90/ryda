@@ -5,8 +5,10 @@ import {
   Get,
   Post,
   Query,
+  UseGuards,
 } from '@nestjs/common';
 
+import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import {
   GoogleMapsService,
 } from './google-maps.service';
@@ -19,6 +21,7 @@ import {
 import { decodePolyline } from '../common/utils/polyline.util';
 
 @Controller('maps')
+@UseGuards(JwtAuthGuard)
 export class MapsController {
   constructor(
     private readonly mapsService: GoogleMapsService,
@@ -64,12 +67,21 @@ export class MapsController {
   @Get('place-details')
   async placeDetails(
     @Query('placeId') placeId?: string,
+    // Opt-in: pulls Google's per-entrance door coordinates, not just
+    // the place's centroid. Costs more (Enterprise-SKU Place Details),
+    // so the frontend should only pass this when confirming an actual
+    // pickup point, not for every place lookup (e.g. dropoff, saved
+    // favourites where the exact door doesn't matter).
+    @Query('includeEntrances') includeEntrances?: string,
   ) {
     if (!placeId?.trim()) {
       throw new BadRequestException('placeId is required');
     }
 
-    const result = await this.mapsService.getPlaceDetailsById(placeId);
+    const result = await this.mapsService.getPlaceDetailsById(
+      placeId,
+      includeEntrances === 'true',
+    );
 
     if (!result) {
       throw new BadRequestException(
@@ -140,5 +152,23 @@ export class MapsController {
     if (!directions?.polyline) return null;
 
     return { points: decodePolyline(directions.polyline) };
+  }
+
+  /**
+   * Pickup intelligence: nearest-road snapping. Useful when a GPS fix
+   * or a map tap lands inside a building/compound rather than on the
+   * actual road a driver needs to stop on. Returns the original point
+   * unchanged (wasSnapped: false) rather than an error when snapping
+   * isn't available or the point is already road-adjacent - the app
+   * can use wasSnapped to decide whether it's worth prompting the
+   * passenger about the adjustment at all.
+   */
+  @Post('snap-to-road')
+  async snapToRoad(@Body() dto: ReverseGeocodeDto) {
+    const result = await this.mapsService.snapToRoad(dto.lat, dto.lng);
+    if (!result) {
+      return { lat: dto.lat, lng: dto.lng, wasSnapped: false };
+    }
+    return result;
   }
 }

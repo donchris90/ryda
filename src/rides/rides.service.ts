@@ -45,6 +45,9 @@ import { MetricsService } from '../observability/metrics.service';
 import { CandidateSearchService } from '../candidate-search/candidate-search.service';
 import { DispatchDomain, DispatchMode } from '../candidate-search/candidate-search.types';
 import { DriverRankingService } from '../ranking/ranking.service';
+import { GeofenceService } from '../tracking/geofence/geofence.service';
+import { GeofenceType } from '../tracking/geofence/entities/geofence.entity';
+import { AirportService } from '../airport/airport.service';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -114,6 +117,8 @@ export class RidesService {
     private readonly googleMaps: GoogleMapsService,
     private readonly candidateSearchService: CandidateSearchService,
     private readonly driverRankingService: DriverRankingService,
+    private readonly geofenceService: GeofenceService,
+    private readonly airportService: AirportService,
   ) {}
 
   async estimateFare(dto: FareEstimateDto) {
@@ -128,6 +133,60 @@ export class RidesService {
 
   async requestRide(passengerId: string, dto: RequestRideDto): Promise<Ride> {
     await this.passengersService.assertNotBlacklisted(passengerId);
+
+    // "Do not allow unsupported trips simply because Google Maps can
+    // calculate the route" - validated here, before any fare
+    // calculation, since there's no point pricing a trip the platform
+    // doesn't actually serve. Open by default when no service areas
+    // are configured (GeofenceService.isWithinServiceArea()'s own
+    // documented behavior), so a fresh deployment with no zones set up
+    // yet is never accidentally blocked.
+    const [pickupServed, dropoffServed] = await Promise.all([
+      this.geofenceService.isWithinServiceArea(dto.pickupLat, dto.pickupLng),
+      this.geofenceService.isWithinServiceArea(dto.dropoffLat, dto.dropoffLng),
+    ]);
+    if (!pickupServed) {
+      throw new BadRequestException('This pickup location is outside our current service area');
+    }
+    if (!dropoffServed) {
+      throw new BadRequestException('This destination is outside our current service area');
+    }
+
+    // Pickup intelligence: flag (never block) a pickup that falls
+    // inside a restricted zone - a no-stopping area, secure facility,
+    // etc. - so the app can surface it and drivers/dispatchers know to
+    // take extra care, without preventing a pickup that may still be
+    // entirely legitimate.
+    const pickupGeofences = await this.geofenceService.checkPoint(dto.pickupLat, dto.pickupLng);
+    const restrictedZone = pickupGeofences.find((g) => g.type === GeofenceType.RESTRICTED);
+    const restrictedZoneWarning = restrictedZone
+      ? `Pickup is inside a restricted zone: ${restrictedZone.name}`
+      : null;
+
+    // Airport-specific refinements: only checked when the passenger
+    // app told us this pickup is pinned to a specific airport (via
+    // GET /airports/detect at booking time) - dto.isAirportTrip above
+    // stays the trusted signal fares already key off, this is a
+    // separate, additive check that can outright reject a booking
+    // (unlike restrictedZoneWarning, which only ever warns).
+    let pickupZoneName: string | null = null;
+    if (dto.pickupAirportId) {
+      const airport = await this.airportService.findById(dto.pickupAirportId);
+
+      if (!this.airportService.isVehicleCategoryEligible(airport, dto.category)) {
+        throw new BadRequestException(
+          `${airport.name} does not accept ${dto.category} pickups`,
+        );
+      }
+
+      if (dto.pickupZoneId) {
+        const zone = await this.airportService.findZoneById(dto.pickupZoneId);
+        if (zone.airportId !== airport.id) {
+          throw new BadRequestException('Pickup zone does not belong to the selected airport');
+        }
+        pickupZoneName = zone.name;
+      }
+    }
 
     const surge = await this.pricingService.calculateSurge(dto.city);
     const breakdown = await this.fareService.estimate(
@@ -173,6 +232,18 @@ export class RidesService {
       pickupLat: dto.pickupLat,
       pickupLng: dto.pickupLng,
       pickupAddress: dto.pickupAddress,
+      // Only persisted as a pair - one coordinate without the other
+      // isn't a usable point, so it's treated the same as neither
+      // being sent rather than saving a broken half.
+      pickupEntranceLat:
+        typeof dto.pickupEntranceLat === 'number' && typeof dto.pickupEntranceLng === 'number'
+          ? dto.pickupEntranceLat
+          : null,
+      pickupEntranceLng:
+        typeof dto.pickupEntranceLat === 'number' && typeof dto.pickupEntranceLng === 'number'
+          ? dto.pickupEntranceLng
+          : null,
+      pickupZoneName,
       dropoffLat: dto.dropoffLat,
       dropoffLng: dto.dropoffLng,
       dropoffAddress: dto.dropoffAddress,
@@ -186,6 +257,7 @@ export class RidesService {
       nightMultiplierApplied: breakdown.nightMultiplierApplied.toFixed(2),
       airportFee: breakdown.airportFee.toFixed(2),
       isAirportTrip: !!dto.isAirportTrip,
+      restrictedZoneWarning,
       flightNumber: dto.flightNumber ?? null,
       usedRealRouting: breakdown.usedRealRouting,
       tollFare: breakdown.tollFare.toFixed(2),

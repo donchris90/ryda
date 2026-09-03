@@ -10,6 +10,9 @@ import { DispatchDomain, DispatchMode } from '../candidate-search/candidate-sear
 import { DriverRankingService } from '../ranking/ranking.service';
 import { DispatchService } from './dispatch.service';
 import { MetricsService } from '../observability/metrics.service';
+import { AirportService } from '../airport/airport.service';
+import { DriversService } from '../drivers/drivers.service';
+import { isOnlineAvailability } from '../common/enums/driver-status.enum';
 
 /**
  * Drives AUTOMATIC dispatch end-to-end, on top of the exact same shared
@@ -51,6 +54,8 @@ export class AutoDispatchService {
     private readonly config: ConfigService,
     private readonly metrics: MetricsService,
     private readonly events: EventEmitter2,
+    private readonly airportService: AirportService,
+    private readonly driversService: DriversService,
   ) {}
 
   /**
@@ -90,6 +95,55 @@ export class AutoDispatchService {
     }
   }
 
+  /**
+   * Airport pickups skip the normal nearest-driver search entirely and
+   * instead pull from the physical driver queue at that airport -
+   * real-world airport ride-hailing behavior, where dozens of drivers
+   * may be clustered in a single waiting lot and "nearest GPS
+   * coordinate" doesn't mean anything useful. Dispatch order is
+   * arrival time within a category match, not plain FIFO across the
+   * whole queue (see AirportService.dispatchNext()) - a driver whose
+   * vehicle doesn't serve this ride's category is skipped in place,
+   * not bumped out of the queue. Loops past any queue entry whose
+   * driver has gone offline without formally leaving (removing them
+   * from the queue as it goes, so the queue self-heals rather than
+   * accumulating stale entries), and falls through to the normal
+   * search - not blocking dispatch - if the queue is empty or every
+   * remaining entry turns out to be stale.
+   *
+   * Returns true only when a real offer was made from the queue.
+   */
+  private async tryOfferViaAirportQueue(ride: Ride): Promise<boolean> {
+    const airport = await this.airportService.findContainingAirport(ride.pickupLat, ride.pickupLng);
+    if (!airport) return false;
+
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const entry = await this.airportService.dispatchNext(airport.id, ride.category);
+      if (!entry) return false; // queue genuinely empty
+
+      let profile;
+      try {
+        profile = await this.driversService.findByUserId(entry.driverUserId);
+      } catch {
+        continue; // driver profile vanished somehow — try the next entry
+      }
+      if (!isOnlineAvailability(profile.availability)) {
+        // Went offline without leaving the queue — dispatchNext() already
+        // removed them (status is DISPATCHED, not WAITING), so simply
+        // trying the next entry is enough for the queue to self-heal.
+        continue;
+      }
+
+      await this.dispatchService.offerToSpecificDriver(ride.id, entry.driverUserId, 0);
+      this.metrics.autoDispatchOffersTotal.inc();
+      this.logger.log(
+        `AIRPORT queue offer: rideId=${ride.id} airport=${airport.iataCode} selectedDriver=${entry.driverUserId}`,
+      );
+      return true;
+    }
+  }
+
   private async offerNextCandidate(rideId: string): Promise<void> {
     const ride = await this.ridesRepo.findOne({ where: { id: rideId } });
     if (!ride) return;
@@ -104,6 +158,9 @@ export class AutoDispatchService {
     // mean briefly offering, then un-offering, a driver for no reason.
     const existingOffer = await this.dispatchService.getPendingOfferForRide(rideId);
     if (existingOffer) return;
+
+    const offeredViaAirportQueue = await this.tryOfferViaAirportQueue(ride);
+    if (offeredViaAirportQueue) return;
 
     const initialRadiusKm = this.config.get<number>('dispatch.initialRadiusKm') ?? 8;
     const maxRadiusKm = this.config.get<number>('dispatch.maxRadiusKm') ?? 15;

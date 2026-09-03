@@ -111,6 +111,14 @@ export class DriverProfile {
   @Column({ type: 'timestamp', nullable: true })
   locationUpdatedAt: Date | null;
 
+  // Tracks a run of identical (lat, lng) updates in a row - a real
+  // GPS feed has natural jitter even when stationary, so a long streak
+  // of the exact same coordinate suggests a stuck device or a spoofed
+  // feed rather than a genuinely parked driver. Reset to 0 the moment
+  // the coordinate actually changes.
+  @Column({ default: 0 })
+  consecutiveDuplicateLocationCount: number;
+
   @CreateDateColumn()
   createdAt: Date;
 

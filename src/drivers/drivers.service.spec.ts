@@ -41,10 +41,16 @@ function buildService(overrides: Record<string, any> = {}) {
   };
   const capabilitiesRepo = overrides.capabilitiesRepo ?? fakeCapabilitiesRepo();
   const events = { emit: jest.fn(), ...overrides.events };
-  const fraudService = { ...overrides.fraudService };
+  const fraudService = { checkGpsSpoof: jest.fn().mockResolvedValue(undefined), ...overrides.fraudService };
   const documentsService = {
     hasAllRequiredApproved: jest.fn().mockResolvedValue(true),
     ...overrides.documentsService,
+  };
+  const locationQualityService = {
+    assess: jest.fn().mockReturnValue({ accept: true, issues: [] }),
+    isDuplicateOf: jest.fn().mockReturnValue(false),
+    isDuplicateStreakNotable: jest.fn().mockReturnValue(false),
+    ...overrides.locationQualityService,
   };
 
   const service = new DriversService(
@@ -54,9 +60,10 @@ function buildService(overrides: Record<string, any> = {}) {
     events as any,
     fraudService as any,
     documentsService as any,
+    locationQualityService as any,
   );
 
-  return { service, driversRepo, availabilityLogRepo, capabilitiesRepo, events, documentsService };
+  return { service, driversRepo, availabilityLogRepo, capabilitiesRepo, events, documentsService, locationQualityService, fraudService };
 }
 
 function baseProfile(overrides: Partial<Record<string, any>> = {}) {
@@ -416,5 +423,85 @@ describe('DriversService.restoreAvailabilityAfterTrip', () => {
     const result = await service.restoreAvailabilityAfterTrip('user-1');
 
     expect(result.availability).toBe(DriverAvailability.OFFLINE);
+  });
+});
+
+describe('DriversService.updateLocation() - quality-aware position updates', () => {
+  it('genuinely updates currentLat/currentLng and emits driver.location.updated when the quality assessment accepts the reading', async () => {
+    const { service, driversRepo, events } = buildService();
+    driversRepo.findOne.mockResolvedValue(baseProfile({ currentLat: null, currentLng: null, locationUpdatedAt: null }));
+
+    const result = await service.updateLocation('user-1', 6.5, 3.3);
+
+    expect(result.currentLat).toBe(6.5);
+    expect(result.currentLng).toBe(3.3);
+    expect(events.emit).toHaveBeenCalledWith('driver.location.updated', expect.objectContaining({ lat: 6.5, lng: 3.3 }));
+  });
+
+  it('does NOT update the live position and does NOT emit the event when the quality assessment rejects the reading (impossible jump)', async () => {
+    const { service, driversRepo, events, locationQualityService } = buildService();
+    locationQualityService.assess.mockReturnValue({ accept: false, issues: ['impossible_speed(9999km/h)'] });
+    driversRepo.findOne.mockResolvedValue(
+      baseProfile({ currentLat: 6.5, currentLng: 3.3, locationUpdatedAt: new Date(Date.now() - 60_000) }),
+    );
+
+    const result = await service.updateLocation('user-1', 10.5, 7.4);
+
+    expect(result.currentLat).toBe(6.5); // unchanged
+    expect(result.currentLng).toBe(3.3); // unchanged
+    expect(events.emit).not.toHaveBeenCalled();
+    expect(driversRepo.save).toHaveBeenCalled(); // the duplicate-streak counter still persists
+  });
+
+  it('still runs fraud review independently of the quality decision - both react to the same signal, but separately', async () => {
+    const { service, driversRepo, fraudService } = buildService();
+    const previous = { currentLat: 6.5, currentLng: 3.3, locationUpdatedAt: new Date(Date.now() - 60_000) };
+    driversRepo.findOne.mockResolvedValue(baseProfile(previous));
+    fraudService.checkGpsSpoof = jest.fn().mockResolvedValue(undefined);
+
+    await service.updateLocation('user-1', 6.51, 3.31);
+
+    expect(fraudService.checkGpsSpoof).toHaveBeenCalledWith(
+      'user-1',
+      expect.objectContaining({ lat: 6.5, lng: 3.3 }),
+      expect.objectContaining({ lat: 6.51, lng: 3.31 }),
+    );
+  });
+
+  it('increments the duplicate-streak counter when the coordinate exactly matches the previous one', async () => {
+    const { service, driversRepo, locationQualityService } = buildService();
+    locationQualityService.isDuplicateOf.mockReturnValue(true);
+    driversRepo.findOne.mockResolvedValue(
+      baseProfile({ currentLat: 6.5, currentLng: 3.3, locationUpdatedAt: new Date(), consecutiveDuplicateLocationCount: 3 }),
+    );
+
+    const result = await service.updateLocation('user-1', 6.5, 3.3);
+
+    expect(result.consecutiveDuplicateLocationCount).toBe(4);
+  });
+
+  it('resets the duplicate-streak counter to 0 the moment the coordinate genuinely changes', async () => {
+    const { service, driversRepo, locationQualityService } = buildService();
+    locationQualityService.isDuplicateOf.mockReturnValue(false);
+    driversRepo.findOne.mockResolvedValue(
+      baseProfile({ currentLat: 6.5, currentLng: 3.3, locationUpdatedAt: new Date(), consecutiveDuplicateLocationCount: 15 }),
+    );
+
+    const result = await service.updateLocation('user-1', 6.9, 3.9);
+
+    expect(result.consecutiveDuplicateLocationCount).toBe(0);
+  });
+
+  it('passes accuracy and fixTimestamp through to the quality assessment', async () => {
+    const { service, driversRepo, locationQualityService } = buildService();
+    driversRepo.findOne.mockResolvedValue(baseProfile({ currentLat: null, currentLng: null, locationUpdatedAt: null }));
+
+    await service.updateLocation('user-1', 6.5, 3.3, 25, 1735900000000);
+
+    expect(locationQualityService.assess).toHaveBeenCalledWith(
+      null,
+      { lat: 6.5, lng: 3.3, accuracy: 25, fixTimestamp: 1735900000000 },
+      expect.any(Date),
+    );
   });
 });

@@ -52,6 +52,24 @@ export class Ride {
   @Column()
   pickupAddress: string;
 
+  // Nearest Google entrance/access-point to pickupLat/Lng (see
+  // GoogleMapsService.nearestAccessPoint()) - the actual door, not the
+  // building's centroid. Null for the common case: no entrance data
+  // for this place, or the passenger dropped a bare map pin rather
+  // than confirming a searched place.
+  @Column({ type: 'double precision', nullable: true })
+  pickupEntranceLat: number | null;
+
+  @Column({ type: 'double precision', nullable: true })
+  pickupEntranceLng: number | null;
+
+  // Set when the pickup was resolved against a specific AirportZone
+  // (see AirportService.findContainingZone / RidesService.requestRide) -
+  // e.g. "Terminal 1 Arrivals". Null for the overwhelming majority of
+  // rides, which aren't airport pickups at all.
+  @Column({ type: 'varchar', nullable: true })
+  pickupZoneName: string | null;
+
   @Column('double precision')
   dropoffLat: number;
 
@@ -130,6 +148,15 @@ export class Ride {
 
   @Column({ default: false })
   isAirportTrip: boolean;
+
+  // Set at request time if the pickup point fell inside an active
+  // RESTRICTED-type geofence (see GeofenceService.checkPoint()) - a
+  // no-stopping zone, secure facility, etc. Informational, not
+  // blocking: persisted so a dispatcher/support agent investigating
+  // an issue later can still see it was flagged, not just surfaced
+  // once in the creation response and then lost.
+  @Column({ type: 'varchar', nullable: true })
+  restrictedZoneWarning: string | null;
 
   // Informational only — no real flight-tracking integration (see Known
   // gaps). Lets the passenger/driver see what flight a pickup is tied to.

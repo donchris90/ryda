@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -23,6 +24,7 @@ import { OnboardDriverDto } from './dto/onboard-driver.dto';
 import { haversineDistanceKm } from '../common/utils/geo.util';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { FraudService } from '../fraud/fraud.service';
+import { LocationQualityService } from '../tracking/location-quality.service';
 import { User } from '../users/entities/user.entity';
 import { DriverDocumentsService } from './driver-documents.service';
 
@@ -48,6 +50,8 @@ export interface NearbyDriverResult {
 
 @Injectable()
 export class DriversService {
+  private readonly logger = new Logger(DriversService.name);
+
   constructor(
     @InjectRepository(DriverProfile)
     private readonly driversRepo: Repository<DriverProfile>,
@@ -58,6 +62,7 @@ export class DriversService {
     private readonly events: EventEmitter2,
     private readonly fraudService: FraudService,
     private readonly documentsService: DriverDocumentsService,
+    private readonly locationQualityService: LocationQualityService,
   ) {}
 
   async onboard(userId: string, dto: OnboardDriverDto): Promise<DriverProfile> {
@@ -532,16 +537,51 @@ export class DriversService {
     return this.driversRepo.find({ where: { fleetCompanyId } });
   }
 
-  async updateLocation(userId: string, lat: number, lng: number): Promise<DriverProfile> {
+  async updateLocation(
+    userId: string,
+    lat: number,
+    lng: number,
+    accuracy?: number,
+    fixTimestamp?: number,
+  ): Promise<DriverProfile> {
     const profile = await this.findByUserId(userId);
     const now = new Date();
 
-    if (profile.currentLat != null && profile.currentLng != null && profile.locationUpdatedAt) {
-      await this.fraudService.checkGpsSpoof(
-        userId,
-        { lat: profile.currentLat, lng: profile.currentLng, at: profile.locationUpdatedAt },
-        { lat, lng, at: now },
+    const hasPrevious = profile.currentLat != null && profile.currentLng != null && profile.locationUpdatedAt;
+    const previous = hasPrevious
+      ? { lat: profile.currentLat!, lng: profile.currentLng!, at: profile.locationUpdatedAt! }
+      : null;
+
+    if (previous) {
+      // Fraud review is a separate concern from "should this update the
+      // driver's live position" - both react to the same impossible-speed
+      // signal, but independently (this flags for review regardless of
+      // what the quality assessment below decides to do with the update).
+      await this.fraudService.checkGpsSpoof(userId, previous, { lat, lng, at: now });
+    }
+
+    const quality = this.locationQualityService.assess(previous, { lat, lng, accuracy, fixTimestamp }, now);
+
+    const isDuplicate = this.locationQualityService.isDuplicateOf(
+      previous ? { lat: previous.lat, lng: previous.lng } : null,
+      { lat, lng },
+    );
+    profile.consecutiveDuplicateLocationCount = isDuplicate ? profile.consecutiveDuplicateLocationCount + 1 : 0;
+    if (this.locationQualityService.isDuplicateStreakNotable(profile.consecutiveDuplicateLocationCount)) {
+      this.logger.warn(
+        `Driver ${userId} reported the exact same coordinate ${profile.consecutiveDuplicateLocationCount} times in a row — possible stuck device or spoofed feed`,
       );
+    }
+
+    if (!quality.accept) {
+      // A genuinely impossible jump must not become the driver's live
+      // position - dispatch/ETA would otherwise immediately act on a
+      // clearly-bogus location. Silent to the caller: this is a
+      // server-side data-quality decision, not something the driver
+      // app needs to surface as a user-facing error, and the next
+      // genuine reading simply supersedes it.
+      await this.driversRepo.save(profile); // persists the duplicate-streak counter update even when rejecting position
+      return profile;
     }
 
     profile.currentLat = lat;

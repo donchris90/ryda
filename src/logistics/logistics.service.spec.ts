@@ -92,6 +92,7 @@ function buildService(overrides: Record<string, any> = {}) {
       courierDispatchNoDriverFoundTotal: { inc: jest.fn() },
       ...overrides.metrics,
     },
+    geofenceService: { isWithinServiceArea: jest.fn().mockResolvedValue(true), checkPoint: jest.fn().mockResolvedValue([]), ...overrides.geofenceService },
   };
 
   const service = new LogisticsService(
@@ -112,6 +113,7 @@ function buildService(overrides: Record<string, any> = {}) {
     deps.driverRankingService as any,
     deps.events as any,
     deps.metrics as any,
+    deps.geofenceService as any,
   );
 
   return { service, deps };

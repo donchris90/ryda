@@ -101,6 +101,7 @@ function buildService(overrides: Record<string, any> = {}) {
     googleMaps: {},
     candidateSearchService: { search: jest.fn(), ...overrides.candidateSearchService },
     driverRankingService: { rank: jest.fn(), ...overrides.driverRankingService },
+    geofenceService: { isWithinServiceArea: jest.fn().mockResolvedValue(true), checkPoint: jest.fn().mockResolvedValue([]), ...overrides.geofenceService },
   };
 
   const service = new RidesService(
@@ -128,6 +129,7 @@ function buildService(overrides: Record<string, any> = {}) {
     deps.googleMaps as any,
     deps.candidateSearchService as any,
     deps.driverRankingService as any,
+    deps.geofenceService as any,
   );
 
   return { service, deps };

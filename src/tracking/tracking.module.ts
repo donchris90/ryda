@@ -12,6 +12,7 @@ import { TrackingGateway } from './tracking.gateway';
 import { LocationService } from './location.service';
 import { HistoryService } from './history.service';
 import { LiveTrackingService } from './live-tracking.service';
+import { LocationQualityService } from './location-quality.service';
 import { TrackingController } from './tracking.controller';
 
 @Module({
@@ -36,8 +37,9 @@ import { TrackingController } from './tracking.controller';
     LocationService,
     HistoryService,
     LiveTrackingService,
+    LocationQualityService,
   ],
   controllers: [TrackingController],
-  exports: [HistoryService],
+  exports: [HistoryService, LocationQualityService],
 })
 export class TrackingModule {}

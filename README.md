@@ -3067,6 +3067,317 @@ admin safety-center UI itself (backend is real and tested; no
 frontend built this batch). Dedicated unit tests for the SOS/incident
 flow beyond the live end-to-end run already done.
 
+## Batch 6 - maps/routing audit, ten real gaps closed, plus the full named test matrix
+
+Same audit-first approach as every prior batch. Given the scope, this
+is the first of several passes - documenting what's genuinely done,
+verified, and delivered so far, honestly separate from what's
+confirmed as a gap but not yet fixed.
+
+**Genuinely done, live-verified:**
+
+1. **Removed a real hard-coded location fallback** - the exact thing
+   Batch 6's core principle prohibits. The passenger app's map-based
+   location picker (`pick-location.tsx`) silently defaulted to a
+   hard-coded Lagos coordinate (`6.6018, 3.3515`) whenever GPS wasn't
+   yet available - the comment even referenced an earlier version of
+   the same pattern in `book-ride.tsx` (already fixed there, but this
+   screen kept its own copy). Now tries the device's last-known
+   position first (fast, still genuinely GPS-derived), then a fresh
+   fix, and if genuinely neither resolves, shows an honest "search or
+   enable location" state - never a guessed city. Passenger app
+   type-checks and its production web export builds clean.
+
+2. **Maps endpoints were completely unauthenticated** - `/maps/*`
+   (autocomplete, geocode, reverse-geocode, route-preview) had no auth
+   guard at all, despite the app already sending a real bearer token
+   on every call (confirmed by checking the shared API client).
+   Anyone could hit these directly with no login and burn through paid
+   Google API quota, with nothing but the generic global rate limit in
+   the way. Added `@UseGuards(JwtAuthGuard)`.
+
+3. **Service-area enforcement was dead code - now genuinely wired
+   in.** A real `GeofenceService.isWithinServiceArea()` already
+   existed, already correctly "open by default" when no service areas
+   are configured (confirmed by reading its own doc comment before
+   touching anything) - and was called from nowhere in the entire
+   codebase. `RidesService.requestRide()` and
+   `LogisticsService.requestDelivery()` both now validate pickup *and*
+   destination against configured service areas before any fare is
+   even calculated, matching Batch 6's explicit "do not allow
+   unsupported trips simply because Google Maps can calculate the
+   route." 4 new unit tests, all passing.
+
+   **Verified live end to end** - the exact scenario the deliverable
+   asks for by name: with no service areas configured, a ride between
+   two London coordinates is genuinely accepted (open-by-default
+   confirmed, not just assumed); a real Lagos-only service area is
+   then configured via the actual admin endpoint; the same London ride
+   is now genuinely rejected with a clear message; a real Lagos-to-
+   Lagos ride still succeeds; and - the detail that confirms this
+   isn't just a crude "is this Nigeria" check - a ride with a valid
+   Lagos pickup but an Abuja destination (Nigerian, but outside the
+   configured 30km radius) is correctly rejected too, on the
+   destination specifically, with the right message.
+
+Full regression clean: 300 tests (4 new), full e2e suite.
+
+**Confirmed as real gaps, not yet fixed** (found during this same
+audit, prioritized for the next pass): the "Nigeria only" restriction
+is hard-coded in several places in `GoogleMapsService` rather than
+genuinely configurable, matching Batch 6's "country restrictions only
+where configured" phrasing; the Directions API call never requests
+`departure_time` (so no genuine traffic-aware ETA) or `alternatives`;
+the entire airport module (queue, `dispatchNext()`, pickup zones,
+eligible vehicles, queue priority) is completely disconnected from
+real dispatch - `dispatchNext()` is called from nowhere, same "exists
+but dead" pattern as the service-area check was; no GPS accuracy is
+ever collected or validated on driver location updates; pickup
+intelligence (nearest-road snapping, marker adjustment, entrance
+info) doesn't exist at all; and the specific test matrix Batch 6 asks
+for (Lagos, another Nigerian city, international coordinate,
+unsupported area, airport, poor/stale GPS, route recalculation)
+hasn't been built as its own suite yet.
+
+**Second pass - two more real gaps closed, also live/test-verified:**
+
+4. **The "Nigeria only" restriction is now genuinely configured, not
+   hard-coded.** Found the exact pattern Batch 6's own "country
+   restrictions only where configured" principle describes - "NG" was
+   baked directly into `GoogleMapsService` in five separate places
+   (autocomplete's `includedRegionCodes`, geocoding's `components`
+   param, and the bounding-box check used by both routing and
+   geocoding). Added a new `mapsServiceRegion` config section
+   (country code + bounding box, both env-var driven, defaulting to
+   today's actual Nigeria values so behavior is unchanged in
+   production) and made every one of those five spots read from it.
+   7 new unit tests - critically, one of them configures a genuinely
+   different region (a rough London bounding box) and confirms two
+   London coordinates are then accepted, which is the test that
+   actually distinguishes "configurable" from "refactored but still
+   secretly hardcoded."
+
+5. **Traffic-aware ETA and alternative routes**, both explicitly named
+   in the deliverable and both previously entirely absent - the
+   Directions API call never requested either. Added `departure_time`
+   (always `now`, the only sensible value for a ride being requested
+   or tracked live) and `traffic_model=best_guess`; `durationMin` now
+   uses Google's real-time `duration_in_traffic` whenever Google
+   actually returns it, with a new `isTrafficAware` flag so callers
+   can tell a genuine traffic-adjusted estimate from the historical
+   fallback rather than silently treating them as equivalent. Added
+   `alternatives=true` and a new `alternativeRoutes` array on the
+   result - genuinely different routes Google finds, not padded with
+   near-duplicates. Verified via mocked-`fetch` unit tests (no live
+   Google API credentials available in this sandbox) covering: traffic
+   data present vs. absent, multiple routes vs. only one, the actual
+   request parameters sent, and the region-rejection path.
+
+Full regression after this second pass: 307 tests (7 more new), full
+e2e suite, all clean.
+
+**Third pass - the explicitly-named "airport queue must be connected
+to actual dispatch" gap, closed:**
+
+6. Same "built but never called" pattern the service-area check had -
+   `AirportService.dispatchNext()` genuinely existed (FIFO pop, marks
+   the entry DISPATCHED) but was never invoked from anywhere in the
+   real dispatch flow. `AutoDispatchService` now checks, before its
+   normal nearest-driver search runs at all, whether a ride's pickup
+   falls inside a configured airport's geofence
+   (`AirportService.findContainingAirport()`) - if so, it pulls from
+   that airport's real driver queue in FIFO order instead, matching
+   actual airport ride-hailing behavior where dozens of drivers may be
+   clustered in one waiting lot and "nearest GPS coordinate" isn't a
+   meaningful signal. Loops past any queued driver who's gone offline
+   without formally leaving the queue (removing them as it goes, so
+   the queue self-heals rather than accumulating stale entries), and
+   falls through cleanly to the normal search - never blocking
+   dispatch - when the queue is empty or fully stale. 4 new unit
+   tests: genuine queue offer (and confirms the normal search is
+   skipped entirely), correct fallthrough when the pickup isn't at any
+   airport, correct fallthrough when the queue is empty, and the
+   self-healing skip-offline-driver loop.
+
+   **Verified live end to end** - the airport test scenario named
+   explicitly in the deliverable: created a real airport, had a real
+   driver genuinely join its queue, positioned a second, ordinarily-
+   closer-by-GPS driver nearby but deliberately NOT in the queue, then
+   requested a real AUTO-dispatch ride with a pickup inside the
+   airport's geofence. Confirmed in the database that the resulting
+   `ride_offers` row's `driverUserId` is the queue driver's exact ID -
+   not the raw-GPS-nearer one - and that the queue entry was correctly
+   marked `dispatched`. (Worth naming honestly: my first attempt at
+   this test showed the queue-removal working but no genuine offer
+   recorded - traced it to a bug in my own test script, not the
+   service, where the driver onboarding call was silently rejected for
+   an invalid `services` value; fixed the script and reran to the
+   result above.)
+
+Full regression after this third pass: 311 tests (4 more new), full
+e2e suite, all clean.
+
+**Fourth pass - GPS location quality, the "LOCATION QUALITY" section
+of the deliverable:**
+
+7. GPS accuracy was never even collected from the driver app, let
+   alone validated - `UpdateLocationDto` had no `accuracy` field at
+   all. Added it, plus an optional `fixTimestamp` (when the device
+   actually took the reading, for detecting a stale one queued/retried
+   after a connectivity gap) - both optional so older app builds
+   without them keep working unchanged.
+
+8. New `LocationQualityService` (in the tracking module) centralizes
+   the checks: poor accuracy and a stale fix are flagged and logged
+   but still accepted - rejecting a merely-imperfect reading would
+   leave the driver's position even more out of date than accepting
+   it, which is worse. A genuinely impossible speed jump is different:
+   previously `FraudService.checkGpsSpoof()` flagged it for review but
+   the bogus jump still silently became the driver's live position in
+   the meantime - dispatch and ETA would immediately act on it. Now
+   the update is genuinely rejected as the live position (kept
+   separate from, and in addition to, the still-independent fraud
+   flag) - silently to the caller, since this is a server-side
+   data-quality decision, not something the driver app needs to
+   surface as an error. A new `consecutiveDuplicateLocationCount`
+   column on `DriverProfile` tracks a run of the exact same coordinate
+   in a row (a stuck device or a spoofed feed - real GPS has natural
+   jitter even when parked), resetting the moment the coordinate
+   genuinely changes; a configurable threshold controls when this is
+   worth logging.
+
+   12 new unit tests for the service in isolation (every check,
+   correct accept/reject on each, and confirming the thresholds are
+   genuinely configurable, not hard-coded), plus 6 more testing
+   `DriversService.updateLocation()`'s integration of it - critically,
+   confirming an impossible jump genuinely does NOT update
+   `currentLat`/`currentLng` and does NOT emit the downstream event,
+   while still persisting the duplicate-streak counter and still
+   triggering fraud review independently.
+
+   **Verified live end to end** against a real running server: an
+   accurate reading is genuinely accepted; a Lagos-to-Abuja jump in
+   the same instant is genuinely rejected, confirmed by the driver's
+   stored position staying unchanged in the database; a poor-accuracy
+   (500m) reading and a stale-fix (10-minute-old) reading are both
+   still genuinely accepted, exactly as designed; and reporting the
+   same coordinate three times in a row genuinely climbs the duplicate
+   counter, which genuinely resets the moment the coordinate changes.
+   (Worth naming honestly: the first run of this test showed every
+   update after the first being silently rejected, including ones
+   meant to test the poor-accuracy/stale-fix/duplicate paths - traced
+   it to the test script itself sending requests milliseconds apart
+   with no delay, which makes even a few meters of movement imply an
+   astronomically impossible speed. Added realistic multi-second gaps
+   between updates and reran to the result above - a real driver
+   app's GPS pings are seconds apart, not milliseconds, so this
+   reflects actual usage, not a workaround.)
+
+Full regression after this fourth pass: 329 tests (18 more new), full
+e2e suite, all clean.
+
+**Fifth pass - pickup intelligence, the "PICKUP INTELLIGENCE" section
+of the deliverable:**
+
+9. **Nearest-road snapping** - new `GoogleMapsService.snapToRoad()`
+   using Google's Roads API, exposed via `POST /maps/snap-to-road`.
+   Useful when a GPS fix or a map tap lands inside a building or
+   compound rather than on the actual road a driver needs to stop on.
+   Distinguishes a genuine correction (the returned point is
+   meaningfully different, not just GPS jitter) from an
+   already-on-road point via a `wasSnapped` flag, so the app only
+   prompts the passenger about the adjustment when it's actually
+   worth surfacing - never silently moves a pin that was already
+   fine. Returns the original point (not an error) when the API is
+   unreachable or genuinely has nothing nearby.
+
+10. **Restricted-zone pickup warnings** - the same "built but never
+    called" pattern found twice already this batch:
+    `GeofenceService.checkPoint()` already existed and was never
+    invoked during ride/delivery request validation at all. A pickup
+    that falls inside an active RESTRICTED-type geofence (a
+    no-stopping zone, a secure facility, etc.) is now flagged with a
+    new `restrictedZoneWarning` field, naming the zone - deliberately
+    informational, never blocking, since a restricted zone may still
+    be an entirely legitimate pickup spot that just needs extra care.
+    Persisted on the ride (not just returned once at creation) so a
+    dispatcher or support agent investigating an issue later can still
+    see it was flagged.
+
+    5 new unit tests for `snapToRoad()` (genuine snap vs. jitter, a
+    clean empty response, a failed request, an invalid coordinate
+    short-circuiting before ever calling Google) plus 3 more for the
+    restricted-zone warning (correct warning text naming the zone,
+    no warning for an ordinary pickup, and confirming it never blocks
+    the ride the way the service-area check does).
+
+    **Verified live end to end**, and this pass caught something
+    important: adding the new persisted field crashed the server on
+    boot entirely the first time - TypeORM's reflect-metadata type
+    inference read a `string | null` union-type column annotation as
+    an unsupported "Object" column, which Postgres rejected outright.
+    This is exactly why boot-and-test-live is done on every pass
+    regardless of how many unit tests already passed - a unit test
+    with a mocked repository can never catch a real database schema
+    incompatibility. Fixed with an explicit `type: 'varchar'` and
+    reran. With that fixed: a baseline pickup with no restricted zone
+    configured genuinely shows no warning; the exact same pickup point
+    genuinely carries the correct warning text once a real geofence is
+    configured there via the actual admin endpoint, while the ride
+    still succeeds (HTTP 201, never blocked); a pickup elsewhere
+    genuinely shows no warning; and the `snap-to-road` endpoint is
+    confirmed to require real authentication (401 without a token) and
+    to gracefully return the original point rather than error when no
+    Google API key is configured in this sandbox.
+
+Full regression after this fifth pass: 337 tests (8 more new), full
+e2e suite, all clean.
+
+**Sixth pass - the explicit named test matrix, its own dedicated
+suite:**
+
+The deliverable names eight specific scenarios: Lagos, another
+Nigerian city, an international coordinate, an unsupported service
+area, an airport, poor GPS, stale GPS, and route recalculation - plus
+"do not hard-code test behavior into production." Every one of these
+was already covered somewhere across the five passes above, but
+scattered by service rather than mapped to the deliverable's own
+scenario names in one auditable place. Added
+`src/maps/batch6-scenarios.spec.ts` specifically for that: 11 tests,
+one `describe` block per named scenario, each calling the real
+production service (`GoogleMapsService`, `RidesService`,
+`AutoDispatchService`, `LocationQualityService`) through ordinary
+constructor injection - nothing in any of those services branches on
+being under test.
+
+Worth calling out what a few of these actually prove, not just that
+they pass: "another Nigerian city" (Abuja) is accepted by the
+country-wide bounding box but still correctly rejected by a
+Lagos-only configured service area - demonstrating those really are
+two independent layers, not one check standing in for the other.
+"Unsupported service area" uses a real in-country coordinate (Port
+Harcourt) specifically to prove rejection isn't just "is this
+Nigeria" - it has to genuinely fail the service-area check on its
+own. "Route recalculation" asserts two distinct network calls are
+made with two different results, not a single cached response served
+twice.
+
+Confirmed "do not hard-code test behavior into production" in the
+most literal sense too: `find dist -iname "*.spec.js" | wc -l` returns
+0 after a full production build - test files don't even ship in the
+build, let alone influence runtime behavior.
+
+Full regression after this sixth pass: 348 tests (11 more new), full
+e2e suite, all clean.
+
+This closes out the explicit test-matrix requirement. Batch 6's
+remaining open items: entrance information (Google Places' newer
+access-point data, where available), airport-specific pickup zones/
+eligible-vehicle restrictions/named queue priority beyond plain FIFO,
+and a dedicated admin UI for any of this - the last of which has
+nowhere to live, same known gap as the rest of the platform's admin
+dashboard.
+
 ## Batch 1 - the last remaining item: cron/queue audit and orphaned-record cleanup
 
 The final item from the original Batch 1 audit request. Systematically

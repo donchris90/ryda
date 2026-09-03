@@ -10,6 +10,12 @@ function buildService(overrides: Record<string, any> = {}) {
   const events = { emit: jest.fn(), ...overrides.events };
   const fraudService = { ...overrides.fraudService };
   const documentsService = { ...overrides.documentsService };
+  const locationQualityService = {
+    assess: jest.fn().mockReturnValue({ accept: true, issues: [] }),
+    isDuplicateOf: jest.fn().mockReturnValue(false),
+    isDuplicateStreakNotable: jest.fn().mockReturnValue(false),
+    ...overrides.locationQualityService,
+  };
 
   const service = new DriversService(
     driversRepo as any,
@@ -18,6 +24,7 @@ function buildService(overrides: Record<string, any> = {}) {
     events as any,
     fraudService as any,
     documentsService as any,
+    locationQualityService as any,
   );
 
   return { service, events };

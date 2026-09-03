@@ -26,6 +26,7 @@ import { ReconciliationModule } from '../reconciliation/reconciliation.module';
 import { ObservabilityModule } from '../observability/observability.module';
 import { CandidateSearchModule } from '../candidate-search/candidate-search.module';
 import { RankingModule } from '../ranking/ranking.module';
+import { GeofenceModule } from '../tracking/geofence/geofence.module';
 
 @Module({
   imports: [
@@ -50,6 +51,7 @@ import { RankingModule } from '../ranking/ranking.module';
     ObservabilityModule,
     CandidateSearchModule,
     RankingModule,
+    GeofenceModule,
   ],
   providers: [RidesService, FareService, ScheduledRideProcessor],
   controllers: [RidesController, AdminDispatchController],

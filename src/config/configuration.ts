@@ -145,6 +145,24 @@ export default () => ({
   googleMaps: {
     apiKey: process.env.GOOGLE_MAPS_API_KEY ?? '',
   },
+  mapsServiceRegion: {
+    // The ISO 3166-1 alpha-2 country code Places Autocomplete restricts
+    // to, and the code GoogleMapsService checks geocode/reverse-geocode
+    // results against. Defaults to Nigeria (today's actual market),
+    // but this now lives in config, not hard-coded in the service -
+    // expanding to another country is a config change, not a code one.
+    countryCode: (process.env.MAPS_SERVICE_COUNTRY_CODE ?? 'NG').toUpperCase(),
+    // A broad bounding box used to reject "obviously foreign"
+    // coordinates before ever calling Google (bias for autocomplete,
+    // a sanity gate for routing) - deliberately generous, not a
+    // precise border. Defaults to Nigeria's rough extent.
+    boundingBox: {
+      minLat: parseFloat(process.env.MAPS_SERVICE_MIN_LAT ?? '4'),
+      maxLat: parseFloat(process.env.MAPS_SERVICE_MAX_LAT ?? '14'),
+      minLng: parseFloat(process.env.MAPS_SERVICE_MIN_LNG ?? '2'),
+      maxLng: parseFloat(process.env.MAPS_SERVICE_MAX_LNG ?? '15'),
+    },
+  },
   pricingExtra: {
     nightStartHour: parseInt(process.env.NIGHT_START_HOUR ?? '22', 10),
     nightEndHour: parseInt(process.env.NIGHT_END_HOUR ?? '5', 10),
@@ -153,6 +171,17 @@ export default () => ({
     freeWaitMinutes: parseInt(process.env.FREE_WAIT_MINUTES ?? '5', 10),
     perMinuteWaitRate: parseFloat(process.env.PER_MINUTE_WAIT_RATE ?? '30'),
     cancellationFee: parseFloat(process.env.CANCELLATION_FEE ?? '500'),
+  },
+  locationQuality: {
+    // A reading worse than this is flagged (not rejected) as low
+    // accuracy - GPS accuracy is reported as a radius in meters.
+    maxAccuracyMeters: parseFloat(process.env.LOCATION_MAX_ACCURACY_METERS ?? '100'),
+    // How old a client-reported GPS fix can be before it's flagged as
+    // stale (queued/retried after a connectivity gap, not a live read).
+    maxFixAgeSeconds: parseInt(process.env.LOCATION_MAX_FIX_AGE_SECONDS ?? '120', 10),
+    // A run of this many identical (lat, lng) readings in a row is
+    // flagged as a possible stuck device or spoofed feed.
+    duplicateStreakThreshold: parseInt(process.env.LOCATION_DUPLICATE_STREAK_THRESHOLD ?? '20', 10),
   },
   dispatch: {
     offerTimeoutSeconds: parseInt(
