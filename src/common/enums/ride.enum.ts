@@ -1,6 +1,11 @@
 export enum RideStatus {
   SCHEDULED = 'scheduled',
   REQUESTED = 'requested',
+  // Batch-matching window for a pooled request, before it either pairs
+  // off (moves to SEARCHING with a poolGroupId, see PoolMatchingService)
+  // or falls back to a normal solo SEARCHING ride when the window
+  // expires unpaired. Added by migration AddRidePoolingColumns.
+  POOL_MATCHING = 'pool_matching',
   SEARCHING = 'searching',
   ACCEPTED = 'accepted',
   ARRIVING = 'arriving',
