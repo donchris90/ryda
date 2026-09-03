@@ -80,4 +80,19 @@ export class PricingService {
           : 'Supply meets demand',
     };
   }
+
+  /**
+   * Same computation as calculateSurge(), scoped to a specific
+   * driver's own registered city rather than requiring the caller to
+   * already know/supply one - lets a driver-facing endpoint expose
+   * "how busy is it right now, where I am" without giving drivers the
+   * admin-only bare city-lookup endpoint (see AiController.surge()).
+   * A driver with no registered city (profile not found, or city
+   * never set) gets the unscoped nationwide figure rather than an
+   * error - a broad number is more useful to them than none at all.
+   */
+  async calculateSurgeForDriver(driverUserId: string): Promise<SurgeResult> {
+    const profile = await this.driversRepo.findOne({ where: { userId: driverUserId } });
+    return this.calculateSurge(profile?.city ?? undefined);
+  }
 }

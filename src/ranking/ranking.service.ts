@@ -7,6 +7,7 @@ import { MetricsService } from '../observability/metrics.service';
 import { CandidateResult } from '../candidate-search/candidate-search.types';
 import { RideOffer, RideOfferStatus } from '../dispatch/entities/ride-offer.entity';
 import { EtaSource, RankedCandidate, RankingOutcome } from './ranking.types';
+import { fallbackEtaMinutes } from '../common/utils/geo.util';
 
 /** Candidate shape before scoring runs - score/scoreBreakdown filled in afterward. */
 type UnscoredCandidate = Omit<RankedCandidate, 'score' | 'scoreBreakdown'>;
@@ -23,11 +24,6 @@ type UnscoredCandidate = Omit<RankedCandidate, 'score' | 'scoreBreakdown'>;
 @Injectable()
 export class DriverRankingService {
   private readonly logger = new Logger(DriverRankingService.name);
-
-  // Matches the straight-line ETA heuristic RidesService.findSelectableDrivers()
-  // already uses elsewhere in the codebase, so the fallback here doesn't
-  // introduce a second, inconsistent guess at average city driving speed.
-  private static readonly FALLBACK_AVERAGE_SPEED_KMH = 28;
 
   constructor(
     private readonly googleMaps: GoogleMapsService,
@@ -96,7 +92,7 @@ export class DriverRankingService {
 
         return {
           ...candidate,
-          etaMinutes: this.fallbackEtaMinutes(candidate.distanceKm),
+          etaMinutes: fallbackEtaMinutes(candidate.distanceKm),
           etaSource: EtaSource.FALLBACK_DISTANCE,
         };
       }),
@@ -108,7 +104,7 @@ export class DriverRankingService {
     // formula, clearly labeled as such.
     const rankedSkipped: UnscoredCandidate[] = skipped.map((candidate) => ({
       ...candidate,
-      etaMinutes: this.fallbackEtaMinutes(candidate.distanceKm),
+      etaMinutes: fallbackEtaMinutes(candidate.distanceKm),
       etaSource: EtaSource.FALLBACK_DISTANCE,
     }));
     if (rankedSkipped.length > 0) fallbackUsed = true;
@@ -216,16 +212,5 @@ export class DriverRankingService {
       result.set(row.driverUserId, entry);
     }
     return result;
-  }
-
-  /**
-   * Distance / assumed average speed. This is explicitly a fallback, not
-   * a routing estimate — every caller sees `etaSource: FALLBACK_DISTANCE`
-   * alongside this number and dispatch logs must carry that label too, so
-   * nothing downstream can mistake it for a real road ETA.
-   */
-  private fallbackEtaMinutes(distanceKm: number): number {
-    const hours = distanceKm / DriverRankingService.FALLBACK_AVERAGE_SPEED_KMH;
-    return Math.round(hours * 60);
   }
 }

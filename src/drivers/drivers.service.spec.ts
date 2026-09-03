@@ -3,6 +3,7 @@ import { DriversService } from './drivers.service';
 import { DriverApprovalStatus, DriverAvailability } from '../common/enums/driver-status.enum';
 import { DriverService, ServiceApprovalStatus } from '../common/enums/driver-service.enum';
 import { OnboardDriverDto } from './dto/onboard-driver.dto';
+import { VehicleStatus } from '../common/enums/vehicle.enum';
 
 /** Minimal in-memory fake for the capabilities repo — filters by the `where` clause instead of ignoring it, so tests can seed mixed pending/approved/rejected rows and trust the service's own status filter (e.g. getApprovedServices()) rather than the mock. */
 function fakeCapabilitiesRepo(rows: any[] = []) {
@@ -52,6 +53,10 @@ function buildService(overrides: Record<string, any> = {}) {
     isDuplicateStreakNotable: jest.fn().mockReturnValue(false),
     ...overrides.locationQualityService,
   };
+  const vehiclesRepo = {
+    findOne: jest.fn().mockResolvedValue({ id: 'vehicle-1', status: VehicleStatus.ACTIVE }),
+    ...overrides.vehiclesRepo,
+  };
 
   const service = new DriversService(
     driversRepo as any,
@@ -61,9 +66,20 @@ function buildService(overrides: Record<string, any> = {}) {
     fraudService as any,
     documentsService as any,
     locationQualityService as any,
+    vehiclesRepo as any,
   );
 
-  return { service, driversRepo, availabilityLogRepo, capabilitiesRepo, events, documentsService, locationQualityService, fraudService };
+  return {
+    service,
+    driversRepo,
+    availabilityLogRepo,
+    capabilitiesRepo,
+    events,
+    documentsService,
+    locationQualityService,
+    fraudService,
+    vehiclesRepo,
+  };
 }
 
 function baseProfile(overrides: Partial<Record<string, any>> = {}) {
@@ -73,6 +89,7 @@ function baseProfile(overrides: Partial<Record<string, any>> = {}) {
     approvalStatus: DriverApprovalStatus.APPROVED,
     availability: DriverAvailability.OFFLINE,
     lastOnlineAvailability: null,
+    activeVehicleId: 'vehicle-1',
     ...overrides,
   };
 }
@@ -338,6 +355,70 @@ describe('DriversService.setAvailability', () => {
     await expect(service.setAvailability('user-1', DriverAvailability.ONLINE_FOR_BOTH)).rejects.toThrow(
       BadRequestException,
     );
+  });
+
+  it('refuses to go online with no active vehicle selected at all', async () => {
+    const { service, driversRepo, capabilitiesRepo } = buildService();
+    driversRepo.findOne.mockResolvedValue(baseProfile({ activeVehicleId: null }));
+    setCapabilities(capabilitiesRepo, [
+      { driverProfileId: 'profile-1', service: DriverService.RIDE, status: ServiceApprovalStatus.APPROVED },
+    ]);
+
+    await expect(service.setAvailability('user-1', DriverAvailability.ONLINE_FOR_RIDES)).rejects.toThrow(
+      BadRequestException,
+    );
+  });
+
+  it("refuses to go online when the active vehicle can no longer be found", async () => {
+    const { service, driversRepo, capabilitiesRepo, vehiclesRepo } = buildService();
+    driversRepo.findOne.mockResolvedValue(baseProfile());
+    vehiclesRepo.findOne.mockResolvedValue(null);
+    setCapabilities(capabilitiesRepo, [
+      { driverProfileId: 'profile-1', service: DriverService.RIDE, status: ServiceApprovalStatus.APPROVED },
+    ]);
+
+    await expect(service.setAvailability('user-1', DriverAvailability.ONLINE_FOR_RIDES)).rejects.toThrow(
+      BadRequestException,
+    );
+  });
+
+  it.each([
+    [VehicleStatus.PENDING_INSPECTION, "hasn't been approved"],
+    [VehicleStatus.MAINTENANCE, 'under maintenance'],
+    [VehicleStatus.DEACTIVATED, 'deactivated'],
+  ])('refuses to go online when the active vehicle is %s, with a message naming why', async (status, expectedPhrase) => {
+    const { service, driversRepo, capabilitiesRepo, vehiclesRepo } = buildService();
+    driversRepo.findOne.mockResolvedValue(baseProfile());
+    vehiclesRepo.findOne.mockResolvedValue({ id: 'vehicle-1', status });
+    setCapabilities(capabilitiesRepo, [
+      { driverProfileId: 'profile-1', service: DriverService.RIDE, status: ServiceApprovalStatus.APPROVED },
+    ]);
+
+    await expect(service.setAvailability('user-1', DriverAvailability.ONLINE_FOR_RIDES)).rejects.toThrow(
+      expect.objectContaining({ message: expect.stringContaining(expectedPhrase) }),
+    );
+  });
+
+  it('lets a driver go online once their vehicle is ACTIVE again', async () => {
+    const { service, driversRepo, capabilitiesRepo, vehiclesRepo } = buildService();
+    driversRepo.findOne.mockResolvedValue(baseProfile());
+    vehiclesRepo.findOne.mockResolvedValue({ id: 'vehicle-1', status: VehicleStatus.ACTIVE });
+    setCapabilities(capabilitiesRepo, [
+      { driverProfileId: 'profile-1', service: DriverService.RIDE, status: ServiceApprovalStatus.APPROVED },
+    ]);
+
+    const result = await service.setAvailability('user-1', DriverAvailability.ONLINE_FOR_RIDES);
+
+    expect(result.availability).toBe(DriverAvailability.ONLINE_FOR_RIDES);
+  });
+
+  it('does not check vehicle status at all when going OFFLINE', async () => {
+    const { service, driversRepo, vehiclesRepo } = buildService();
+    driversRepo.findOne.mockResolvedValue(baseProfile({ availability: DriverAvailability.ONLINE_FOR_RIDES }));
+
+    await service.setAvailability('user-1', DriverAvailability.OFFLINE);
+
+    expect(vehiclesRepo.findOne).not.toHaveBeenCalled();
   });
 
   it('refuses to change availability while a trip is active (ON_TRIP)', async () => {

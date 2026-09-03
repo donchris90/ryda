@@ -66,6 +66,16 @@ export class AiController {
     return this.recommendationService.getDriverRecommendations(city);
   }
 
+  // Driver-scoped equivalent of the admin-only surge() above - a
+  // driver can see how busy it is where THEY are, without needing the
+  // dispatcher/admin-level bare city lookup.
+  @Get('surge/mine')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.DRIVER)
+  mySurge(@CurrentUser() user: User) {
+    return this.pricingService.calculateSurgeForDriver(user.id);
+  }
+
   @Get('recommendations/passenger')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.PASSENGER)

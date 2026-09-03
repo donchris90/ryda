@@ -27,6 +27,8 @@ import { FraudService } from '../fraud/fraud.service';
 import { LocationQualityService } from '../tracking/location-quality.service';
 import { User } from '../users/entities/user.entity';
 import { DriverDocumentsService } from './driver-documents.service';
+import { Vehicle } from '../vehicles/entities/vehicle.entity';
+import { VehicleStatus } from '../common/enums/vehicle.enum';
 
 // Trips required to progress to the next level.
 const LEVEL_PROGRESSION: { level: DriverLevel; minTrips: number; minRating: number }[] = [
@@ -63,6 +65,8 @@ export class DriversService {
     private readonly fraudService: FraudService,
     private readonly documentsService: DriverDocumentsService,
     private readonly locationQualityService: LocationQualityService,
+    @InjectRepository(Vehicle)
+    private readonly vehiclesRepo: Repository<Vehicle>,
   ) {}
 
   async onboard(userId: string, dto: OnboardDriverDto): Promise<DriverProfile> {
@@ -312,6 +316,28 @@ export class DriversService {
     }
 
     if (isOnlineAvailability(availability)) {
+      if (!profile.activeVehicleId) {
+        throw new BadRequestException(
+          "You can't go online yet — add and select a vehicle first. Check the Vehicle section of your profile.",
+        );
+      }
+      const vehicle = await this.vehiclesRepo.findOne({ where: { id: profile.activeVehicleId } });
+      if (!vehicle) {
+        throw new BadRequestException(
+          "You can't go online yet — your selected vehicle could no longer be found. Check the Vehicle section of your profile.",
+        );
+      }
+      if (vehicle.status !== VehicleStatus.ACTIVE) {
+        const reason: Partial<Record<VehicleStatus, string>> = {
+          [VehicleStatus.PENDING_INSPECTION]: "your vehicle hasn't been approved yet",
+          [VehicleStatus.MAINTENANCE]: 'your vehicle is currently marked as under maintenance',
+          [VehicleStatus.DEACTIVATED]: 'your vehicle has been deactivated',
+        };
+        throw new BadRequestException(
+          `You can't go online yet — ${reason[vehicle.status] ?? 'your vehicle is not currently active'}. Check the Vehicle section of your profile.`,
+        );
+      }
+
       // Server-side re-check of approved services — never trust the
       // client's requested availability value on its own. A driver
       // approved for RIDE only can never end up ONLINE_FOR_DELIVERIES

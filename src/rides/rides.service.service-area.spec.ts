@@ -33,6 +33,7 @@ function buildService(overrides: Record<string, any> = {}) {
     metricsService as any,
     {} as any, {} as any, {} as any,
     geofenceService as any,
+    {} as any, // airportService (not exercised by this suite's scenarios)
   );
 
   return { service, geofenceService, ridesRepo, fareService };

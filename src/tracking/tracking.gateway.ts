@@ -167,6 +167,7 @@ export class TrackingGateway
     lng: number;
     at: Date;
     rideId?: string | null;
+    deliveryId?: string | null;
   }): void {
     this.server.to(this.adminLiveRoom()).emit('admin:driver-location', payload);
   }

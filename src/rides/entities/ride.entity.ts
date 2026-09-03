@@ -129,22 +129,6 @@ export class Ride {
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   tipAmount: string;
 
-  // ---- Pooling (shared rides) ----
-  // A pooled trip is still two ordinary Ride rows, one per passenger -
-  // see PoolGroup for what's actually shared between them (route
-  // sequence, anchor/partner linkage). Set by PoolMatchingService when
-  // a pool_matching-status ride pairs off; cleared again by
-  // unpoolRide()/unpoolRideMidTrip() if the pairing falls apart.
-  @Column({ default: false })
-  isPooled: boolean;
-
-  @Index()
-  @Column({ type: 'varchar', nullable: true })
-  poolGroupId: string | null;
-
-  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
-  poolDiscountAmount: string;
-
   // Generated at request time, shown to the passenger, spoken by the
   // passenger to the driver at pickup — a lightweight anti-fraud check
   // that this is genuinely the matched driver/passenger pair, not

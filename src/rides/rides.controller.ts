@@ -10,11 +10,13 @@ import { RidesService } from './rides.service';
 import { DispatchService } from '../dispatch/dispatch.service';
 import { FareEstimateDto } from './dto/fare-estimate.dto';
 import { RequestRideDto } from './dto/request-ride.dto';
-import { CancelRideDto } from './dto/cancel-ride.dto';
+import { CancelRideDto, AdminCancelRideDto } from './dto/cancel-ride.dto';
 import { RateRideDto } from './dto/rate-ride.dto';
 import { SelectDriverDto } from './dto/select-driver.dto';
 import { CancelledBy, RideStatus } from '../common/enums/ride.enum';
+import { SAFETY_OPS_ROLES, ADMIN_LIKE_ROLES } from '../common/enums/user-role.enum';
 import { AddTipDto, VerifyPinDto } from './dto/tip-and-pin.dto';
+import { Audit } from '../audit/decorators/audit.decorator';
 
 @ApiTags('rides')
 @ApiBearerAuth('access-token')
@@ -100,6 +102,7 @@ export class RidesController {
   @Patch('admin/:id/force-status/:status')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @Audit('ride.force_status')
   forceStatus(@Param('id') id: string, @Param('status') status: RideStatus) {
     return this.ridesService.forceStatusForAdmin(id, status);
   }
@@ -107,8 +110,81 @@ export class RidesController {
   @Delete('admin/:id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @Audit('ride.delete')
   deleteRide(@Param('id') id: string) {
     return this.ridesService.deleteForAdmin(id);
+  }
+
+  /**
+   * Everything a support/ops admin needs to understand one ride
+   * without jumping between the drivers, users, and payments pages —
+   * full ride record plus passenger/driver/vehicle/payment context in
+   * one call. Read-only, so no @Audit here - viewing isn't a
+   * sensitive action the way changing something is.
+   */
+  @Get('admin/:id')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(...SAFETY_OPS_ROLES, UserRole.FINANCE, UserRole.AUDITOR)
+  getForAdmin(@Param('id') id: string) {
+    return this.ridesService.getForAdmin(id);
+  }
+
+  /** Dispatch timeline for this ride - every offer made, to whom, and how it resolved. */
+  @Get('admin/:id/dispatch-timeline')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(...SAFETY_OPS_ROLES, UserRole.AUDITOR)
+  getDispatchTimeline(@Param('id') id: string) {
+    return this.dispatchService.getOffersForRideAdmin(id);
+  }
+
+  /**
+   * Re-runs dispatch for a ride that's stuck SEARCHING or ended up
+   * NO_DRIVER_FOUND - the same candidate-search-and-offer pipeline a
+   * fresh ride request kicks off, not a special admin-only algorithm.
+   * Refuses anything already past that point (accepted, in progress,
+   * completed, cancelled) rather than silently no-op'ing, so an admin
+   * gets a clear reason instead of wondering why nothing happened.
+   */
+  @Post('admin/:id/redispatch')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(...SAFETY_OPS_ROLES)
+  @Audit('ride.redispatch')
+  redispatch(@Param('id') id: string) {
+    return this.dispatchService.redispatchForAdmin(id);
+  }
+
+  /**
+   * Bypasses the normal offer-and-accept flow entirely and assigns a
+   * specific driver directly - for the cases automated dispatch
+   * genuinely can't handle well (a VIP pickup, a driver who called in
+   * about a ride the app isn't offering them, etc.). Because it skips
+   * the driver's own acceptance, this is deliberately a narrower role
+   * set than redispatch (which still asks a driver to accept).
+   */
+  @Post('admin/:id/assign/:driverUserId')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(...ADMIN_LIKE_ROLES, UserRole.DISPATCHER)
+  @Audit('ride.manual_assign')
+  manualAssign(@Param('id') id: string, @Param('driverUserId') driverUserId: string) {
+    return this.ridesService.manualAssignForAdmin(id, driverUserId);
+  }
+
+  /**
+   * Admin/support cancellation - distinct from the passenger/driver
+   * self-service :id/cancel above so it's attributed accurately
+   * (CancelledBy.ADMIN, not misattributed as the passenger cancelling
+   * themselves) and never charges the passenger a cancellation fee,
+   * which cancelRide() already only applies for CancelledBy.PASSENGER.
+   * A reason is required here, unlike the optional one on self-service
+   * cancellation - an admin overriding a ride needs to leave a record
+   * of why, for whoever looks at this ride's audit trail later.
+   */
+  @Patch('admin/:id/cancel')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(...SAFETY_OPS_ROLES)
+  @Audit('ride.admin_cancel')
+  adminCancel(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: AdminCancelRideDto) {
+    return this.ridesService.cancelRide(id, user.id, CancelledBy.ADMIN, dto);
   }
 
   @Get(':id/driver-info')
@@ -127,19 +203,6 @@ export class RidesController {
   @UseGuards(JwtAuthGuard)
   getRoute(@Param('id') id: string, @CurrentUser() user: User) {
     return this.ridesService.getRoute(id, user.id, user.role);
-  }
-
-  @ApiOperation({
-    summary: 'Get the shared-ride manifest for a pooled trip',
-    description:
-      'Returns null if this ride isn\'t currently part of an active pool. Otherwise returns the co-rider\'s ' +
-      'first name/status and the combined pickup/dropoff stop sequence, each tagged isMine so the app can ' +
-      'distinguish "your stop" from your pool partner\'s.',
-  })
-  @Get(':id/pool-manifest')
-  @UseGuards(JwtAuthGuard)
-  getPoolManifest(@Param('id') id: string, @CurrentUser() user: User) {
-    return this.ridesService.getPoolManifest(id, user.id, user.role);
   }
 
   @Post(':id/share')

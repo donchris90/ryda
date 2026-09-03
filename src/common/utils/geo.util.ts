@@ -22,3 +22,21 @@ export function haversineDistanceKm(
 function toRad(deg: number): number {
   return (deg * Math.PI) / 180;
 }
+
+// Same figure ranking.service.ts's DriverRankingService already used
+// privately - centralized here so a second caller (dispatch.service.ts,
+// estimating an ETA to show a driver on their ride offer) doesn't have
+// to duplicate or drift from it.
+export const FALLBACK_AVERAGE_SPEED_KMH = 28;
+
+/**
+ * Distance / assumed average speed - explicitly a fallback, not a
+ * routing estimate. Callers that also track an "eta source" concept
+ * (see EtaSource.FALLBACK_DISTANCE in ranking.types.ts) should label
+ * results from this the same way, so nothing downstream mistakes it
+ * for a real road ETA.
+ */
+export function fallbackEtaMinutes(distanceKm: number, avgSpeedKmh = FALLBACK_AVERAGE_SPEED_KMH): number {
+  const hours = distanceKm / avgSpeedKmh;
+  return Math.round(hours * 60);
+}

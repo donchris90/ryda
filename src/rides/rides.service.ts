@@ -48,8 +48,6 @@ import { DriverRankingService } from '../ranking/ranking.service';
 import { GeofenceService } from '../tracking/geofence/geofence.service';
 import { GeofenceType } from '../tracking/geofence/entities/geofence.entity';
 import { AirportService } from '../airport/airport.service';
-import { PoolMatchingService } from '../pooling/pool-matching.service';
-import { FeatureFlagsService, FEATURE_KEYS } from '../feature-flags/feature-flags.service';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -121,8 +119,6 @@ export class RidesService {
     private readonly driverRankingService: DriverRankingService,
     private readonly geofenceService: GeofenceService,
     private readonly airportService: AirportService,
-    private readonly poolMatchingService: PoolMatchingService,
-    private readonly featureFlagsService: FeatureFlagsService,
   ) {}
 
   async estimateFare(dto: FareEstimateDto) {
@@ -227,32 +223,11 @@ export class RidesService {
       }
     }
 
-    // Pooling only applies to requests being dispatched right now — a
-    // scheduled ride has nothing waiting to pair with yet at booking
-    // time. Feature-flagged so pooling can be turned off platform-wide
-    // (or per-incident) without a redeploy; see PoolMatchingService's
-    // class doc comment for the full lifecycle this kicks off.
-    const pooled =
-      !scheduledAt &&
-      !!dto.wantsPool &&
-      (await this.featureFlagsService.isEnabled(FEATURE_KEYS.RIDE_SHARING));
-
     const ride = this.ridesRepo.create({
       passengerId,
       category: dto.category,
-      status: scheduledAt
-        ? RideStatus.SCHEDULED
-        : pooled
-          ? RideStatus.POOL_MATCHING
-          : RideStatus.SEARCHING,
-      // Pooled rides always resolve via AUTO — either paired and handed
-      // to AutoDispatch as the group's anchor, or unmatched and falling
-      // back to solo AUTO (see PoolMatchingService.resolveWindow()).
-      // There's no MANUAL/pooled combination: a passenger picking a
-      // specific driver from a list isn't compatible with "wait to see
-      // if someone else can share this trip".
-      dispatchMode: pooled ? DispatchMode.AUTO : (dto.dispatchMode ?? DispatchMode.MANUAL),
-      isPooled: pooled,
+      status: scheduledAt ? RideStatus.SCHEDULED : RideStatus.SEARCHING,
+      dispatchMode: dto.dispatchMode ?? DispatchMode.MANUAL,
       scheduledAt,
       pickupLat: dto.pickupLat,
       pickupLng: dto.pickupLng,
@@ -354,15 +329,7 @@ export class RidesService {
     // tryOfferNextCandidate()), so a transient failure here can never
     // fail ride creation — the ride simply stays SEARCHING and the next
     // decline/timeout/retry gets another chance.
-    //
-    // Pooled rides skip straight dispatch entirely: they're POOL_MATCHING,
-    // not SEARCHING, and go through PoolMatchingService.requestPool()
-    // instead, which is what eventually calls AutoDispatchService itself
-    // (on the anchor ride, once/if a partner is found or the window
-    // expires unpaired — see that method).
-    if (!scheduledAt && pooled) {
-      void this.poolMatchingService.requestPool(savedRide.id);
-    } else if (!scheduledAt && savedRide.dispatchMode === DispatchMode.AUTO) {
+    if (!scheduledAt && savedRide.dispatchMode === DispatchMode.AUTO) {
       void this.autoDispatchService.startForRide(savedRide.id);
     }
 
@@ -536,6 +503,68 @@ export class RidesService {
   }
 
   /**
+   * The detail view listForAdmin()'s row click opens - full ride
+   * record plus enough passenger/driver/payment context that a support
+   * agent or ops admin doesn't need to jump between four other admin
+   * pages to understand what happened on this one ride. Deliberately a
+   * single-record fetch (not query-builder-optimized like listForAdmin)
+   * since it's never called at list volume - the N+1-ish shape here
+   * (a handful of extra lookups) is fine for one ride at a time.
+   */
+  async getForAdmin(rideId: string) {
+    const ride = await this.findById(rideId);
+
+    const [passengerUser, driverUser, driverProfile, vehicle, payments] = await Promise.all([
+      this.usersService.findById(ride.passengerId).catch(() => null),
+      ride.driverId ? this.usersService.findById(ride.driverId).catch(() => null) : Promise.resolve(null),
+      ride.driverId ? this.driversService.findByUserId(ride.driverId).catch(() => null) : Promise.resolve(null),
+      ride.vehicleId ? this.vehiclesService.findById(ride.vehicleId).catch(() => null) : Promise.resolve(null),
+      this.paymentsService.findByRide(rideId).catch(() => []),
+    ]);
+
+    return {
+      ride,
+      passenger: passengerUser
+        ? {
+            id: passengerUser.id,
+            firstName: passengerUser.firstName,
+            lastName: passengerUser.lastName,
+            phone: passengerUser.phone,
+            rating: passengerUser.rating ?? null,
+          }
+        : null,
+      driver: driverUser
+        ? {
+            id: driverUser.id,
+            firstName: driverUser.firstName,
+            lastName: driverUser.lastName,
+            phone: driverUser.phone,
+            rating: driverProfile?.rating ?? null,
+            level: driverProfile?.level ?? null,
+            completedTrips: driverProfile?.completedTrips ?? null,
+            vehicle: vehicle
+              ? { make: vehicle.make, model: vehicle.model, color: vehicle.color, plateNumber: vehicle.plateNumber }
+              : null,
+          }
+        : null,
+      payments,
+    };
+  }
+
+  /**
+   * Admin override for the cases automated/manual dispatch genuinely
+   * can't handle well - assigns a specific driver directly, skipping
+   * the normal offer-and-accept flow entirely (see acceptRide()'s
+   * bypassOfferCheck). Every other eligibility check acceptRide()
+   * already does (approval, online, active vehicle, category match,
+   * cash-debt restriction) still applies in full - this only removes
+   * the requirement that the driver was actually offered this ride.
+   */
+  async manualAssignForAdmin(rideId: string, driverUserId: string): Promise<Ride> {
+    return this.acceptRide(rideId, driverUserId, { bypassOfferCheck: true });
+  }
+
+  /**
    * Gives the passenger visibility into who's actually picking them up —
    * name, photo, rating, and vehicle details. Previously nothing exposed
    * this: `Ride` only stored a raw `driverId`/`vehicleId`, and no
@@ -697,59 +726,6 @@ export class RidesService {
     if (!directions?.polyline) return null;
 
     return { points: decodePolyline(directions.polyline) };
-  }
-
-  /**
-   * The single source of truth for pooled-ride stop/partner detail on
-   * both apps — see PoolMatchingService.pairRides()'s comment on why
-   * this replaced mirroring the co-rider's stops onto `ride.stops`
-   * directly. Returns null for any ride that isn't currently part of an
-   * active pool (never pooled, already unpooled, or the pairing hasn't
-   * happened yet) rather than throwing, since "no manifest" is the
-   * normal state for most rides polling this.
-   */
-  async getPoolManifest(
-    rideId: string,
-    requesterId: string,
-    requesterRole: UserRole,
-  ) {
-    const ride = await this.findById(rideId);
-
-    const isParticipant =
-      ride.passengerId === requesterId || ride.driverId === requesterId;
-    const isStaff = STAFF_ROLES.includes(requesterRole);
-    if (!isParticipant && !isStaff) {
-      throw new ForbiddenException("You don't have access to this ride");
-    }
-
-    if (!ride.poolGroupId) return null;
-
-    const match = await this.poolMatchingService.getGroupAndPartner(ride);
-    if (!match) return null;
-    const { group, partnerRide } = match;
-
-    const partnerUser = await this.usersService.findById(
-      partnerRide.passengerId,
-    );
-
-    return {
-      poolGroupId: group.id,
-      status: group.status,
-      estimatedTotalDistanceKm: group.estimatedTotalDistanceKm,
-      estimatedTotalDurationMin: group.estimatedTotalDurationMin,
-      partnerRideId: partnerRide.id,
-      partnerRideStatus: partnerRide.status,
-      // Only the co-rider's first name — this is a stranger the
-      // passenger/driver is sharing a car with, not someone whose full
-      // profile either side has any reason to see.
-      partnerFirstName: partnerUser.firstName,
-      // isMine lets either app render "your stop" vs "co-rider's stop"
-      // from one shared list without re-deriving it client-side.
-      stops: group.routeSequence.map((stop) => ({
-        ...stop,
-        isMine: stop.rideId === ride.id,
-      })),
-    };
   }
 
   /**
@@ -1075,7 +1051,21 @@ export class RidesService {
     await this.dispatchService.withdrawOffer(rideId);
   }
 
-  async acceptRide(rideId: string, driverUserId: string): Promise<Ride> {
+  async acceptRide(
+    rideId: string,
+    driverUserId: string,
+    options?: {
+      // Set only by DispatchService.manualAssignForAdmin() - an admin
+      // deliberately overriding normal dispatch to assign a specific
+      // driver who was never offered this ride (or was offered it and
+      // declined/timed out). Every other eligibility check below still
+      // applies in full; this skips only the pending-offer/exclusivity
+      // check, which exists to protect the passenger's own driver
+      // choice from being undercut by another driver racing to accept -
+      // a concern that doesn't apply when an admin is the one choosing.
+      bypassOfferCheck?: boolean;
+    },
+  ): Promise<Ride> {
     const ride = await this.findById(rideId);
     if (
       ride.status !== RideStatus.SEARCHING &&
@@ -1086,33 +1076,35 @@ export class RidesService {
       );
     }
 
-    // If the passenger has a pending offer out to a specific driver,
-    // only that driver may accept — otherwise a different driver could
-    // swoop in via broadcast-accept while the chosen one is still
-    // deciding, which would defeat the entire point of letting the
-    // passenger pick. No pending offer at all (nobody's been selected
-    // yet) still allows the plain broadcast-accept path below.
-    const pendingOffer =
-      await this.dispatchService.getPendingOfferForRide(rideId);
-    if (pendingOffer) {
-      if (pendingOffer.driverUserId !== driverUserId) {
-        throw new ForbiddenException(
-          'This ride is currently offered to another driver.',
+    if (!options?.bypassOfferCheck) {
+      // If the passenger has a pending offer out to a specific driver,
+      // only that driver may accept — otherwise a different driver could
+      // swoop in via broadcast-accept while the chosen one is still
+      // deciding, which would defeat the entire point of letting the
+      // passenger pick. No pending offer at all (nobody's been selected
+      // yet) still allows the plain broadcast-accept path below.
+      const pendingOffer =
+        await this.dispatchService.getPendingOfferForRide(rideId);
+      if (pendingOffer) {
+        if (pendingOffer.driverUserId !== driverUserId) {
+          throw new ForbiddenException(
+            'This ride is currently offered to another driver.',
+          );
+        }
+      } else if (await this.dispatchService.hasEverHadOffer(rideId)) {
+        // An offer existed for this ride but isn't live anymore (expired,
+        // withdrawn, or declined) — block acceptance outright, not just
+        // for other drivers. Falling through to open acceptance here
+        // would let the exact driver whose own offer just expired accept
+        // anyway, which defeats the point of the exclusivity check above.
+        throw new BadRequestException(
+          'This offer is no longer available — ask the passenger to select a driver again.',
         );
       }
-    } else if (await this.dispatchService.hasEverHadOffer(rideId)) {
-      // An offer existed for this ride but isn't live anymore (expired,
-      // withdrawn, or declined) — block acceptance outright, not just
-      // for other drivers. Falling through to open acceptance here
-      // would let the exact driver whose own offer just expired accept
-      // anyway, which defeats the point of the exclusivity check above.
-      throw new BadRequestException(
-        'This offer is no longer available — ask the passenger to select a driver again.',
-      );
+      // else: this ride has never been offered to anyone at all — the
+      // open broadcast-accept path (offerToNearestDriver(), kept but
+      // unused by default) remains valid for that case.
     }
-    // else: this ride has never been offered to anyone at all — the
-    // open broadcast-accept path (offerToNearestDriver(), kept but
-    // unused by default) remains valid for that case.
 
     const driverProfile = await this.driversService.findByUserId(driverUserId);
     if (driverProfile.approvalStatus !== DriverApprovalStatus.APPROVED) {
@@ -1247,23 +1239,6 @@ export class RidesService {
     await this.dispatchService
       .markAccepted(rideId, driverUserId)
       .catch(() => undefined);
-
-    // Pool hook: this ride is only ever independently dispatched (and
-    // therefore only ever independently accepted) if it's a solo ride
-    // OR the anchor of a pooled pair — the partner ride's driver
-    // assignment is never offered/accepted on its own. Propagate the
-    // just-committed driver/vehicle onto the partner here. Best-effort:
-    // a failure leaves the partner ride still SEARCHING rather than
-    // undoing this (already-committed) acceptance.
-    if (saved.poolGroupId) {
-      await this.poolMatchingService
-        .propagateDriverAssignment(saved)
-        .catch((err) =>
-          this.logger.error(
-            `Failed to propagate pool driver assignment from ride ${saved.id}: ${err}`,
-          ),
-        );
-    }
 
     return saved;
   }
@@ -1683,44 +1658,6 @@ export class RidesService {
       throw new BadRequestException(
         'This ride just changed status (it may already have been accepted, completed, or cancelled) — please refresh and try again.',
       );
-    }
-
-    // Pool hook — the cancellation itself already committed above
-    // regardless of what happens here, so every branch is best-effort:
-    // a failure here means a stale/inconsistent pool, never a failed
-    // cancellation.
-    if (originalStatus === RideStatus.POOL_MATCHING) {
-      // Never got as far as pairing — just clear the delayed match-window
-      // job so it doesn't fire pointlessly for a ride that's now cancelled.
-      await this.poolMatchingService
-        .onRideCancelledBeforeMatch(ride.id)
-        .catch(() => undefined);
-    } else if (ride.poolGroupId && originalStatus === RideStatus.SEARCHING) {
-      // Matched with a partner but not yet dispatched — revert the
-      // partner to a normal solo request at full fare and let it
-      // dispatch normally instead of waiting on a pool that's now dead.
-      await this.poolMatchingService
-        .unpoolRide(ride.id, ride.cancelReason ?? 'partner cancelled')
-        .catch((err) =>
-          this.logger.error(`Failed to unpool ride ${ride.id}: ${err}`),
-        );
-    } else if (
-      ride.poolGroupId &&
-      [
-        RideStatus.ACCEPTED,
-        RideStatus.ARRIVING,
-        RideStatus.ARRIVED,
-        RideStatus.IN_PROGRESS,
-      ].includes(originalStatus)
-    ) {
-      // Already dispatched (and, past ACCEPTED, possibly mid-trip) —
-      // the surviving passenger's driver doesn't change, just their fare
-      // and the shared-ride manifest both sides read from.
-      await this.poolMatchingService
-        .unpoolRideMidTrip(ride.id, ride.cancelReason ?? 'partner cancelled')
-        .catch((err) =>
-          this.logger.error(`Failed to unpool mid-trip ride ${ride.id}: ${err}`),
-        );
     }
 
     if (

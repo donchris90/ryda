@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { Ride } from '../rides/entities/ride.entity';
 import { RideStatus } from '../common/enums/ride.enum';
+import { DeliveryOrder, DeliveryStatus } from '../logistics/entities/delivery-order.entity';
 import { DriverProfile } from '../drivers/entities/driver-profile.entity';
 import { DriverAvailability, ONLINE_AVAILABILITIES } from '../common/enums/driver-status.enum';
 import { User } from '../users/entities/user.entity';
@@ -12,6 +13,17 @@ const ACTIVE_RIDE_STATUSES = [
   RideStatus.ARRIVING,
   RideStatus.ARRIVED,
   RideStatus.IN_PROGRESS,
+];
+
+// Same set LocationService.ACTIVE_DELIVERY_STATUSES uses to decide
+// whether a driver's location update should broadcast to a delivery's
+// room - kept in sync by hand since that constant is private to that
+// file, not exported for reuse.
+const ACTIVE_DELIVERY_STATUSES = [
+  DeliveryStatus.ACCEPTED,
+  DeliveryStatus.PICKUP_ARRIVED,
+  DeliveryStatus.PICKED_UP,
+  DeliveryStatus.IN_TRANSIT,
 ];
 
 export interface AdminLiveRide {
@@ -39,11 +51,32 @@ export interface AdminLiveDriver {
   locationUpdatedAt: Date | null;
 }
 
+export interface AdminLiveDelivery {
+  deliveryId: string;
+  status: DeliveryStatus;
+  driverId: string | null;
+  driverName: string | null;
+  customerId: string;
+  customerName: string | null;
+  pickupLat: number;
+  pickupLng: number;
+  pickupAddress: string;
+  dropoffLat: number;
+  dropoffLng: number;
+  dropoffAddress: string;
+  dropoffContactName: string;
+  driverLat: number | null;
+  driverLng: number | null;
+  locationUpdatedAt: Date | null;
+}
+
 @Injectable()
 export class LiveTrackingService {
   constructor(
     @InjectRepository(Ride)
     private readonly ridesRepo: Repository<Ride>,
+    @InjectRepository(DeliveryOrder)
+    private readonly deliveryOrdersRepo: Repository<DeliveryOrder>,
     @InjectRepository(DriverProfile)
     private readonly driverProfilesRepo: Repository<DriverProfile>,
     @InjectRepository(User)
@@ -157,5 +190,72 @@ export class LiveTrackingService {
     }
 
     return { rides, onlineDrivers };
+  }
+
+  /**
+   * Delivery equivalent of getLiveSnapshot() - active delivery orders
+   * with their courier's last-known position, filtered by the
+   * courier's registered city the same way rides are (delivery
+   * pickup/dropoff coordinates aren't reverse-geocoded to a city
+   * either). Deliberately its own method/endpoint rather than folded
+   * into getLiveSnapshot()'s return shape - rides and deliveries are
+   * shown on separate admin map views, so a caller only ever needs
+   * one of the two per request.
+   */
+  async getLiveDeliveriesSnapshot(city?: string): Promise<{ deliveries: AdminLiveDelivery[] }> {
+    const activeDeliveries = await this.deliveryOrdersRepo.find({
+      where: { status: In(ACTIVE_DELIVERY_STATUSES) },
+    });
+
+    const driverIdsOnDeliveries = new Set(
+      activeDeliveries.map((d) => d.driverId).filter((id): id is string => !!id),
+    );
+    const customerIds = new Set(activeDeliveries.map((d) => d.customerId));
+
+    const relevantUserIds = [...new Set([...driverIdsOnDeliveries, ...customerIds])];
+
+    const [driverProfiles, userRows] = await Promise.all([
+      driverIdsOnDeliveries.size
+        ? this.driverProfilesRepo.find({ where: { userId: In([...driverIdsOnDeliveries]) } })
+        : Promise.resolve([] as DriverProfile[]),
+      relevantUserIds.length
+        ? this.usersRepo.find({ where: { id: In(relevantUserIds) } })
+        : Promise.resolve([] as User[]),
+    ]);
+    const profileByUserId = new Map(driverProfiles.map((p) => [p.userId, p]));
+    const userById = new Map(userRows.map((u) => [u.id, u]));
+
+    let deliveries: AdminLiveDelivery[] = activeDeliveries.map((delivery) => {
+      const profile = delivery.driverId ? profileByUserId.get(delivery.driverId) : undefined;
+      const driverUser = delivery.driverId ? userById.get(delivery.driverId) : undefined;
+      const customerUser = userById.get(delivery.customerId);
+      return {
+        deliveryId: delivery.id,
+        status: delivery.status,
+        driverId: delivery.driverId,
+        driverName: driverUser ? `${driverUser.firstName} ${driverUser.lastName}` : null,
+        customerId: delivery.customerId,
+        customerName: customerUser ? `${customerUser.firstName} ${customerUser.lastName}` : null,
+        pickupLat: delivery.pickupLat,
+        pickupLng: delivery.pickupLng,
+        pickupAddress: delivery.pickupAddress,
+        dropoffLat: delivery.dropoffLat,
+        dropoffLng: delivery.dropoffLng,
+        dropoffAddress: delivery.dropoffAddress,
+        dropoffContactName: delivery.dropoffContactName,
+        driverLat: profile?.currentLat ?? null,
+        driverLng: profile?.currentLng ?? null,
+        locationUpdatedAt: profile?.locationUpdatedAt ?? null,
+      };
+    });
+
+    if (city) {
+      deliveries = deliveries.filter((d) => {
+        const profile = d.driverId ? profileByUserId.get(d.driverId) : undefined;
+        return profile?.city === city;
+      });
+    }
+
+    return { deliveries };
   }
 }

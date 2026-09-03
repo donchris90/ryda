@@ -6,6 +6,7 @@ import { DriverAvailabilityLog } from './entities/driver-availability-log.entity
 import { DriverServiceCapability } from './entities/driver-service-capability.entity';
 import { Ride } from '../rides/entities/ride.entity';
 import { RideOffer } from '../dispatch/entities/ride-offer.entity';
+import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { DriversService } from './drivers.service';
 import { DriverDocumentsService } from './driver-documents.service';
 import { DriverAnalyticsService } from './driver-analytics.service';
@@ -25,6 +26,7 @@ import { TrackingModule } from '../tracking/tracking.module';
       DriverServiceCapability,
       Ride,
       RideOffer,
+      Vehicle,
     ]),
     FraudModule,
     PassengersModule,

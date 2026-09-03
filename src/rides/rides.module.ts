@@ -27,8 +27,6 @@ import { ObservabilityModule } from '../observability/observability.module';
 import { CandidateSearchModule } from '../candidate-search/candidate-search.module';
 import { RankingModule } from '../ranking/ranking.module';
 import { GeofenceModule } from '../tracking/geofence/geofence.module';
-import { AirportModule } from '../airport/airport.module';
-import { PoolingModule } from '../pooling/pooling.module';
 
 @Module({
   imports: [
@@ -54,11 +52,6 @@ import { PoolingModule } from '../pooling/pooling.module';
     CandidateSearchModule,
     RankingModule,
     GeofenceModule,
-    AirportModule,
-// Deliberately the only direction this import goes - see
-    // PoolingModule's own doc comment for why it can't import
-    // RidesModule back.
-    PoolingModule,
   ],
   providers: [RidesService, FareService, ScheduledRideProcessor],
   controllers: [RidesController, AdminDispatchController],

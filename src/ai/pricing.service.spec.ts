@@ -74,3 +74,37 @@ describe('PricingService (surge)', () => {
     expect(result.availableSupply).toBe(2);
   });
 });
+
+describe('PricingService.calculateSurgeForDriver()', () => {
+  it("scopes the surge computation to the driver's own registered city", async () => {
+    const { ridesRepo, driversRepo } = makeRepos(6, 3); // ratio 2.0 -> surge
+    driversRepo.findOne = jest.fn().mockResolvedValue({ userId: 'driver-1', city: 'Lagos' });
+    const service = new PricingService(ridesRepo, driversRepo);
+
+    const result = await service.calculateSurgeForDriver('driver-1');
+
+    expect(driversRepo.count).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ city: 'Lagos' }) }));
+    expect(result.multiplier).toBeGreaterThan(1.0);
+  });
+
+  it('falls back to the unscoped nationwide figure when the driver has no registered city', async () => {
+    const { ridesRepo, driversRepo } = makeRepos(2, 2);
+    driversRepo.findOne = jest.fn().mockResolvedValue({ userId: 'driver-1', city: null });
+    const service = new PricingService(ridesRepo, driversRepo);
+
+    const result = await service.calculateSurgeForDriver('driver-1');
+
+    expect(driversRepo.count).toHaveBeenCalledWith(expect.objectContaining({ where: expect.not.objectContaining({ city: expect.anything() }) }));
+    expect(result).toBeDefined();
+  });
+
+  it('falls back to the unscoped figure (not an error) when the driver profile itself cannot be found', async () => {
+    const { ridesRepo, driversRepo } = makeRepos(0, 0);
+    driversRepo.findOne = jest.fn().mockResolvedValue(null);
+    const service = new PricingService(ridesRepo, driversRepo);
+
+    const result = await service.calculateSurgeForDriver('driver-missing');
+
+    expect(result.multiplier).toBe(1.0);
+  });
+});

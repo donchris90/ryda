@@ -36,6 +36,20 @@ export class TrackingController {
     return this.liveTrackingService.getLiveSnapshot(city);
   }
 
+  /** Delivery equivalent of GET admin/live above - see getLiveDeliveriesSnapshot() doc comment. */
+  @Get('admin/live-deliveries')
+  @UseGuards(RolesGuard)
+  @Roles(
+    UserRole.ADMIN,
+    UserRole.SUPER_ADMIN,
+    UserRole.COUNTRY_ADMIN,
+    UserRole.CITY_MANAGER,
+    UserRole.DISPATCHER,
+  )
+  adminLiveDeliveries(@Query('city') city?: string) {
+    return this.liveTrackingService.getLiveDeliveriesSnapshot(city);
+  }
+
   @Get('rides/:id/route')
   rideRoute(@Param('id') rideId: string) {
     return this.historyService.getRideRoute(rideId);

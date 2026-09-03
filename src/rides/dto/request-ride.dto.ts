@@ -85,15 +85,4 @@ export class RequestRideDto {
   @IsOptional()
   @IsEnum(DispatchMode)
   dispatchMode?: DispatchMode;
-
-  @ApiPropertyOptional({
-    description:
-      'Requests a discounted shared (pooled) ride instead of a solo one, if the RIDE_SHARING feature flag is on. ' +
-      'The ride enters a short batch-matching window (see PoolMatchingService) rather than dispatching immediately; ' +
-      'it falls back automatically to a normal solo ride at full fare if no compatible partner is found in time. ' +
-      'Ignored for scheduled rides — pooling only matches requests being dispatched now.',
-  })
-  @IsOptional()
-  @IsBoolean()
-  wantsPool?: boolean;
 }

@@ -12,6 +12,9 @@ import { ObservabilityModule } from '../observability/observability.module';
 import { CandidateSearchModule } from '../candidate-search/candidate-search.module';
 import { RankingModule } from '../ranking/ranking.module';
 import { AirportModule } from '../airport/airport.module';
+import { CommissionModule } from '../commission/commission.module';
+import { VehiclesModule } from '../vehicles/vehicles.module';
+import { UsersModule } from '../users/users.module';
 
 @Module({
   imports: [
@@ -26,6 +29,9 @@ import { AirportModule } from '../airport/airport.module';
     CandidateSearchModule,
     RankingModule,
     AirportModule,
+    CommissionModule,
+    VehiclesModule,
+    UsersModule,
   ],
   providers: [DispatchService, AutoDispatchService],
   controllers: [DispatchController],

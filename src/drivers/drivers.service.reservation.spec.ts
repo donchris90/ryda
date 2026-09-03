@@ -25,6 +25,7 @@ function buildService(overrides: Record<string, any> = {}) {
     fraudService as any,
     documentsService as any,
     locationQualityService as any,
+    {} as any, // vehiclesRepo (not exercised by this suite - reservation logic only)
   );
 
   return { service, events };

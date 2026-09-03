@@ -93,6 +93,7 @@ export class LocationService {
       lng: payload.lng,
       at: payload.at,
       rideId: activeRide?.id ?? null,
+      deliveryId: activeDelivery?.id ?? null,
     });
   }
 }

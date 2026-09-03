@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { LessThan, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -14,6 +14,10 @@ import { MetricsService } from '../observability/metrics.service';
 import { CandidateSearchService } from '../candidate-search/candidate-search.service';
 import { DriverRankingService } from '../ranking/ranking.service';
 import { DispatchDomain, DispatchMode } from '../candidate-search/candidate-search.types';
+import { CommissionService } from '../commission/commission.service';
+import { VehiclesService } from '../vehicles/vehicles.service';
+import { fallbackEtaMinutes } from '../common/utils/geo.util';
+import { UsersService } from '../users/users.service';
 
 /**
  * Adds a "smart dispatch" layer on top of the existing broadcast-accept
@@ -41,7 +45,59 @@ export class DispatchService {
     private readonly metricsService: MetricsService,
     private readonly candidateSearchService: CandidateSearchService,
     private readonly driverRankingService: DriverRankingService,
+    private readonly commissionService: CommissionService,
+    private readonly vehiclesService: VehiclesService,
+    private readonly usersService: UsersService,
   ) {}
+
+  /**
+   * Computes what this driver would see on their offer screen for
+   * this ride: a distance-based ETA (see fallbackEtaMinutes -
+   * deliberately not a real routing call, to avoid a Google
+   * Directions request on every single dispatch attempt) and an
+   * estimated take-home amount using this driver's own resolved
+   * commission rate. An estimate, not a promise - tips aren't known
+   * yet, and settlement re-resolves commission fresh rather than
+   * reading this back (see RidesService.completeRide()).
+   *
+   * Best-effort: any failure here (driver profile lookup, vehicle
+   * lookup, no active vehicle at all) must never block the offer
+   * itself from being created - a driver missing this preview number
+   * is a lesser problem than never being offered the ride at all.
+   */
+  private async estimateOfferEconomics(
+    ride: Ride | null,
+    driverUserId: string,
+    distanceKm: number,
+  ): Promise<{ etaMinutes: number; estimatedDriverEarnings: number | null }> {
+    const etaMinutes = fallbackEtaMinutes(distanceKm);
+    if (!ride) return { etaMinutes, estimatedDriverEarnings: null };
+
+    try {
+      const profile = await this.driversService.findByUserId(driverUserId);
+      const vehicleCategory = profile.activeVehicleId
+        ? (await this.vehiclesService.findById(profile.activeVehicleId)).category
+        : undefined;
+      const commissionPercent =
+        profile.commissionOverridePercent != null
+          ? parseFloat(profile.commissionOverridePercent)
+          : await this.commissionService.resolveCommissionPercent({
+              driverLevel: profile.level,
+              vehicleCategory,
+              city: ride.city ?? undefined,
+            });
+      const totalFare = parseFloat(ride.totalFare);
+      const estimatedDriverEarnings = Math.round(totalFare * (1 - commissionPercent / 100) * 100) / 100;
+      return { etaMinutes, estimatedDriverEarnings };
+    } catch (error) {
+      this.logger.warn(
+        `Could not estimate offer economics for driver ${driverUserId} on ride ${ride.id}: ${
+          error instanceof Error ? error.message : error
+        }`,
+      );
+      return { etaMinutes, estimatedDriverEarnings: null };
+    }
+  }
 
   /**
    * Not called automatically anywhere anymore — the passenger picks a
@@ -98,11 +154,18 @@ export class DispatchService {
     }
 
     const timeoutSeconds = this.config.get<number>('dispatch.offerTimeoutSeconds')!;
+    const { etaMinutes, estimatedDriverEarnings } = await this.estimateOfferEconomics(
+      ride,
+      next.userId,
+      next.distanceKm,
+    );
     const offer = await this.offersRepo.save(
       this.offersRepo.create({
         rideId,
         driverUserId: next.userId,
         distanceKm: next.distanceKm,
+        etaMinutes,
+        estimatedDriverEarnings: estimatedDriverEarnings?.toFixed(2) ?? null,
         expiresAt: new Date(Date.now() + timeoutSeconds * 1000),
       }),
     );
@@ -213,11 +276,18 @@ export class DispatchService {
     }
 
     const timeoutSeconds = this.config.get<number>('dispatch.offerTimeoutSeconds')!;
+    const { etaMinutes, estimatedDriverEarnings } = await this.estimateOfferEconomics(
+      ride,
+      driverUserId,
+      resolvedDistanceKm,
+    );
     const offer = await this.offersRepo.save(
       this.offersRepo.create({
         rideId,
         driverUserId,
         distanceKm: resolvedDistanceKm,
+        etaMinutes,
+        estimatedDriverEarnings: estimatedDriverEarnings?.toFixed(2) ?? null,
         expiresAt: new Date(Date.now() + timeoutSeconds * 1000),
       }),
     );
@@ -423,5 +493,64 @@ export class DispatchService {
         });
       }
     }
+  }
+
+  /**
+   * The full dispatch history for one ride - every offer made, to
+   * whom, and how it resolved (pending/accepted/declined/expired/
+   * superseded). This is the "dispatch timeline" an ops admin needs
+   * to see why a ride is stuck or took a while to match, not just
+   * that it eventually did.
+   */
+  async getOffersForRideAdmin(rideId: string) {
+    const offers = await this.offersRepo.find({
+      where: { rideId },
+      order: { offeredAt: 'ASC' },
+    });
+
+    const driverUserIds = [...new Set(offers.map((o) => o.driverUserId))];
+    const drivers = await this.usersService.findByIds(driverUserIds);
+    const driverById = new Map(drivers.map((d) => [d.id, d]));
+
+    return offers.map((offer) => {
+      const driver = driverById.get(offer.driverUserId);
+      return {
+        id: offer.id,
+        driverUserId: offer.driverUserId,
+        driverName: driver ? `${driver.firstName} ${driver.lastName}` : null,
+        status: offer.status,
+        distanceKm: offer.distanceKm,
+        etaMinutes: offer.etaMinutes,
+        estimatedDriverEarnings: offer.estimatedDriverEarnings,
+        offeredAt: offer.offeredAt,
+        expiresAt: offer.expiresAt,
+      };
+    });
+  }
+
+  /**
+   * Admin-triggered redispatch for a ride stuck SEARCHING or that
+   * already ended up NO_DRIVER_FOUND - reuses offerToNearestDriver(),
+   * the same candidate-scan-and-offer logic a fresh ride already
+   * relies on, rather than a separate admin-only algorithm. A
+   * NO_DRIVER_FOUND ride is flipped back to SEARCHING first, since
+   * offerToNearestDriver() (like the rest of dispatch) only ever
+   * touches a ride that's actually in that status.
+   */
+  async redispatchForAdmin(rideId: string): Promise<RideOffer | null> {
+    const ride = await this.ridesRepo.findOne({ where: { id: rideId } });
+    if (!ride) throw new NotFoundException('Ride not found');
+
+    if (![RideStatus.SEARCHING, RideStatus.NO_DRIVER_FOUND].includes(ride.status)) {
+      throw new BadRequestException(
+        `Cannot redispatch a ride in status ${ride.status} - it's already been accepted, completed, or cancelled.`,
+      );
+    }
+
+    if (ride.status === RideStatus.NO_DRIVER_FOUND) {
+      await this.ridesRepo.update(rideId, { status: RideStatus.SEARCHING });
+    }
+
+    return this.offerToNearestDriver(rideId);
   }
 }
