@@ -20,6 +20,7 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "seed:admin": "ts-node -r tsconfig-paths/register src/scripts/seed-admin.ts",
     "seed:admin:standalone": "ts-node -r tsconfig-paths/register src/scripts/seed-admin-standalone.ts",
+    "verify-email:standalone": "ts-node -r tsconfig-paths/register src/scripts/verify-email-standalone.ts",
     "typeorm": "ts-node -r tsconfig-paths/register ./node_modules/typeorm/cli.js -d src/data-source.ts",
     "migration:generate": "npm run typeorm -- migration:generate",
     "migration:create": "npm run typeorm -- migration:create",
