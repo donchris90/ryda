@@ -1,5 +1,6 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
@@ -17,6 +18,8 @@ const WITHDRAWAL_REQUEST_TTL_MINUTES = 10;
 
 @Injectable()
 export class WithdrawalsService {
+  private readonly logger = new Logger(WithdrawalsService.name);
+
   constructor(
     @InjectRepository(BankAccount)
     private readonly bankAccountsRepo: Repository<BankAccount>,
@@ -261,6 +264,22 @@ export class WithdrawalsService {
       request.failureReason = failureReason ?? 'Paystack reported the transfer failed';
       await this.withdrawalsRepo.save(request);
       this.events.emit('withdrawal.failed', { userId: request.userId, amount: request.amount });
+    }
+  }
+
+  /** Same reasoning as WalletTransfersService.expireStaleRequests() - proactive cleanup for requests simply abandoned, not just the ones someone happens to try confirming after they've gone stale. */
+  @Cron(CronExpression.EVERY_HOUR)
+  async expireStaleRequests(): Promise<void> {
+    const result = await this.withdrawalsRepo
+      .createQueryBuilder()
+      .update(WithdrawalRequest)
+      .set({ status: WithdrawalStatus.EXPIRED })
+      .where('status = :status', { status: WithdrawalStatus.PENDING })
+      .andWhere('"expiresAt" < :now', { now: new Date() })
+      .execute();
+
+    if (result.affected && result.affected > 0) {
+      this.logger.log(`Marked ${result.affected} stale withdrawal request(s) as expired.`);
     }
   }
 }

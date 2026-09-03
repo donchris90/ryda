@@ -1,5 +1,6 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { Between, MoreThan, Repository } from 'typeorm';
 import { WalletTransferRequest, WalletTransferStatus } from './entities/wallet-transfer-request.entity';
 import { WalletTransaction } from './entities/wallet-transaction.entity';
@@ -33,6 +34,8 @@ function maskPhone(phone: string | null): string | null {
 
 @Injectable()
 export class WalletTransfersService {
+  private readonly logger = new Logger(WalletTransfersService.name);
+
   constructor(
     @InjectRepository(WalletTransferRequest)
     private readonly transferRequestsRepo: Repository<WalletTransferRequest>,
@@ -201,5 +204,28 @@ export class WalletTransfersService {
     });
 
     return rows.reduce((sum, r) => sum + parseFloat(r.amount), 0);
+  }
+
+  /**
+   * Proactive cleanup - EXPIRED was previously only ever set lazily,
+   * when someone happened to attempt confirming an already-dead
+   * request (see confirm()'s own expiry check above). The far more
+   * common case - a request simply abandoned, nobody ever tries to
+   * confirm it - left it sitting as PENDING forever, misleading any
+   * admin view or analytics counting pending transfers.
+   */
+  @Cron(CronExpression.EVERY_HOUR)
+  async expireStaleRequests(): Promise<void> {
+    const result = await this.transferRequestsRepo
+      .createQueryBuilder()
+      .update(WalletTransferRequest)
+      .set({ status: WalletTransferStatus.EXPIRED })
+      .where('status = :status', { status: WalletTransferStatus.PENDING })
+      .andWhere('"expiresAt" < :now', { now: new Date() })
+      .execute();
+
+    if (result.affected && result.affected > 0) {
+      this.logger.log(`Marked ${result.affected} stale wallet transfer request(s) as expired.`);
+    }
   }
 }

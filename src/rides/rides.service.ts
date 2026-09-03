@@ -235,7 +235,12 @@ export class RidesService {
       await this.scheduledRidesQueue.add(
         'activate',
         { rideId: savedRide.id },
-        { delay, jobId: `activate-${savedRide.id}` },
+        {
+          delay,
+          jobId: `activate-${savedRide.id}`,
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 5000 },
+        },
       );
     }
     // No automatic dispatch for MANUAL rides — the passenger picks a

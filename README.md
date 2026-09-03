@@ -3067,6 +3067,273 @@ admin safety-center UI itself (backend is real and tested; no
 frontend built this batch). Dedicated unit tests for the SOS/incident
 flow beyond the live end-to-end run already done.
 
+## Batch 1 - the last remaining item: cron/queue audit and orphaned-record cleanup
+
+The final item from the original Batch 1 audit request. Systematically
+reviewed every `@Cron` job and BullMQ queue/processor in the codebase.
+
+**Cron/queue hardening:**
+- `scheduled-rides` queue (activates a scheduled ride at its lead
+  time) had zero retry configuration - BullMQ's own default is 1
+  attempt, no retry - meaning a single transient failure (a brief DB
+  blip at the exact moment the job fires) would permanently drop a
+  passenger's scheduled ride with no automatic recovery. Confirmed
+  `activateScheduledRide()` is genuinely idempotent (checks
+  `status === SCHEDULED` and no-ops otherwise) before adding retry -
+  a retry here is safe. Added `attempts: 3` with exponential backoff.
+- Found nothing anywhere logged a job's final failure (after every
+  retry is exhausted) distinctly from an ordinary in-progress retry
+  attempt - a permanently-failed job would sit silently in Redis,
+  invisible unless someone manually checked `GET /admin/diagnostics`.
+  Added `@OnWorkerEvent('failed')` to all three processors
+  (notifications, reconciliation-settlement, scheduled-rides), each
+  logging a clear, distinct error with the job's own context.
+
+**Orphaned-record cleanup - three real gaps found, each systematically
+audited:**
+- `WalletTransferRequest`/`WithdrawalRequest`: `EXPIRED` was
+  previously only ever set lazily, when someone happened to attempt
+  confirming an already-dead request (see `confirm()`'s own expiry
+  check). The far more common case - a request simply abandoned,
+  nobody ever tries to confirm it - left it sitting as `PENDING`
+  forever, misleading any admin view or analytics counting pending
+  requests even though it was functionally dead. Added a new hourly
+  `expireStaleRequests()` cron to each service, using a single bulk
+  `UPDATE ... WHERE status = PENDING AND expiresAt < now()` rather
+  than one row at a time.
+- `MANUAL` rides (passenger picks their own driver, no auto-dispatch
+  involved): `AutoDispatchService.markNoDriverFound()` already
+  correctly times out `AUTO` rides once the search radius is
+  exhausted, but nothing handled a `MANUAL` ride the passenger simply
+  abandoned before selecting anyone - it sat in `SEARCHING`
+  indefinitely, with no resolution at all. Added
+  `DispatchService.expireStaleManualSearches()` (new
+  `dispatch.manualSearchTimeoutMinutes` config, default 30min),
+  reusing the exact same race-safe conditional-UPDATE pattern already
+  proven in `markNoDriverFound()` and the same `ride.status_changed`
+  event, so the passenger app's real-time handling treats this
+  identically to the `AUTO` no-driver-found case.
+
+Verified live against a real running server, all three: a
+genuinely-abandoned transfer request and withdrawal request (inserted
+directly, `expiresAt` in the past, never confirmed) are both correctly
+marked `EXPIRED` by their respective cron methods; a `MANUAL` ride
+created via the real API and backdated 45 minutes is correctly marked
+`NO_DRIVER_FOUND`, while a genuinely fresh ride created moments later
+is correctly left untouched as `SEARCHING` - confirming the cutoff
+logic discriminates correctly, not just that it runs. The manual-search
+test initially failed in a way worth naming honestly: the first test
+harness used `NestFactory.createApplicationContext()`, which boots the
+DI container but not the WebSocket gateway layer, so
+`TrackingGateway`'s broadcast (triggered by the `ride.status_changed`
+event this method emits) failed with a `server` instance that was
+never initialized - a test-harness gap, not a bug in the actual
+service, confirmed by switching to a full `NestFactory.create()` boot
+and rerunning, which passed cleanly.
+
+3 new unit tests for the dispatch cleanup (genuine timeout, no stale
+rides, race-safe update correctly skipping a ride already changed
+underneath it) plus 4 more for the two request-expiry cleanups.
+
+Full regression clean: 296 tests (7 new), full e2e suite.
+
+This closes out the last remaining item from Batches 1 through 5.
+
+## Batch 3 continued - delivery tracking real-time events on the app side
+
+Working through Batch 3's last remaining named item: the backend
+already broadcast full delivery status events
+(`delivery:assigned/pickup_arrived/picked_up/in_transit/delivered/
+cancelled`) since earlier work, but neither app actually listened for
+them - the exact same gap the ride screens had before being fixed,
+just never carried over to delivery.
+
+**Passenger app** (`delivery/[id].tsx`): was already subscribed to
+the socket for `driver:location` (live map), but had no status-event
+listeners at all - status only ever updated via the existing poll.
+Applied the identical, already-proven fix from `ride/[id].tsx`:
+real-time listeners for every delivery status event, reconnection-safe
+resubscription (Socket.IO's auto-reconnect doesn't restore room
+membership on its own, so a `connect` handler resubscribes and
+catches up on every successful connection, not just the first), and
+named handlers with proper cleanup - the old code never removed its
+`driver:location` listener or unsubscribed on cleanup, the same
+listener-accumulation bug already found and fixed on the ride screen.
+
+**Driver app** (`delivery/[id].tsx`): had no socket connection at all,
+pure 5s polling. Every other status transition here (accepted/
+pickup_arrived/picked_up/delivered) is triggered by the driver's own
+button taps, so the one genuinely missing piece is real-time
+cancellation detection - a customer cancelling while the driver is
+already en route. Added the same targeted fix already used on the
+driver app's own ride screen.
+
+Verified live end to end against a real running server: a real
+passenger's actual WebSocket connection genuinely receives
+`delivery:pickup_arrived` then `delivery:picked_up` in real time as
+a real driver account transitions the delivery through the real API;
+then genuinely receives `delivery:in_transit` and `delivery:delivered`
+the same way. Confirmed the security boundary too - an unrelated
+third party's subscription attempt is correctly rejected server-side
+(`"Not a participant in this delivery"`), so they receive nothing at
+all, not even by accident.
+
+Both apps' TypeScript compiles clean and their production web exports
+build successfully after the change.
+
+## Batch 4 continued - fleet/corporate reconciliation, and a real schema bug found via live testing
+
+Working through Batch 4's last remaining named item: "fleet/corporate-
+specific reconciliation reports" - `LedgerAuditService` previously
+only covered passenger/driver wallets. Confirmed during the original
+Batch 4 audit that `FleetWallet`/`FleetTransaction` and
+`CorporateAccount`/`CorporateTransaction` use the identical
+row-locked atomic pattern, so extended the same discrepancy-detection
+guarantee to both rather than leaving them as separately-trusted
+systems. Generalized the quick-scan logic into one shared,
+table-configurable helper rather than duplicating it three times; new
+`accountType` column on `ledger_discrepancies` so one table can
+represent all three; `checkWalletChain()`'s deep per-account check
+now takes an optional account type too. New endpoints:
+`POST /admin/ledger-audit/scan/fleet`,
+`POST /admin/ledger-audit/scan/corporate`, and the existing wallet
+chain-check endpoint now accepts `?accountType=`.
+
+**A real bug found specifically by live testing, not unit tests**:
+after 13 new unit tests all passed cleanly, live-testing against a
+real database immediately surfaced a genuine schema inconsistency
+unit tests (mocked repositories) had no way to catch -
+`wallet_transactions.walletId` is actually stored as `uuid` (with a
+real foreign-key constraint to `wallets`), while
+`fleet_transactions.fleetWalletId` is stored as plain `character
+varying` - a real difference between two otherwise-parallel tables.
+The new raw SQL's join comparing them directly failed outright
+("operator does not exist: character varying = uuid"). Fixed by
+casting both sides of the join to `text` explicitly, which works
+correctly regardless of which underlying type a given table actually
+uses - confirmed this doesn't affect `checkWalletChain()`, since that
+path already goes through TypeORM's own query builder, which handles
+the type coercion correctly on its own.
+
+Verified live end to end after the fix: empty-table scans on both new
+types run cleanly with zero errors; a fleet wallet corrupted directly
+via SQL (bypassing the service layer entirely, simulating a bug or
+tampering) is genuinely caught by the scan, correctly listed as open
+with the right account type, and independently confirmed broken by
+the deep chain check too.
+
+Full regression clean: 289 tests (5 net new after replacing the old
+3-argument test fixtures), full e2e suite.
+
+## Batch 3 correction - delivery tracking was already real-time, not still polling
+
+Earlier said delivery tracking "still polls on the app side instead
+of using the real-time events that already exist for rides" - checked
+this properly before touching anything, and that claim was wrong.
+Both apps already listen for the real delivery:* socket events
+(`delivery:assigned`/`pickup_arrived`/`picked_up`/`in_transit`/
+`delivered`/`cancelled` on the passenger side; `delivery:cancelled`
+specifically on the driver side, deliberately - the driver already
+triggers every other transition themselves via their own button taps,
+so listening for their own actions again would be redundant, not a
+gap), with correct reconnect handling (re-subscribing on every
+`connect` event, not just the first one).
+
+The one genuine, minor thing actually left: both apps' backup polls
+were still at their original short interval (3-5s) rather than the
+longer backup-only interval already established for rides once
+real-time events took over as the primary mechanism (5s -> 20s in
+Batch 3). Fixed both to 20s, matching that precedent -
+`passenger-app/src/lib/delivery-search-state.ts`'s
+`DEFAULT_POLL_INTERVAL_MS` and `driver-app/src/app/delivery/[id].tsx`'s
+poll interval. The passenger app's separate, shorter
+`SEARCHING_POLL_INTERVAL_MS` (3s, used before a driver is even
+assigned, when no real-time event can fire yet) was correctly left
+untouched.
+
+Both apps' TypeScript checks pass clean after the change.
+
+## Batch 4 continued - fleet & corporate reconciliation reports
+
+Batch 4's last explicitly-named remaining item: fleet/corporate-
+specific reconciliation, as opposed to `LedgerAuditService`'s general
+wallet-ledger check, which previously covered only passenger/driver
+wallets. Confirmed first (didn't assume) that `FleetWallet`/
+`FleetTransaction` and `CorporateAccount`/`CorporateTransaction` use
+the identical row-locked atomic balance+ledger pattern already
+verified for the main `Wallet` table during the original Batch 4
+audit - so the same discrepancy-detection guarantee genuinely applies
+to all three, not just one.
+
+Extended `LedgerAuditService` rather than building a separate,
+parallel system: the quick-scan SQL logic is now a shared, generic
+helper parameterized by table/column names (`fleet_wallets` uses
+`balance`, `corporate_accounts` uses `budgetBalance` specifically -
+confirmed each schema individually rather than assuming they'd match)
+and reused for `runFleetWalletScan()` / `runCorporateAccountScan()`,
+alongside the existing `runQuickScan()`. `LedgerDiscrepancy` gained an
+`accountType` field so one table can represent discrepancies across
+all three, and `checkWalletChain()`'s deep per-account walk now
+accepts which account type to check. Daily scheduled scan now covers
+all three types together. New endpoints: `POST /admin/ledger-audit/
+scan/fleet`, `POST /admin/ledger-audit/scan/corporate`, and the
+existing wallet-chain-check endpoint gained an `accountType` query
+param.
+
+5 new dedicated tests confirm the fleet/corporate paths genuinely use
+their own correct table and column names (not silently falling back
+to the wallet ones), plus the discrepancy-detection and dedup logic
+for each. Verified live against a real running server: empty-table
+scans run cleanly; a real fleet wallet with a deliberately corrupted
+balance and no ledger history is genuinely caught, correctly
+attributed to `fleet_wallet`; the deep chain check confirms it broken
+via the correct account type; a second scan correctly does not
+re-flag the same problem.
+
+Full regression clean: 289 tests (5 new), full e2e suite.
+
+That closes out every item Batch 4 explicitly named as remaining.
+
+## Batch 4 continued - Paystack retry hardening
+
+Working through Batch 4's own explicitly-named remaining item:
+"timeout, retries" on the Paystack integration. Audited first, same
+approach as every prior pass - found signature verification
+(HMAC-SHA512, constant-time comparison via `timingSafeEqual`, correct
+length check before comparing) and the 10s request timeout already
+genuinely solid, no gap there. The real, confirmed gap: zero retry
+logic at all - any transient network blip or a Paystack-side 5xx
+immediately failed the entire operation, with nothing recovering it.
+
+Verified Paystack's actual duplicate-reference behavior before
+building anything, rather than assuming - Paystack rejects a genuine
+duplicate reference with a clear error, it does not silently
+re-process or return the original result the way some other
+providers' idempotency-key systems do. Confirmed this makes retrying
+safe here specifically: every caller in this codebase already
+generates a single, consistent reference once and reuses it across
+the whole logical operation, so a retry either succeeds cleanly or
+fails safely with an unambiguous "duplicate" error - never silently
+double-charges or double-transfers.
+
+Added retry-with-backoff (3 attempts total) to the shared internal
+request() helper every Paystack call already goes through - benefits
+every operation at once (initialize, verify, refund, transfer, list
+transactions, etc.), not just one. Deliberately narrow about when it
+retries: a network-level failure or a 5xx (Paystack's own server
+failing) is genuinely worth retrying; a 4xx (the request itself is
+invalid - including a duplicate-reference response) is not, since
+retrying an invalid request just fails identically again.
+
+6 new dedicated tests, mocking `fetch()` directly: succeeds
+immediately with no retry when the first attempt works; retries and
+recovers from a network failure; retries and recovers from a 5xx;
+does NOT retry a 4xx (fails immediately, exactly once); gives up
+cleanly with a clear error after exhausting all attempts on both a
+persistent network failure and a persistent 5xx.
+
+Full regression clean: 284 tests (6 new), full e2e suite.
+
 ## Batch 5 - closing out remaining gaps: dedicated tests, duplicate SOS, self-cancellation
 
 Working through "what's left across Batches 1-5" - starting with

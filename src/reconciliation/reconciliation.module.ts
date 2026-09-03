@@ -11,10 +11,23 @@ import { WalletsModule } from '../wallets/wallets.module';
 import { FleetModule } from '../fleet/fleet.module';
 import { Wallet } from '../wallets/entities/wallet.entity';
 import { WalletTransaction } from '../wallets/entities/wallet-transaction.entity';
+import { FleetWallet } from '../fleet/entities/fleet-wallet.entity';
+import { FleetTransaction } from '../fleet/entities/fleet-transaction.entity';
+import { CorporateAccount } from '../corporate/entities/corporate-account.entity';
+import { CorporateTransaction } from '../corporate/entities/corporate-transaction.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([CashReconciliation, LedgerDiscrepancy, Wallet, WalletTransaction]),
+    TypeOrmModule.forFeature([
+      CashReconciliation,
+      LedgerDiscrepancy,
+      Wallet,
+      WalletTransaction,
+      FleetWallet,
+      FleetTransaction,
+      CorporateAccount,
+      CorporateTransaction,
+    ]),
     WalletsModule,
     FleetModule,
     BullModule.registerQueue({ name: 'reconciliation-settlement' }),

@@ -52,3 +52,36 @@ describe('WithdrawalsService.initiateWithdrawal() - duplicate pending request pr
     await expect(service.initiateWithdrawal('user-1', 'bank-1', 1000)).rejects.toThrow(BadRequestException);
   });
 });
+
+describe('WithdrawalsService.expireStaleRequests() - proactive cleanup for abandoned requests', () => {
+  function buildWithQueryBuilder(affected = 1) {
+    const executeMock = jest.fn().mockResolvedValue({ affected });
+    const qb = {
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      execute: executeMock,
+    };
+    const withdrawalsRepo = { createQueryBuilder: jest.fn().mockReturnValue(qb) } as any;
+    const service = new WithdrawalsService(
+      {} as any, withdrawalsRepo, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+    );
+    return { service, qb };
+  }
+
+  it('marks stale pending withdrawal requests expired via a single bulk update', async () => {
+    const { service, qb } = buildWithQueryBuilder(2);
+
+    await service.expireStaleRequests();
+
+    expect(qb.set).toHaveBeenCalledWith({ status: WithdrawalStatus.EXPIRED });
+    expect(qb.where).toHaveBeenCalledWith('status = :status', { status: WithdrawalStatus.PENDING });
+  });
+
+  it('does not throw when nothing was actually stale', async () => {
+    const { service } = buildWithQueryBuilder(0);
+
+    await expect(service.expireStaleRequests()).resolves.toBeUndefined();
+  });
+});

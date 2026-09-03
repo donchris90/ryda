@@ -283,29 +283,62 @@ export class PaystackService {
       );
     }
 
-    let response: Response;
-    try {
-      response = await fetch(`${this.baseUrl}${path}`, {
-        method,
-        headers: {
-          Authorization: `Bearer ${this.secretKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: body ? JSON.stringify(body) : undefined,
-        signal: AbortSignal.timeout(10000),
-      });
-    } catch (err) {
-      this.logger.error(`Paystack request failed: ${method} ${path}`, err as Error);
-      throw new InternalServerErrorException('Could not reach Paystack');
-    }
+    const maxAttempts = 3;
+    let lastError: unknown;
 
-    const json = await response.json().catch(() => ({}) as any);
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      let response: Response;
+      try {
+        response = await fetch(`${this.baseUrl}${path}`, {
+          method,
+          headers: {
+            Authorization: `Bearer ${this.secretKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: body ? JSON.stringify(body) : undefined,
+          signal: AbortSignal.timeout(10000),
+        });
+      } catch (err) {
+        // Network-level failure or timeout - genuinely transient, safe
+        // to retry (see this method's own doc comment for why retrying
+        // a POST here specifically doesn't risk double-processing).
+        lastError = err;
+        if (attempt < maxAttempts) {
+          this.logger.warn(`Paystack request failed (attempt ${attempt}/${maxAttempts}): ${method} ${path} - retrying`);
+          await this.sleep(attempt * 500);
+          continue;
+        }
+        this.logger.error(`Paystack request failed after ${maxAttempts} attempts: ${method} ${path}`, err as Error);
+        throw new InternalServerErrorException('Could not reach Paystack');
+      }
 
-    if (!response.ok || json.status === false) {
+      const json = await response.json().catch(() => ({}) as any);
+
+      if (response.ok && json.status !== false) {
+        return json.data;
+      }
+
+      // A 5xx here is Paystack's own server failing, not our request
+      // being invalid - genuinely worth retrying, same reasoning as a
+      // network failure above. A 4xx (including "duplicate reference")
+      // means the request itself won't succeed differently on retry -
+      // fail immediately rather than repeating a doomed call.
+      if (response.status >= 500 && attempt < maxAttempts) {
+        this.logger.warn(`Paystack ${method} ${path} responded ${response.status} (attempt ${attempt}/${maxAttempts}) - retrying`);
+        await this.sleep(attempt * 500);
+        continue;
+      }
+
       this.logger.warn(`Paystack ${method} ${path} responded ${response.status}: ${json.message}`);
       throw new InternalServerErrorException(json.message ?? 'Paystack request failed');
     }
 
-    return json.data;
+    // Unreachable in practice (the loop always returns or throws), but
+    // keeps the type checker honest about every path returning.
+    throw new InternalServerErrorException('Could not reach Paystack');
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }

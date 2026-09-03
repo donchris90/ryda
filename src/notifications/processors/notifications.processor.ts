@@ -1,4 +1,4 @@
-import { Processor, WorkerHost } from '@nestjs/bullmq';
+import { OnWorkerEvent, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Logger } from '@nestjs/common';
 import { Job } from 'bullmq';
 import { NotificationsService } from '../notifications.service';
@@ -29,5 +29,14 @@ export class NotificationsProcessor extends WorkerHost {
       this.logger.warn(`Notification delivery failed for user ${userId} (attempt ${job.attemptsMade}): ${(err as Error).message}`);
       throw err; // let BullMQ's retry/backoff handle it
     }
+  }
+
+  /** Fires once, after every configured retry is exhausted - the genuinely actionable "this will never be delivered" signal, distinct from the per-attempt warn above. */
+  @OnWorkerEvent('failed')
+  onFailed(job: Job<NotificationJobData> | undefined, err: Error): void {
+    if (!job) return;
+    this.logger.error(
+      `Notification job ${job.id} permanently failed after ${job.attemptsMade} attempt(s) for user ${job.data.userId}: ${err.message}`,
+    );
   }
 }

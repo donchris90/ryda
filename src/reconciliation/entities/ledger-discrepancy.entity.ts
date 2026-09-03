@@ -12,11 +12,20 @@ export enum LedgerDiscrepancyStatus {
   RESOLVED = 'resolved',
 }
 
+export enum LedgerAccountType {
+  WALLET = 'wallet',
+  FLEET_WALLET = 'fleet_wallet',
+  CORPORATE_ACCOUNT = 'corporate_account',
+}
+
 /**
- * A wallet whose recorded balance doesn't match what its own
- * transaction ledger says it should be - see LedgerAuditService. Under
- * normal operation this should never happen at all: every balance
- * change already goes through WalletsService.debit()/credit(), which
+ * An account (passenger/driver wallet, fleet wallet, or corporate
+ * account - all three use the identical row-locked atomic
+ * balance+ledger pattern, confirmed during the Batch 4 audit) whose
+ * recorded balance doesn't match what its own transaction ledger says
+ * it should be - see LedgerAuditService. Under normal operation this
+ * should never happen at all: every balance change already goes
+ * through the relevant service's debit()/credit() equivalent, which
  * updates the balance and appends the matching ledger row inside a
  * single atomic, row-locked transaction. A row appearing here means
  * either a genuine bug, a balance mutated outside that path, or ledger
@@ -28,6 +37,10 @@ export enum LedgerDiscrepancyStatus {
 export class LedgerDiscrepancy {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  @Index()
+  @Column({ type: 'enum', enum: LedgerAccountType, default: LedgerAccountType.WALLET })
+  accountType: LedgerAccountType;
 
   @Index()
   @Column()

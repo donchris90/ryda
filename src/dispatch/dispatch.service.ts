@@ -2,7 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { LessThan, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
-import { Interval } from '@nestjs/schedule';
+import { Interval, Cron, CronExpression } from '@nestjs/schedule';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { RideOffer, RideOfferStatus } from './entities/ride-offer.entity';
 import { Ride } from '../rides/entities/ride.entity';
@@ -376,6 +376,52 @@ export class DispatchService {
 
     for (const offer of stale) {
       this.events.emit('ride.offer.expired', { rideId: offer.rideId, driverUserId: offer.driverUserId });
+    }
+  }
+
+  /**
+   * A MANUAL ride (passenger picks their own driver, no auto-dispatch
+   * offers involved at all) has no natural timeout the way AUTO does -
+   * markNoDriverFound() only ever fires once AUTO's search radius is
+   * exhausted, which never happens for MANUAL. Without this, a
+   * passenger who simply closed the app before selecting anyone left
+   * the ride sitting in SEARCHING indefinitely. Not time-critical the
+   * way the 15s offer sweep above is, so this runs far less often.
+   */
+  @Cron(CronExpression.EVERY_10_MINUTES)
+  async expireStaleManualSearches(): Promise<void> {
+    const timeoutMinutes = this.config.get<number>('dispatch.manualSearchTimeoutMinutes')!;
+    const cutoff = new Date(Date.now() - timeoutMinutes * 60_000);
+
+    const stale = await this.ridesRepo.find({
+      where: { status: RideStatus.SEARCHING, dispatchMode: DispatchMode.MANUAL, createdAt: LessThan(cutoff) },
+    });
+    if (stale.length === 0) return;
+
+    for (const ride of stale) {
+      // Same conditional-UPDATE-in-the-WHERE-clause pattern as
+      // AutoDispatchService.markNoDriverFound() - can't clobber a ride
+      // that got selected/cancelled in the moment between this
+      // method's read and write.
+      const result = await this.ridesRepo
+        .createQueryBuilder()
+        .update(Ride)
+        .set({ status: RideStatus.NO_DRIVER_FOUND })
+        .where('id = :id', { id: ride.id })
+        .andWhere('status = :searching', { searching: RideStatus.SEARCHING })
+        .execute();
+
+      if (result.affected === 1) {
+        this.logger.warn(
+          `MANUAL ride ${ride.id} timed out after ${timeoutMinutes} minutes in SEARCHING with no driver selected — marked NO_DRIVER_FOUND`,
+        );
+        this.events.emit('ride.status_changed', {
+          rideId: ride.id,
+          status: RideStatus.NO_DRIVER_FOUND,
+          passengerId: ride.passengerId,
+          driverId: ride.driverId,
+        });
+      }
     }
   }
 }

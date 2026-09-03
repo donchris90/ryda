@@ -64,3 +64,36 @@ describe('WalletTransfersService.initiate() - duplicate pending request preventi
     ).rejects.toThrow(BadRequestException);
   });
 });
+
+describe('WalletTransfersService.expireStaleRequests() - proactive cleanup for abandoned requests', () => {
+  function buildWithQueryBuilder(affected = 1) {
+    const executeMock = jest.fn().mockResolvedValue({ affected });
+    const qb = {
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      execute: executeMock,
+    };
+    const transferRequestsRepo = { createQueryBuilder: jest.fn().mockReturnValue(qb) } as any;
+    const service = new WalletTransfersService(
+      transferRequestsRepo, {} as any, {} as any, {} as any, {} as any, {} as any,
+    );
+    return { service, qb };
+  }
+
+  it('marks stale pending requests expired via a single bulk update, not one row at a time', async () => {
+    const { service, qb } = buildWithQueryBuilder(3);
+
+    await service.expireStaleRequests();
+
+    expect(qb.set).toHaveBeenCalledWith({ status: WalletTransferStatus.EXPIRED });
+    expect(qb.where).toHaveBeenCalledWith('status = :status', { status: WalletTransferStatus.PENDING });
+  });
+
+  it('does not throw or log anything alarming when nothing was actually stale', async () => {
+    const { service } = buildWithQueryBuilder(0);
+
+    await expect(service.expireStaleRequests()).resolves.toBeUndefined();
+  });
+});

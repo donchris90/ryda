@@ -159,6 +159,15 @@ export default () => ({
       process.env.DISPATCH_OFFER_TIMEOUT_SECONDS ?? '60',
       10,
     ),
+    // How long a MANUAL ride (passenger picks their own driver) can sit
+    // in SEARCHING before it's swept as stale - AUTO rides already time
+    // out via markNoDriverFound() when the search radius is exhausted,
+    // but nothing previously handled a MANUAL ride the passenger simply
+    // abandoned before selecting anyone.
+    manualSearchTimeoutMinutes: parseInt(
+      process.env.DISPATCH_MANUAL_SEARCH_TIMEOUT_MINUTES ?? '30',
+      10,
+    ),
     offerRadiusKm: parseFloat(process.env.DISPATCH_OFFER_RADIUS_KM ?? '8'),
     expiryCheckIntervalMs: parseInt(
       process.env.DISPATCH_EXPIRY_CHECK_MS ?? '15000',

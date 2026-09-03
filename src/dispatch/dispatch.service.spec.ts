@@ -165,4 +165,54 @@ describe('DispatchService', () => {
       expect(metricsService.dispatchOfferTimeoutsTotal.inc).toHaveBeenCalledWith(2);
     });
   });
+
+  describe('expireStaleManualSearches()', () => {
+    function buildWithQueryBuilder(overrides: { affected?: number; staleRides?: any[] } = {}) {
+      const executeMock = jest.fn().mockResolvedValue({ affected: overrides.affected ?? 1 });
+      const qb = {
+        update: jest.fn().mockReturnThis(),
+        set: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        execute: executeMock,
+      };
+      const ridesRepo = {
+        find: jest.fn().mockResolvedValue(overrides.staleRides ?? []),
+        createQueryBuilder: jest.fn().mockReturnValue(qb),
+      };
+      return buildService({ ridesRepo, config: { get: jest.fn().mockReturnValue(30) } });
+    }
+
+    it('marks a genuinely stale MANUAL ride NO_DRIVER_FOUND and emits the same event AUTO dispatch already uses', async () => {
+      const staleRide = { id: 'ride-1', passengerId: 'passenger-1', driverId: null };
+      const { service, events, ridesRepo } = buildWithQueryBuilder({ staleRides: [staleRide] });
+
+      await service.expireStaleManualSearches();
+
+      expect(ridesRepo.find).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ dispatchMode: 'manual' }) }),
+      );
+      expect(events.emit).toHaveBeenCalledWith(
+        'ride.status_changed',
+        expect.objectContaining({ rideId: 'ride-1', status: 'no_driver_found' }),
+      );
+    });
+
+    it('does nothing when there are no stale MANUAL rides at all', async () => {
+      const { service, events } = buildWithQueryBuilder({ staleRides: [] });
+
+      await service.expireStaleManualSearches();
+
+      expect(events.emit).not.toHaveBeenCalled();
+    });
+
+    it('does not emit an event when the race-safe conditional update finds the ride already changed underneath it (selected/cancelled in the moment between read and write)', async () => {
+      const staleRide = { id: 'ride-1', passengerId: 'passenger-1', driverId: null };
+      const { service, events } = buildWithQueryBuilder({ staleRides: [staleRide], affected: 0 });
+
+      await service.expireStaleManualSearches();
+
+      expect(events.emit).not.toHaveBeenCalled();
+    });
+  });
 });

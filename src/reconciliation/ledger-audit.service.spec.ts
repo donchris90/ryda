@@ -3,7 +3,7 @@ import { LedgerAuditService } from './ledger-audit.service';
 import { Wallet } from '../wallets/entities/wallet.entity';
 import { WalletTransaction } from '../wallets/entities/wallet-transaction.entity';
 import { TransactionDirection, TransactionCategory } from '../common/enums/transaction.enum';
-import { LedgerDiscrepancyStatus } from './entities/ledger-discrepancy.entity';
+import { LedgerDiscrepancyStatus, LedgerAccountType } from './entities/ledger-discrepancy.entity';
 
 function fakeWallet(overrides: Partial<Wallet> = {}): Wallet {
   return { id: 'wallet-1', userId: 'user-1', balance: '700.00', currency: 'NGN', isFrozen: false, createdAt: new Date(), updatedAt: new Date(), ...overrides } as Wallet;
@@ -31,6 +31,10 @@ function build(wallet: Wallet | null, transactions: WalletTransaction[]) {
     manager: { query: jest.fn().mockResolvedValue([]) },
   } as any;
   const txRepo = { find: jest.fn().mockResolvedValue(transactions) } as any;
+  const fleetWalletsRepo = { manager: { query: jest.fn().mockResolvedValue([]) } } as any;
+  const fleetTxRepo = { find: jest.fn().mockResolvedValue([]) } as any;
+  const corporateAccountsRepo = { manager: { query: jest.fn().mockResolvedValue([]) } } as any;
+  const corporateTxRepo = { find: jest.fn().mockResolvedValue([]) } as any;
 
   let savedDiscrepancy: any = null;
   const discrepancyRepo = {
@@ -43,7 +47,15 @@ function build(wallet: Wallet | null, transactions: WalletTransaction[]) {
     find: jest.fn().mockResolvedValue([]),
   } as any;
 
-  const service = new LedgerAuditService(walletsRepo, txRepo, discrepancyRepo);
+  const service = new LedgerAuditService(
+    walletsRepo,
+    txRepo,
+    fleetWalletsRepo,
+    fleetTxRepo,
+    corporateAccountsRepo,
+    corporateTxRepo,
+    discrepancyRepo,
+  );
   return { service, walletsRepo, txRepo, discrepancyRepo };
 }
 
@@ -126,7 +138,7 @@ describe('LedgerAuditService', () => {
         }),
         save: jest.fn(async (d: any) => d),
       } as any;
-      const service = new LedgerAuditService({} as any, {} as any, discrepancyRepo);
+      const service = new LedgerAuditService({} as any, {} as any, {} as any, {} as any, {} as any, {} as any, discrepancyRepo);
 
       const result = await service.resolve('discrepancy-1', 'admin-1', 'Investigated, corrected manually');
 
@@ -141,7 +153,7 @@ describe('LedgerAuditService', () => {
         findOne: jest.fn().mockResolvedValue({ id: 'discrepancy-1', status: LedgerDiscrepancyStatus.RESOLVED }),
         save: jest.fn(),
       } as any;
-      const service = new LedgerAuditService({} as any, {} as any, discrepancyRepo);
+      const service = new LedgerAuditService({} as any, {} as any, {} as any, {} as any, {} as any, {} as any, discrepancyRepo);
 
       await expect(service.resolve('discrepancy-1', 'admin-1', 'note')).rejects.toThrow(BadRequestException);
       expect(discrepancyRepo.save).not.toHaveBeenCalled();
@@ -149,9 +161,130 @@ describe('LedgerAuditService', () => {
 
     it('throws for a discrepancy that does not exist', async () => {
       const discrepancyRepo = { findOne: jest.fn().mockResolvedValue(null) } as any;
-      const service = new LedgerAuditService({} as any, {} as any, discrepancyRepo);
+      const service = new LedgerAuditService({} as any, {} as any, {} as any, {} as any, {} as any, {} as any, discrepancyRepo);
 
       await expect(service.resolve('nonexistent', 'admin-1', 'note')).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('fleet wallet and corporate account coverage - extending discrepancy detection beyond passenger/driver wallets', () => {
+    it('runFleetWalletScan() queries the fleet_wallets/fleet_transactions tables specifically, and correctly flags a genuine discrepancy there', async () => {
+      const fleetWalletsRepo = {
+        manager: {
+          query: jest
+            .fn()
+            .mockResolvedValueOnce([{ count: 1 }])
+            .mockResolvedValueOnce([{ walletId: 'fleet-wallet-1', walletBalance: '500.00', ledgerBalance: '300.00' }]),
+        },
+      } as any;
+      const discrepancyRepo = {
+        findOne: jest.fn().mockResolvedValue(null),
+        save: jest.fn(async (d: any) => ({ id: 'discrepancy-1', ...d })),
+        create: jest.fn((d: any) => d),
+      } as any;
+      const service = new LedgerAuditService(
+        {} as any, {} as any, fleetWalletsRepo, {} as any, {} as any, {} as any, discrepancyRepo,
+      );
+
+      const result = await service.runFleetWalletScan();
+
+      expect(result.walletsScanned).toBe(1);
+      expect(result.newDiscrepancies).toHaveLength(1);
+      expect(discrepancyRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ accountType: LedgerAccountType.FLEET_WALLET, walletId: 'fleet-wallet-1' }),
+      );
+      // Confirms the fleet-specific table names were genuinely used, not the wallet ones.
+      const queryCalls = fleetWalletsRepo.manager.query.mock.calls;
+      expect(queryCalls[1][0]).toContain('fleet_wallets');
+      expect(queryCalls[1][0]).toContain('fleet_transactions');
+    });
+
+    it('runCorporateAccountScan() queries corporate_accounts/corporate_transactions using the budgetBalance column specifically, and correctly flags a genuine discrepancy', async () => {
+      const corporateAccountsRepo = {
+        manager: {
+          query: jest
+            .fn()
+            .mockResolvedValueOnce([{ count: 1 }])
+            .mockResolvedValueOnce([{ walletId: 'corp-account-1', walletBalance: '10000.00', ledgerBalance: '9000.00' }]),
+        },
+      } as any;
+      const discrepancyRepo = {
+        findOne: jest.fn().mockResolvedValue(null),
+        save: jest.fn(async (d: any) => ({ id: 'discrepancy-1', ...d })),
+        create: jest.fn((d: any) => d),
+      } as any;
+      const service = new LedgerAuditService(
+        {} as any, {} as any, {} as any, {} as any, corporateAccountsRepo, {} as any, discrepancyRepo,
+      );
+
+      const result = await service.runCorporateAccountScan();
+
+      expect(result.newDiscrepancies).toHaveLength(1);
+      expect(discrepancyRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ accountType: LedgerAccountType.CORPORATE_ACCOUNT, walletId: 'corp-account-1' }),
+      );
+      const queryCalls = corporateAccountsRepo.manager.query.mock.calls;
+      expect(queryCalls[1][0]).toContain('corporate_accounts');
+      expect(queryCalls[1][0]).toContain('budgetBalance');
+    });
+
+    it('a genuinely consistent fleet wallet produces no discrepancy', async () => {
+      const fleetWalletsRepo = {
+        manager: {
+          query: jest.fn().mockResolvedValueOnce([{ count: 1 }]).mockResolvedValueOnce([]),
+        },
+      } as any;
+      const discrepancyRepo = { save: jest.fn() } as any;
+      const service = new LedgerAuditService(
+        {} as any, {} as any, fleetWalletsRepo, {} as any, {} as any, {} as any, discrepancyRepo,
+      );
+
+      const result = await service.runFleetWalletScan();
+
+      expect(result.newDiscrepancies).toHaveLength(0);
+      expect(discrepancyRepo.save).not.toHaveBeenCalled();
+    });
+
+    it('checkWalletChain() with accountType FLEET_WALLET walks fleet_transactions and reads the correct balance field', async () => {
+      const fleetWallet = { id: 'fleet-wallet-1', balance: '200.00' };
+      const fleetWalletsRepo = { findOne: jest.fn().mockResolvedValue(fleetWallet) } as any;
+      const fleetTxRepo = {
+        find: jest.fn().mockResolvedValue([
+          { id: 'tx-1', direction: TransactionDirection.CREDIT, amount: '200.00', balanceAfter: '200.00' },
+        ]),
+      } as any;
+      const service = new LedgerAuditService(
+        {} as any, {} as any, fleetWalletsRepo, fleetTxRepo, {} as any, {} as any, {} as any,
+      );
+
+      const result = await service.checkWalletChain('fleet-wallet-1', LedgerAccountType.FLEET_WALLET);
+
+      expect(result.ok).toBe(true);
+      expect(result.accountType).toBe(LedgerAccountType.FLEET_WALLET);
+      expect(fleetTxRepo.find).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { fleetWalletId: 'fleet-wallet-1' } }),
+      );
+    });
+
+    it('checkWalletChain() with accountType CORPORATE_ACCOUNT reads budgetBalance, not balance', async () => {
+      const corporateAccount = { id: 'corp-1', budgetBalance: '1000.00' };
+      const corporateAccountsRepo = { findOne: jest.fn().mockResolvedValue(corporateAccount) } as any;
+      const corporateTxRepo = {
+        find: jest.fn().mockResolvedValue([
+          { id: 'tx-1', direction: TransactionDirection.CREDIT, amount: '1000.00', balanceAfter: '1000.00' },
+        ]),
+      } as any;
+      const service = new LedgerAuditService(
+        {} as any, {} as any, {} as any, {} as any, corporateAccountsRepo, corporateTxRepo, {} as any,
+      );
+
+      const result = await service.checkWalletChain('corp-1', LedgerAccountType.CORPORATE_ACCOUNT);
+
+      expect(result.ok).toBe(true);
+      expect(result.walletBalance).toBe('1000.00');
+      expect(corporateTxRepo.find).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { corporateAccountId: 'corp-1' } }),
+      );
     });
   });
 });
