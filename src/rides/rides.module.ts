@@ -28,9 +28,10 @@ import { CandidateSearchModule } from '../candidate-search/candidate-search.modu
 import { RankingModule } from '../ranking/ranking.module';
 import { GeofenceModule } from '../tracking/geofence/geofence.module';
 import { FraudModule } from '../fraud/fraud.module';
+import { AirportModule } from '../airport/airport.module';
 
 @Module({
-  imports: [
+    imports: [
     TypeOrmModule.forFeature([Ride]),
     DriversModule,
     VehiclesModule,
@@ -54,6 +55,7 @@ import { FraudModule } from '../fraud/fraud.module';
     RankingModule,
     GeofenceModule,
     FraudModule,
+    AirportModule,
   ],
   providers: [RidesService, FareService, ScheduledRideProcessor],
   controllers: [RidesController, AdminDispatchController],
