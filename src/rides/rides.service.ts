@@ -49,6 +49,9 @@ import { GeofenceService } from '../tracking/geofence/geofence.service';
 import { GeofenceType } from '../tracking/geofence/entities/geofence.entity';
 import { AirportService } from '../airport/airport.service';
 import { FraudService } from '../fraud/fraud.service';
+import { PoolMatchingService } from '../pooling/pool-matching.service';
+import { PoolRouteStop } from '../pooling/entities/pool-group.entity';
+import { FeatureFlagsService } from '../feature-flags/feature-flags.service';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -121,6 +124,8 @@ export class RidesService {
     private readonly geofenceService: GeofenceService,
     private readonly airportService: AirportService,
     private readonly fraudService: FraudService,
+    private readonly poolMatchingService: PoolMatchingService,
+    private readonly featureFlagsService: FeatureFlagsService,
   ) {}
 
   async estimateFare(dto: FareEstimateDto) {
@@ -243,11 +248,24 @@ export class RidesService {
       }
     }
 
+    // Pooling doesn't combine with a scheduled ride - PoolMatchingService's
+    // whole design is a short immediate-matching window, not something
+    // that makes sense to hold open until a future pickup time. A
+    // passenger who both scheduled and requested pooling just gets a
+    // normal scheduled solo ride, not an error.
+    const shouldPool =
+      !!dto.isPooled && !scheduledAt && (await this.featureFlagsService.isEnabled('ride_sharing'));
+
     const ride = this.ridesRepo.create({
       passengerId,
       category: dto.category,
-      status: scheduledAt ? RideStatus.SCHEDULED : RideStatus.SEARCHING,
-      dispatchMode: dto.dispatchMode ?? DispatchMode.MANUAL,
+      status: shouldPool ? RideStatus.POOL_MATCHING : scheduledAt ? RideStatus.SCHEDULED : RideStatus.SEARCHING,
+      // A pooled ride always ends up AUTO-dispatched once matched (or
+      // once its window expires unmatched) - see PoolMatchingService's
+      // class doc comment - so there's no MANUAL pooled state to
+      // support; dto.dispatchMode is ignored for a pooled request.
+      dispatchMode: shouldPool ? DispatchMode.AUTO : (dto.dispatchMode ?? DispatchMode.MANUAL),
+      isPooled: shouldPool,
       scheduledAt,
       pickupLat: dto.pickupLat,
       pickupLng: dto.pickupLng,
@@ -377,7 +395,20 @@ export class RidesService {
     // tryOfferNextCandidate()), so a transient failure here can never
     // fail ride creation — the ride simply stays SEARCHING and the next
     // decline/timeout/retry gets another chance.
-    if (!scheduledAt && savedRide.dispatchMode === DispatchMode.AUTO) {
+    //
+    // A pooled ride takes a third path: PoolMatchingService.requestPool()
+    // owns getting it to a driver eventually (either by pairing it and
+    // handing the anchor to AutoDispatchService itself, or by falling
+    // back to solo AUTO dispatch once its match window expires) - this
+    // method's job ends at handing off, same fire-and-forget reasoning
+    // as the AUTO branch, with its own explicit .catch() since
+    // requestPool() doesn't swallow its own errors the way
+    // AutoDispatchService does.
+    if (!scheduledAt && savedRide.status === RideStatus.POOL_MATCHING) {
+      void this.poolMatchingService.requestPool(savedRide.id).catch((err) => {
+        this.logger.error(`Pool matching failed for ride ${savedRide.id}: ${err.message}`);
+      });
+    } else if (!scheduledAt && savedRide.dispatchMode === DispatchMode.AUTO) {
       void this.autoDispatchService.startForRide(savedRide.id);
     }
 
@@ -755,6 +786,17 @@ export class RidesService {
    * so this avoids an extra Directions API call for rides nobody ever
    * looks at on a map.
    */
+  /**
+   * The route for whichever leg of the trip is actually relevant right
+   * now, not always a fixed pickup->dropoff line: while a driver is
+   * still on the way (ACCEPTED/ARRIVING/ARRIVED), it's their own live
+   * position -> pickup, since that's the leg someone watching the map
+   * during that phase actually wants to see; once the trip is
+   * IN_PROGRESS (or any later status), it's pickup -> dropoff. The
+   * `leg` field on the result tells the client which one it got, so
+   * the same endpoint can back a single "where's my ride" map through
+   * the whole trip rather than needing a different call per phase.
+   */
   async getRoute(rideId: string, requesterId: string, requesterRole: UserRole) {
     const ride = await this.findById(rideId);
 
@@ -767,13 +809,71 @@ export class RidesService {
 
     if (!this.googleMaps.isConfigured()) return null;
 
-    const directions = await this.googleMaps.getDirections(
-      { lat: ride.pickupLat, lng: ride.pickupLng },
-      { lat: ride.dropoffLat, lng: ride.dropoffLng },
-    );
+    const enRouteToPickup = [RideStatus.ACCEPTED, RideStatus.ARRIVING, RideStatus.ARRIVED].includes(ride.status);
+    const pickup = { lat: ride.pickupLat, lng: ride.pickupLng };
+
+    let origin: { lat: number; lng: number };
+    let destination: { lat: number; lng: number };
+    const leg: 'to_pickup' | 'to_dropoff' = enRouteToPickup ? 'to_pickup' : 'to_dropoff';
+
+    if (enRouteToPickup) {
+      // Driver's own live position, if we have one on file - falls back
+      // to a degenerate pickup->pickup "route" (not the dropoff leg)
+      // when we don't, since the driver genuinely hasn't reported a
+      // location yet and pickup is still the correct destination for
+      // this phase of the trip.
+      const driverProfile = ride.driverId ? await this.driversService.findByUserId(ride.driverId) : null;
+      origin =
+        driverProfile?.currentLat != null && driverProfile?.currentLng != null
+          ? { lat: driverProfile.currentLat, lng: driverProfile.currentLng }
+          : pickup;
+      destination = pickup;
+    } else {
+      origin = pickup;
+      destination = { lat: ride.dropoffLat, lng: ride.dropoffLng };
+    }
+
+    const directions = await this.googleMaps.getDirections(origin, destination);
     if (!directions?.polyline) return null;
 
-    return { points: decodePolyline(directions.polyline) };
+    return { leg, points: decodePolyline(directions.polyline) };
+  }
+
+  /**
+   * The shared-stop manifest for a pooled ride - which stop comes next
+   * across BOTH riders' pickups/dropoffs, and who the co-rider is.
+   * PoolGroup-backed (via PoolMatchingService.getGroupAndPartner()),
+   * not `ride.stops` - see PoolMatchingService.pairRides()'s own
+   * comment on why co-rider stop info is deliberately not duplicated
+   * onto that column. Same isParticipant-or-staff access check as
+   * getRoute()/getDriverInfo() above, checked before anything else -
+   * a non-participant gets a 403 regardless of whether the ride is
+   * even pooled, not a null that could be mistaken for "not pooled."
+   */
+  async getPoolManifest(
+    rideId: string,
+    requesterId: string,
+    requesterRole: UserRole,
+  ): Promise<{ partnerRideId: string; partnerFirstName: string; stops: PoolRouteStop[] } | null> {
+    const ride = await this.findById(rideId);
+
+    const isParticipant = ride.passengerId === requesterId || ride.driverId === requesterId;
+    const isStaff = STAFF_ROLES.includes(requesterRole);
+    if (!isParticipant && !isStaff) {
+      throw new ForbiddenException("You don't have access to this ride");
+    }
+
+    if (!ride.poolGroupId) return null;
+
+    const result = await this.poolMatchingService.getGroupAndPartner(ride);
+    if (!result) return null;
+
+    const partner = await this.usersService.findById(result.partnerRide.passengerId);
+    return {
+      partnerRideId: result.partnerRide.id,
+      partnerFirstName: partner.firstName,
+      stops: result.group.routeSequence,
+    };
   }
 
   /**
@@ -867,15 +967,35 @@ export class RidesService {
       ride.id,
       'Driver tip',
     );
-    await this.walletsService.credit(
-      driverWallet.id,
-      amount,
-      TransactionCategory.TIP_RECEIVED,
-      ride.id,
-      'Tip received',
-    );
 
+    // tipAmount is set regardless of whether the driver credit below
+    // succeeds - the passenger has already been debited at this point,
+    // so leaving tipAmount at 0 would let a client retry (after seeing
+    // an error that no longer exists once this settles) debit them a
+    // second time for the same tip. The "already tipped" guard above
+    // is what actually prevents that double-charge, and it checks this
+    // exact field.
     ride.tipAmount = amount.toFixed(2);
+
+    try {
+      await this.walletsService.credit(
+        driverWallet.id,
+        amount,
+        TransactionCategory.TIP_RECEIVED,
+        ride.id,
+        'Tip received',
+      );
+    } catch (err) {
+      this.logger.error(
+        `Failed to credit driver ${ride.driverId} for a tip on ride ${ride.id} (passenger already charged): ${err instanceof Error ? err.message : err}`,
+      );
+      this.events.emit('tip_earnings.credit_failed', {
+        rideId: ride.id,
+        driverId: ride.driverId,
+        amount,
+      });
+    }
+
     return this.ridesRepo.save(ride);
   }
 
@@ -1306,6 +1426,20 @@ export class RidesService {
       .markAccepted(rideId, driverUserId)
       .catch(() => undefined);
 
+    // If this is the anchor ride of a pooled pair, propagate the same
+    // driver/vehicle onto the partner ride now that the reservation has
+    // actually committed - see PoolMatchingService.propagateDriverAssignment()'s
+    // own doc comment. Best-effort, same reasoning as markAccepted()
+    // above: a failure here shouldn't undo an already-successful
+    // acceptance for the driver who just claimed this ride.
+    if (saved.poolGroupId) {
+      await this.poolMatchingService
+        .propagateDriverAssignment(saved)
+        .catch((err) => {
+          this.logger.error(`Pool driver-assignment propagation failed for ride ${saved.id}: ${err.message}`);
+        });
+    }
+
     return saved;
   }
 
@@ -1580,7 +1714,15 @@ export class RidesService {
       ride.id,
       ride.passengerId,
     );
+    // Checked for BOTH sides of the ride - a referral bonus is paid on
+    // the referee's first completed trip regardless of whether they
+    // were referred as a rider or as a driver, and this ride is that
+    // first trip for either role independently. Each call is its own
+    // no-op if that user was never referred or already has a grant -
+    // see PromotionsService.grantReferralBonusIfEligible()'s own
+    // idempotency handling.
     await this.promotionsService.grantReferralBonusIfEligible(ride.passengerId);
+    await this.promotionsService.grantReferralBonusIfEligible(driverUserId);
 
     this.events.emit('ride.completed', {
       passengerId: ride.passengerId,
@@ -1601,29 +1743,52 @@ export class RidesService {
    * individual driver. Called synchronously for wallet/card/corporate;
    * called later, from handlePaymentConfirmed(), for bank_transfer.
    */
+  /**
+   * By the time this runs, the passenger has already been charged (or
+   * their corporate account debited, or cash already collected) — a
+   * failure crediting the DRIVER here must never revert the ride or
+   * rethrow, since either would risk double-charging the passenger on
+   * a client retry for money that was already, correctly, taken. Left
+   * `earningsSettled: false` and an event emitted for ops to follow up
+   * and manually settle, same "isolate a downstream failure from an
+   * already-committed charge" shape as the CashReconciliation handling
+   * for cash trips elsewhere in this service.
+   */
   private async creditDriverEarnings(
     ride: Ride,
     driverProfile: DriverProfile,
     driverEarnings: number,
     commissionPercent: number,
   ): Promise<void> {
-    if (driverProfile.fleetCompanyId) {
-      await this.fleetService.creditForRideEarning(
-        driverProfile.fleetCompanyId,
-        driverEarnings,
-        ride.id,
+    try {
+      if (driverProfile.fleetCompanyId) {
+        await this.fleetService.creditForRideEarning(
+          driverProfile.fleetCompanyId,
+          driverEarnings,
+          ride.id,
+        );
+      } else {
+        const driverWallet = await this.walletsService.getByUserId(
+          driverProfile.userId,
+        );
+        await this.walletsService.credit(
+          driverWallet.id,
+          driverEarnings,
+          TransactionCategory.RIDE_EARNING,
+          ride.id,
+          `Earnings for trip ${ride.id} (commission ${commissionPercent}%)`,
+        );
+      }
+    } catch (err) {
+      this.logger.error(
+        `Failed to credit driver ${driverProfile.userId} for ride ${ride.id} (passenger already charged): ${err instanceof Error ? err.message : err}`,
       );
-    } else {
-      const driverWallet = await this.walletsService.getByUserId(
-        driverProfile.userId,
-      );
-      await this.walletsService.credit(
-        driverWallet.id,
-        driverEarnings,
-        TransactionCategory.RIDE_EARNING,
-        ride.id,
-        `Earnings for trip ${ride.id} (commission ${commissionPercent}%)`,
-      );
+      this.events.emit('driver_earnings.credit_failed', {
+        rideId: ride.id,
+        driverId: driverProfile.userId,
+        amount: driverEarnings,
+      });
+      return;
     }
     ride.earningsSettled = true;
     await this.ridesRepo.save(ride);
@@ -1733,6 +1898,38 @@ export class RidesService {
       throw new BadRequestException(
         'This ride just changed status (it may already have been accepted, completed, or cancelled) — please refresh and try again.',
       );
+    }
+
+    // Pool unwind - which path applies depends on how far this ride had
+    // gotten before being cancelled, not just whether it's pooled at
+    // all. Each of these three is a no-op for a ride that was never
+    // pooled in the first place (onRideCancelledBeforeMatch() only
+    // touches a queued delayed job; unpoolRide()/unpoolRideMidTrip()
+    // both check poolGroupId themselves and return immediately if unset).
+    if (originalStatus === RideStatus.POOL_MATCHING) {
+      // Still waiting to be paired - nothing to unwind for a partner,
+      // just clean up the delayed match-window job so it doesn't fire
+      // for a ride that no longer exists in that state.
+      await this.poolMatchingService
+        .onRideCancelledBeforeMatch(ride.id)
+        .catch(() => undefined);
+    } else if (ride.poolGroupId && originalStatus === RideStatus.SEARCHING) {
+      // Matched but not yet dispatched to a driver - the partner ride
+      // reverts to a normal solo request at full fare and dispatches
+      // on its own.
+      await this.poolMatchingService
+        .unpoolRide(ride.id, `Cancelled by ${cancelledBy} before dispatch`)
+        .catch(() => undefined);
+    } else if (
+      ride.poolGroupId &&
+      [RideStatus.ACCEPTED, RideStatus.ARRIVING, RideStatus.ARRIVED, RideStatus.IN_PROGRESS].includes(originalStatus)
+    ) {
+      // A driver was already assigned to both rides - the surviving
+      // passenger's own driver just keeps driving them; only the fare
+      // and the shared-stop manifest need settling.
+      await this.poolMatchingService
+        .unpoolRideMidTrip(ride.id, `Cancelled by ${cancelledBy} after dispatch`)
+        .catch(() => undefined);
     }
 
     if (

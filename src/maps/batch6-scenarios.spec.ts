@@ -87,6 +87,8 @@ function buildRidesService(overrides: Record<string, any> = {}) {
     geofenceService as any,
     {} as any, // airportService (not exercised by this suite's scenarios)
     {} as any, // fraudService (not exercised by this suite's scenarios)
+    {} as any, // poolMatchingService (not exercised by this suite)
+    {} as any, // featureFlagsService (not exercised by this suite)
   );
 }
 

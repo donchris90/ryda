@@ -41,6 +41,10 @@ const VEHICLE_CATEGORY_RANK: Record<VehicleCategory, number> = {
   [VehicleCategory.VAN]: DELIVERY_VEHICLE_RANK[DeliveryVehicleType.VAN],
   [VehicleCategory.BUS]: DELIVERY_VEHICLE_RANK[DeliveryVehicleType.VAN],
   [VehicleCategory.TRUCK]: DELIVERY_VEHICLE_RANK[DeliveryVehicleType.TRUCK],
+  // Car-like for delivery-capacity purposes - the accessibility
+  // equipment doesn't change how much it can carry, same reasoning as
+  // taxi/ev/luxury above.
+  [VehicleCategory.WHEELCHAIR_ACCESSIBLE]: DELIVERY_VEHICLE_RANK[DeliveryVehicleType.CAR],
 };
 
 // Preemptive, not fixing a current bug - this file's Records are

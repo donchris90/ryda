@@ -92,6 +92,7 @@ function buildService(overrides: Record<string, any> = {}) {
     deps.driverRankingService as any,
     deps.geofenceService as any,
     deps.airportService as any,
+    {} as any, // fraudService (not exercised by this suite)
     deps.poolMatchingService as any,
     deps.featureFlagsService as any,
   );
@@ -330,10 +331,10 @@ describe('RidesService.verifyPin', () => {
     await expect(service.verifyPin('ride-1', 'someone-else', '1234')).rejects.toThrow(ForbiddenException);
   });
 
-  it('does not write to the repo again once already verified', async () => {
+  it('rejects re-verifying an already-verified PIN without writing to the repo again (see rides.service.pin.spec.ts for the same case)', async () => {
     const { service, deps } = buildWithRide({ orderOverrides: { isPinVerified: true } });
 
-    await service.verifyPin('ride-1', 'driver-1', '1234');
+    await expect(service.verifyPin('ride-1', 'driver-1', '1234')).rejects.toThrow(BadRequestException);
 
     expect(deps.ridesRepo.save).not.toHaveBeenCalled();
   });

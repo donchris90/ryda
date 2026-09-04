@@ -129,6 +129,16 @@ export class Ride {
   @Column({ type: 'varchar', nullable: true })
   poolGroupId: string | null;
 
+  // Set at request time from the passenger's own choice - permanent for
+  // the life of the ride, unlike poolGroupId (only set once a match
+  // actually succeeds, cleared again if unpooled). A ride can be
+  // isPooled=true with poolGroupId=null the whole time it's waiting in
+  // POOL_MATCHING, or after its match window expired unmatched and it
+  // fell back to solo dispatch - "the passenger asked to share" and
+  // "this ride is currently paired with someone" are different facts.
+  @Column({ default: false })
+  isPooled: boolean;
+
   @Column({ type: 'decimal', precision: 10, scale: 2 })
   totalFare: string;
 

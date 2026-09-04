@@ -9,6 +9,7 @@ export enum VehicleCategory {
   VAN = 'van',
   BUS = 'bus',
   TRUCK = 'truck',
+  WHEELCHAIR_ACCESSIBLE = 'wheelchair_accessible',
 }
 
 export enum VehicleStatus {

@@ -109,6 +109,8 @@ function buildService(overrides: Record<string, any> = {}) {
     deps.geofenceService as any,
     deps.airportService as any,
     deps.fraudService as any,
+    {} as any, // poolMatchingService (not exercised by this suite)
+    {} as any, // featureFlagsService (not exercised by this suite)
   );
 
   return { service, deps, queryBuilder };

@@ -29,6 +29,7 @@ import { RankingModule } from '../ranking/ranking.module';
 import { GeofenceModule } from '../tracking/geofence/geofence.module';
 import { FraudModule } from '../fraud/fraud.module';
 import { AirportModule } from '../airport/airport.module';
+import { PoolingModule } from '../pooling/pooling.module';
 
 @Module({
     imports: [
@@ -56,6 +57,7 @@ import { AirportModule } from '../airport/airport.module';
     GeofenceModule,
     FraudModule,
     AirportModule,
+    PoolingModule,
   ],
   providers: [RidesService, FareService, ScheduledRideProcessor],
   controllers: [RidesController, AdminDispatchController],

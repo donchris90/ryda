@@ -55,6 +55,7 @@ function buildService(overrides: Record<string, any> = {}) {
     corporateService: {
       getAccountForEmployee: jest.fn(),
       debitForRide: jest.fn(),
+      flagRideForApprovalIfNeeded: jest.fn().mockResolvedValue(undefined),
       ...overrides.corporateService,
     },
     passengersService: {
@@ -125,6 +126,7 @@ function buildService(overrides: Record<string, any> = {}) {
     deps.driverRankingService as any,
     deps.geofenceService as any,
     deps.airportService as any,
+    {} as any, // fraudService (not exercised by this suite)
     deps.poolMatchingService as any,
     deps.featureFlagsService as any,
   );
@@ -422,6 +424,7 @@ describe('RidesService.completeRide — CORPORATE payments', () => {
       'account-1',
       1000,
       'ride-1',
+      'passenger-1',
     );
     expect(deps.walletsService.credit).toHaveBeenCalled();
   });

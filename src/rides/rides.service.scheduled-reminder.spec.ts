@@ -81,6 +81,8 @@ function build(overrides: Record<string, any> = {}) {
     deps.geofenceService as any,
     {} as any, // airportService
     {} as any, // fraudService
+    {} as any, // poolMatchingService (not exercised by this suite)
+    {} as any, // featureFlagsService (not exercised by this suite)
   );
 
   return { service, ridesRepo, autoDispatchService, events, scheduledRidesQueue };

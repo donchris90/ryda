@@ -109,4 +109,15 @@ export class RequestRideDto {
   @Type(() => RideStopDto)
   @ArrayMaxSize(3)
   stops?: RideStopDto[];
+
+  // Opt into shared-ride matching (see PoolMatchingService) instead of
+  // a normal solo dispatch. Silently ignored (treated as a normal solo
+  // request) if the ride_sharing feature flag is off - a passenger who
+  // checks "share my ride" shouldn't get an error just because the
+  // feature is disabled platform-wide, they should just get a normal
+  // ride at the normal (undiscounted) fare.
+  @ApiPropertyOptional({ description: 'Opt into shared/pooled ride matching' })
+  @IsOptional()
+  @IsBoolean()
+  isPooled?: boolean;
 }

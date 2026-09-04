@@ -81,6 +81,7 @@ function buildService(overrides: Record<string, any> = {}) {
     deps.driverRankingService as any,
     deps.geofenceService as any,
     deps.airportService as any,
+    {} as any, // fraudService (not exercised by this suite)
     deps.poolMatchingService as any,
     deps.featureFlagsService as any,
   );
