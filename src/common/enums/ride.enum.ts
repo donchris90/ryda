@@ -1,6 +1,7 @@
 export enum RideStatus {
   SCHEDULED = 'scheduled',
   REQUESTED = 'requested',
+  POOL_MATCHING = 'pool_matching',
   SEARCHING = 'searching',
   ACCEPTED = 'accepted',
   ARRIVING = 'arriving',

@@ -123,8 +123,11 @@ export class Ride {
    @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   discount: string;
 
-  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   poolDiscountAmount: string;
+
+  @Column({ type: 'varchar', nullable: true })
+  poolGroupId: string | null;
 
   @Column({ type: 'decimal', precision: 10, scale: 2 })
   totalFare: string;
