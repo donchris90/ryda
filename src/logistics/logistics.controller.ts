@@ -5,9 +5,11 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { Audit } from '../audit/decorators/audit.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -17,11 +19,12 @@ import { LogisticsService } from './logistics.service';
 import {
   CancelDeliveryDto,
   EstimateDeliveryDto,
+  MarkDeliveredDto,
   RequestDeliveryDto,
 } from './dto/logistics.dto';
 import { SelectCourierDto } from './dto/select-courier.dto';
 import { RateDeliveryDto } from './dto/rate-delivery.dto';
-import { DeliveryCancelledBy } from './entities/delivery-order.entity';
+import { DeliveryCancelledBy, DeliveryStatus } from './entities/delivery-order.entity';
 import { RequireFeature } from '../feature-flags/require-feature.decorator';
 import { FeatureFlagGuard } from '../feature-flags/feature-flag.guard';
 import { FEATURE_KEYS } from '../feature-flags/feature-flags.service';
@@ -125,8 +128,8 @@ export class LogisticsController {
   @Patch(':id/delivered')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles(UserRole.DRIVER)
-  delivered(@CurrentUser() user: User, @Param('id') id: string) {
-    return this.logisticsService.markDelivered(id, user.id);
+  delivered(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: MarkDeliveredDto) {
+    return this.logisticsService.markDelivered(id, user.id, dto);
   }
 
   @Patch(':id/cancel')
@@ -141,5 +144,54 @@ export class LogisticsController {
         ? DeliveryCancelledBy.DRIVER
         : DeliveryCancelledBy.CUSTOMER;
     return this.logisticsService.cancelDelivery(id, user.id, cancelledBy, dto);
+  }
+
+  @Get('admin/cod-reconciliation')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCE)
+  listOutstandingCod(@Query('page') page?: string, @Query('limit') limit?: string) {
+    return this.logisticsService.listOutstandingCodReconciliations(
+      page ? parseInt(page, 10) : undefined,
+      limit ? parseInt(limit, 10) : undefined,
+    );
+  }
+
+  @Get('admin/orders')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.SUPPORT_AGENT, UserRole.FINANCE)
+  listForAdmin(
+    @Query('status') status?: DeliveryStatus,
+    @Query('activeOnly') activeOnly?: string,
+    @Query('search') search?: string,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.logisticsService.listForAdmin(
+      { status, activeOnly: activeOnly === 'true', search },
+      page ? parseInt(page, 10) : undefined,
+      limit ? parseInt(limit, 10) : undefined,
+    );
+  }
+
+  @Get('admin/revenue')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCE)
+  revenue(@Query('from') from?: string, @Query('to') to?: string) {
+    return this.logisticsService.getRevenueSummary(from ? new Date(from) : undefined, to ? new Date(to) : undefined);
+  }
+
+  @Get('admin/courier-performance/:driverId')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCE)
+  courierPerformance(@Param('driverId') driverId: string) {
+    return this.logisticsService.getCourierPerformance(driverId);
+  }
+
+  @Patch('admin/:id/cod-reconciliation/reconcile')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCE)
+  @Audit('delivery.cod_reconcile')
+  reconcileCod(@Param('id') id: string) {
+    return this.logisticsService.reconcileCodShortfall(id);
   }
 }

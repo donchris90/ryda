@@ -39,10 +39,20 @@ export class MailerService {
    * password reset request). Same reasoning as SMS OTP delivery being
    * fire-and-forget elsewhere in this codebase.
    */
-  async send(to: string, subject: string, html: string): Promise<void> {
+  /**
+   * Still never throws - a bounced or slow-to-send email should not
+   * fail the API call that triggered it (registration, password reset
+   * request), same reasoning as SMS OTP delivery being fire-and-forget
+   * elsewhere in this codebase. Now returns a result instead of
+   * silently swallowing it, though, so a caller that DOES care whether
+   * the send actually worked (NotificationsService's email failover)
+   * can tell - existing callers that only `await` this and ignore the
+   * return value are unaffected.
+   */
+  async send(to: string, subject: string, html: string): Promise<{ success: boolean; error?: string }> {
     if (!this.isConfigured()) {
       this.logger.log(`[DEV MAIL - not actually sent] To: ${to} | Subject: ${subject}\n${html}`);
-      return;
+      return { success: false, error: 'Brevo not configured' };
     }
 
     try {
@@ -65,9 +75,12 @@ export class MailerService {
       if (!response.ok) {
         const body = await response.text();
         this.logger.error(`Brevo send to ${to} failed (${response.status}): ${body}`);
+        return { success: false, error: `Brevo responded ${response.status}` };
       }
+      return { success: true };
     } catch (err) {
       this.logger.error(`Failed to send email to ${to}: ${(err as Error).message}`);
+      return { success: false, error: (err as Error).message };
     }
   }
 }

@@ -9,7 +9,10 @@ import { Repository } from 'typeorm';
 import { CorporateAccount } from './entities/corporate-account.entity';
 import { CorporateEmployee } from './entities/corporate-employee.entity';
 import { CorporateTransaction } from './entities/corporate-transaction.entity';
+import { CorporateRideApproval, CorporateApprovalStatus } from './entities/corporate-ride-approval.entity';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { TransactionDirection } from '../common/enums/transaction.enum';
+import { RideCategory } from '../common/enums/ride.enum';
 import { UsersService } from '../users/users.service';
 
 @Injectable()
@@ -22,6 +25,9 @@ export class CorporateService {
     @InjectRepository(CorporateTransaction)
     private readonly txRepo: Repository<CorporateTransaction>,
     private readonly usersService: UsersService,
+    @InjectRepository(CorporateRideApproval)
+    private readonly approvalsRepo: Repository<CorporateRideApproval>,
+    private readonly events: EventEmitter2,
   ) {}
 
   async createAccount(
@@ -49,6 +55,68 @@ export class CorporateService {
     return account;
   }
 
+  /**
+   * Configurable ride rules - allowed categories, max fare, operating
+   * hours, allowed cities - checked against one proposed ride, not
+   * recomputed from scratch. Every dimension defaults to unrestricted
+   * (null on the account = no rule set), so an account with no policy
+   * configured never blocks anything - this only ever gets stricter
+   * than that when an owner actually sets a rule.
+   */
+  checkRidePolicy(
+    account: CorporateAccount,
+    ride: { category: RideCategory; estimatedFare: number; city?: string | null; requestedAt: Date },
+  ): { allowed: boolean; reason?: string } {
+    if (account.allowedCategories && !account.allowedCategories.includes(ride.category)) {
+      return { allowed: false, reason: `Your company doesn't allow booking ${ride.category} rides` };
+    }
+
+    if (account.maxFarePerRide != null && ride.estimatedFare > parseFloat(account.maxFarePerRide)) {
+      return { allowed: false, reason: `This ride's estimated fare exceeds your company's per-ride limit of ₦${account.maxFarePerRide}` };
+    }
+
+    if (account.allowedCities && ride.city && !account.allowedCities.includes(ride.city)) {
+      return { allowed: false, reason: `Your company doesn't allow corporate rides in ${ride.city}` };
+    }
+
+    if (account.operatingHoursStart != null && account.operatingHoursEnd != null) {
+      const hour = ride.requestedAt.getHours();
+      const { operatingHoursStart: start, operatingHoursEnd: end } = account;
+      // A window that crosses midnight (e.g. 22 -> 6) means "outside"
+      // is the gap in the MIDDLE (7am-9pm), not the wraparound at the
+      // end of the day - inverting the usual start<=hour<end check for
+      // that case, rather than requiring two separate policy fields.
+      const withinWindow = start <= end ? hour >= start && hour < end : hour >= start || hour < end;
+      if (!withinWindow) {
+        return { allowed: false, reason: `Your company only allows corporate rides between ${start}:00 and ${end}:00` };
+      }
+    }
+
+    return { allowed: true };
+  }
+
+  /** Owner-configurable, one field at a time via a partial patch - never required to resend the whole policy just to change one rule. */
+  async updatePolicy(
+    accountId: string,
+    patch: {
+      allowedCategories?: RideCategory[] | null;
+      maxFarePerRide?: number | null;
+      operatingHoursStart?: number | null;
+      operatingHoursEnd?: number | null;
+      allowedCities?: string[] | null;
+    },
+  ): Promise<CorporateAccount> {
+    const account = await this.findById(accountId);
+    if (patch.allowedCategories !== undefined) account.allowedCategories = patch.allowedCategories;
+    if (patch.maxFarePerRide !== undefined) {
+      account.maxFarePerRide = patch.maxFarePerRide != null ? patch.maxFarePerRide.toFixed(2) : null;
+    }
+    if (patch.operatingHoursStart !== undefined) account.operatingHoursStart = patch.operatingHoursStart;
+    if (patch.operatingHoursEnd !== undefined) account.operatingHoursEnd = patch.operatingHoursEnd;
+    if (patch.allowedCities !== undefined) account.allowedCities = patch.allowedCities;
+    return this.accountsRepo.save(account);
+  }
+
   async addEmployee(accountId: string, userId: string): Promise<CorporateEmployee> {
     await this.findById(accountId); // ensures account exists
     await this.usersService.findById(userId); // ensures user exists
@@ -60,6 +128,151 @@ export class CorporateService {
 
     const employee = this.employeesRepo.create({ corporateAccountId: accountId, userId });
     return this.employeesRepo.save(employee);
+  }
+
+  /** Owner sets/clears an employee's department and/or monthly spend limit - one field at a time, same partial-patch shape as updatePolicy(). */
+  async updateEmployee(
+    accountId: string,
+    employeeUserId: string,
+    patch: { department?: string | null; monthlySpendLimit?: number | null },
+  ): Promise<CorporateEmployee> {
+    const employee = await this.employeesRepo.findOne({ where: { userId: employeeUserId, corporateAccountId: accountId } });
+    if (!employee) throw new NotFoundException('This user is not an employee of your corporate account');
+
+    if (patch.department !== undefined) employee.department = patch.department;
+    if (patch.monthlySpendLimit !== undefined) {
+      employee.monthlySpendLimit = patch.monthlySpendLimit != null ? patch.monthlySpendLimit.toFixed(2) : null;
+    }
+    return this.employeesRepo.save(employee);
+  }
+
+  /**
+   * Checked at ride-request time (RidesService.requestRide()), same
+   * as the account-wide checkRidePolicy() - a limit that only blocked
+   * settlement after the ride already happened wouldn't actually
+   * prevent anything. Sums this employee's own DEBIT transactions
+   * since the start of the current calendar month; a null limit
+   * (never configured) always passes.
+   */
+  async checkEmployeeSpendLimit(
+    employeeUserId: string,
+    additionalAmount: number,
+  ): Promise<{ allowed: boolean; reason?: string }> {
+    const employee = await this.employeesRepo.findOne({ where: { userId: employeeUserId } });
+    if (!employee?.monthlySpendLimit) return { allowed: true };
+
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    const { total } = await this.txRepo
+      .createQueryBuilder('tx')
+      .select('COALESCE(SUM(tx.amount), 0)', 'total')
+      .where('tx.employeeUserId = :employeeUserId', { employeeUserId })
+      .andWhere('tx.direction = :direction', { direction: TransactionDirection.DEBIT })
+      .andWhere('tx.createdAt >= :startOfMonth', { startOfMonth })
+      .getRawOne();
+
+    const spentSoFar = parseFloat(total);
+    const limit = parseFloat(employee.monthlySpendLimit);
+    if (spentSoFar + additionalAmount > limit) {
+      return { allowed: false, reason: `This ride would exceed your monthly spend limit of ₦${employee.monthlySpendLimit}` };
+    }
+    return { allowed: true };
+  }
+
+  /** Reporting - spend broken down by employee, for one account. Includes employees with zero transactions? No - only employees who've actually spent something, same reasoning as a bank statement not listing every account you could theoretically have transacted with. */
+  async getSpendByEmployee(accountId: string) {
+    return this.txRepo
+      .createQueryBuilder('tx')
+      .select('tx.employeeUserId', 'employeeUserId')
+      .addSelect('COUNT(*)', 'transactionCount')
+      .addSelect('COALESCE(SUM(tx.amount), 0)', 'totalSpent')
+      .where('tx.corporateAccountId = :accountId', { accountId })
+      .andWhere('tx.direction = :direction', { direction: TransactionDirection.DEBIT })
+      .andWhere('tx.employeeUserId IS NOT NULL')
+      .groupBy('tx.employeeUserId')
+      .orderBy('"totalSpent"', 'DESC')
+      .getRawMany();
+  }
+
+  /** Same shape as getSpendByEmployee(), grouped by department instead - an employee with no department set is simply absent from this list, not lumped into a misleading "unassigned" bucket. */
+  async getSpendByDepartment(accountId: string) {
+    return this.txRepo
+      .createQueryBuilder('tx')
+      .select('tx.department', 'department')
+      .addSelect('COUNT(*)', 'transactionCount')
+      .addSelect('COALESCE(SUM(tx.amount), 0)', 'totalSpent')
+      .where('tx.corporateAccountId = :accountId', { accountId })
+      .andWhere('tx.direction = :direction', { direction: TransactionDirection.DEBIT })
+      .andWhere('tx.department IS NOT NULL')
+      .groupBy('tx.department')
+      .orderBy('"totalSpent"', 'DESC')
+      .getRawMany();
+  }
+
+  /**
+   * Called once, right after a corporate ride's debit succeeds - if
+   * the fare crossed the account's soft threshold, this ride goes on
+   * the owner's after-the-fact review list. Silent no-op when no
+   * threshold is configured or the fare didn't cross it - most
+   * corporate rides never touch this table at all.
+   */
+  async flagRideForApprovalIfNeeded(
+    account: CorporateAccount,
+    rideId: string,
+    employeeUserId: string,
+    fareAmount: number,
+  ): Promise<void> {
+    if (account.requiresApprovalAboveFare == null) return;
+    if (fareAmount <= parseFloat(account.requiresApprovalAboveFare)) return;
+
+    await this.approvalsRepo.save(
+      this.approvalsRepo.create({
+        corporateAccountId: account.id,
+        rideId,
+        employeeUserId,
+        fareAmount: fareAmount.toFixed(2),
+      }),
+    );
+
+    this.events.emit('corporate.ride_flagged_for_approval', { ownerId: account.ownerUserId, rideId, fareAmount });
+  }
+
+  async listApprovals(accountId: string, status?: CorporateApprovalStatus): Promise<CorporateRideApproval[]> {
+    return this.approvalsRepo.find({
+      where: status ? { corporateAccountId: accountId, status } : { corporateAccountId: accountId },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  /**
+   * Records the owner's decision - never reverses the ride or its
+   * charge (see the entity's own doc comment for why this is
+   * deliberately after-the-fact, not a real-time gate). A REJECTED
+   * ride stays exactly as billed; rejection is the company's own
+   * record that this particular trip didn't meet policy, for
+   * whatever internal process (a conversation with the employee, a
+   * reimbursement adjustment) that implies on their end.
+   */
+  async reviewApproval(
+    accountId: string,
+    approvalId: string,
+    reviewerId: string,
+    status: CorporateApprovalStatus,
+    notes?: string,
+  ): Promise<CorporateRideApproval> {
+    const approval = await this.approvalsRepo.findOne({ where: { id: approvalId, corporateAccountId: accountId } });
+    if (!approval) throw new NotFoundException('Approval record not found');
+    if (approval.status !== CorporateApprovalStatus.PENDING) {
+      throw new BadRequestException('This ride has already been reviewed');
+    }
+
+    approval.status = status;
+    approval.reviewedBy = reviewerId;
+    approval.reviewNotes = notes ?? null;
+    approval.reviewedAt = new Date();
+    return this.approvalsRepo.save(approval);
   }
 
   async getAccountForEmployee(userId: string): Promise<CorporateAccount | null> {
@@ -90,13 +303,17 @@ export class CorporateService {
     accountId: string,
     amount: number,
     rideId: string,
+    employeeUserId: string,
   ): Promise<CorporateAccount> {
+    const employee = await this.employeesRepo.findOne({ where: { userId: employeeUserId } });
     return this.applyLedgerChange(
       accountId,
       amount,
       TransactionDirection.DEBIT,
       rideId,
       `Ride payment for trip ${rideId}`,
+      employeeUserId,
+      employee?.department ?? null,
     );
   }
 
@@ -106,6 +323,8 @@ export class CorporateService {
     direction: TransactionDirection,
     referenceId?: string,
     description?: string,
+    employeeUserId?: string | null,
+    department?: string | null,
   ): Promise<CorporateAccount> {
     if (amount <= 0) throw new BadRequestException('Amount must be positive');
 
@@ -136,6 +355,8 @@ export class CorporateService {
         balanceAfter: account.budgetBalance,
         referenceId,
         description,
+        employeeUserId: employeeUserId ?? null,
+        department: department ?? null,
       });
 
       return account;

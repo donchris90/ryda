@@ -37,6 +37,16 @@ export enum DeliveryStatus {
   FAILED = 'failed',
 }
 
+// Set once, at delivery completion, by comparing codCollectedAmount
+// against codAmount - never set retroactively, so it always reflects
+// what actually happened at handoff, not a later admin adjustment
+// (that's what codReconciledAt is for).
+export enum CodCollectionStatus {
+  COLLECTED = 'collected', // collected amount >= expected
+  PARTIAL = 'partial', // collected something, but less than expected
+  FAILED = 'failed', // collected nothing at all
+}
+
 export enum DeliveryCancelledBy {
   CUSTOMER = 'customer',
   DRIVER = 'driver',
@@ -159,6 +169,22 @@ export class DeliveryOrder {
   @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
   codAmount: string | null;
 
+  // What the driver actually reported collecting at handoff - can
+  // differ from codAmount above (customer paid less, refused, or the
+  // driver waived part of it). Null until delivery completes.
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  codCollectedAmount: string | null;
+
+  @Column({ type: 'enum', enum: CodCollectionStatus, nullable: true })
+  codCollectionStatus: CodCollectionStatus | null;
+
+  // Set once an admin has reconciled a PARTIAL/FAILED collection
+  // against the driver's own responsibility for the shortfall (see
+  // LogisticsService.markDelivered()'s own comment on courier
+  // responsibility) - null means still outstanding.
+  @Column({ type: 'timestamp', nullable: true })
+  codReconciledAt: Date | null;
+
   @Column({ type: 'varchar', nullable: true })
   city: string | null;
 
@@ -211,6 +237,36 @@ export class DeliveryOrder {
 
   @Column({ type: 'timestamp', nullable: true })
   deliveredAt: Date | null;
+
+  // ---- Proof of delivery ----
+  // Uploaded via the existing generic POST /storage/upload/:folder
+  // endpoint (same pattern as support-ticket attachments) - these
+  // just link the resulting URLs to the order. Photo is the common
+  // case for most deliveries; signature is only actually captured
+  // when requiresSignature was set at order time (enforced in
+  // LogisticsService.markDelivered(), not just left optional here).
+  @Column({ type: 'varchar', nullable: true })
+  proofPhotoUrl: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  proofSignatureUrl: string | null;
+
+  // Who actually accepted the package, in their own words/spelling -
+  // not assumed to be dropoffContactName, since a neighbour, doorman,
+  // or someone else entirely often signs for a delivery instead of
+  // the named recipient.
+  @Column({ type: 'varchar', nullable: true })
+  proofRecipientName: string | null;
+
+  // Captured from the driver's device at the moment of marking
+  // delivered - independent evidence of where the handoff actually
+  // happened, not just what the order's own dropoff coordinates say
+  // it was supposed to be.
+  @Column({ type: 'double precision', nullable: true })
+  proofDeliveryLat: number | null;
+
+  @Column({ type: 'double precision', nullable: true })
+  proofDeliveryLng: number | null;
 
   @Column({ type: 'timestamp', nullable: true })
   cancelledAt: Date | null;

@@ -35,6 +35,9 @@ export const ALLOWED_MIME_TYPES: Record<string, string[]> = {
     'application/pdf',
   ],
   'profile-photos': ['image/jpeg', 'image/png', 'image/webp'],
+  // Delivery photo evidence and signature captures - both images only,
+  // nothing needs to be a PDF here the way a driver's license might.
+  'delivery-proof': ['image/jpeg', 'image/png', 'image/webp'],
   misc: ['image/jpeg', 'image/png'],
 };
 

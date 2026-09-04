@@ -71,6 +71,17 @@ export class Notification {
   @Column({ type: 'varchar', nullable: true })
   failureReason: string | null;
 
+  // Stable per-attempt-group key (the enqueuing job's own id, when sent
+  // via the queue) - lets a BullMQ retry of the same job tell "have I
+  // already sent this specific channel for this specific event" apart
+  // from "this is a genuinely new notification", so a retry after a
+  // partial failure never re-sends a channel that already succeeded.
+  // Null for notifications sent directly (not queued) - those have no
+  // retry to be idempotent against in the first place.
+  @Index()
+  @Column({ type: 'varchar', nullable: true })
+  idempotencyKey: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 }

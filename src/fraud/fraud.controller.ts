@@ -6,6 +6,7 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { UserRole } from '../common/enums/user-role.enum';
 import { User } from '../users/entities/user.entity';
 import { FraudService } from './fraud.service';
+import { RiskEngineService } from './risk-engine.service';
 import { ReviewFlagDto } from './dto/fraud.dto';
 import { FraudFlagStatus, FraudFlagType } from './entities/fraud-flag.entity';
 import { RequirePermission } from '../common/permissions/require-permission.decorator';
@@ -18,7 +19,16 @@ import { Audit } from '../audit/decorators/audit.decorator';
 @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.SUPPORT_AGENT)
 @RequirePermission(Permission.FRAUD_REVIEW)
 export class FraudController {
-  constructor(private readonly fraudService: FraudService) {}
+  constructor(
+    private readonly fraudService: FraudService,
+    private readonly riskEngineService: RiskEngineService,
+  ) {}
+
+  /** The Fraud page's top metric cards. */
+  @Get('summary')
+  summary() {
+    return this.fraudService.getSummary();
+  }
 
   @Get('flags')
   list(
@@ -35,6 +45,25 @@ export class FraudController {
       page: page ? parseInt(page, 10) : undefined,
       pageSize: pageSize ? parseInt(pageSize, 10) : undefined,
     });
+  }
+
+  /**
+   * The Fraud Center's per-user detail view - risk score/band with
+   * explainable reasons, every device this user has logged in from,
+   * and accounts connected to them (shared device or a flag's own
+   * relatedUserId). Composed here from RiskEngineService + FraudService
+   * rather than making the frontend stitch together three separate
+   * calls - it's one screen, showing one account's full fraud
+   * picture, not three independent lists that happen to share a page.
+   */
+  @Get('profile/:userId')
+  async profile(@Param('userId') userId: string) {
+    const [risk, devices, relatedAccountIds] = await Promise.all([
+      this.riskEngineService.assess(userId),
+      this.fraudService.listDevicesForUser(userId),
+      this.fraudService.findRelatedAccounts(userId),
+    ]);
+    return { risk, devices, relatedAccountIds };
   }
 
   @Patch('flags/:id/review')

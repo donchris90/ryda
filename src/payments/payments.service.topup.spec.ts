@@ -23,7 +23,7 @@ function build(overrides: { existingPending?: any; paystackConfigured?: boolean;
   const events = { emit: jest.fn() } as any;
   const walletsService = {} as any;
 
-  const service = new PaymentsService(paymentsRepo, savedCardsRepo, paystack, config, events, walletsService);
+  const service = new PaymentsService(paymentsRepo, savedCardsRepo, paystack, config, events, walletsService, {} as any, {} as any);
   return { service, paymentsRepo, paystack, getSavedRecord: () => savedRecord };
 }
 

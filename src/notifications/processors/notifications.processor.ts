@@ -24,7 +24,13 @@ export class NotificationsProcessor extends WorkerHost {
   async process(job: Job<NotificationJobData>): Promise<void> {
     const { userId, channels, title, body, metadata, category } = job.data;
     try {
-      await this.notificationsService.notify(userId, channels, title, body, metadata, category);
+      // job.id is stable across every retry attempt of this same job
+      // (BullMQ doesn't mint a new id per attempt) - using it as the
+      // idempotency key is what makes a retry after a partial failure
+      // skip re-sending whichever channels already reached SENT/
+      // SIMULATED on an earlier attempt, rather than re-sending
+      // everything from scratch.
+      await this.notificationsService.notify(userId, channels, title, body, metadata, category, job.id);
     } catch (err) {
       this.logger.warn(`Notification delivery failed for user ${userId} (attempt ${job.attemptsMade}): ${(err as Error).message}`);
       throw err; // let BullMQ's retry/backoff handle it

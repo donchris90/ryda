@@ -6,7 +6,15 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { UserRole } from '../common/enums/user-role.enum';
 import { User } from '../users/entities/user.entity';
 import { CorporateService } from './corporate.service';
-import { AddEmployeeDto, CreateCorporateAccountDto, TopUpBudgetDto } from './dto/corporate.dto';
+import { CorporateApprovalStatus } from './entities/corporate-ride-approval.entity';
+import {
+  AddEmployeeDto,
+  CreateCorporateAccountDto,
+  ReviewApprovalDto,
+  TopUpBudgetDto,
+  UpdateCorporatePolicyDto,
+  UpdateEmployeeDto,
+} from './dto/corporate.dto';
 
 @Controller('corporate')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -44,6 +52,54 @@ export class CorporateController {
   async topUp(@CurrentUser() user: User, @Body() dto: TopUpBudgetDto) {
     const account = await this.corporateService.findByOwner(user.id);
     return this.corporateService.topUp(account.id, dto.amount, 'Manual budget top-up');
+  }
+
+  @Patch('accounts/mine/policy')
+  @Roles(UserRole.CORPORATE)
+  async updatePolicy(@CurrentUser() user: User, @Body() dto: UpdateCorporatePolicyDto) {
+    const account = await this.corporateService.findByOwner(user.id);
+    return this.corporateService.updatePolicy(account.id, dto);
+  }
+
+  @Patch('accounts/mine/employees/:userId')
+  @Roles(UserRole.CORPORATE)
+  async updateEmployee(@CurrentUser() user: User, @Param('userId') employeeUserId: string, @Body() dto: UpdateEmployeeDto) {
+    const account = await this.corporateService.findByOwner(user.id);
+    return this.corporateService.updateEmployee(account.id, employeeUserId, dto);
+  }
+
+  @Get('accounts/mine/reporting/by-employee')
+  @Roles(UserRole.CORPORATE)
+  async spendByEmployee(@CurrentUser() user: User) {
+    const account = await this.corporateService.findByOwner(user.id);
+    return this.corporateService.getSpendByEmployee(account.id);
+  }
+
+  @Get('accounts/mine/reporting/by-department')
+  @Roles(UserRole.CORPORATE)
+  async spendByDepartment(@CurrentUser() user: User) {
+    const account = await this.corporateService.findByOwner(user.id);
+    return this.corporateService.getSpendByDepartment(account.id);
+  }
+
+  @Get('accounts/mine/approvals')
+  @Roles(UserRole.CORPORATE)
+  async listApprovals(@CurrentUser() user: User) {
+    const account = await this.corporateService.findByOwner(user.id);
+    return this.corporateService.listApprovals(account.id);
+  }
+
+  @Patch('accounts/mine/approvals/:id')
+  @Roles(UserRole.CORPORATE)
+  async reviewApproval(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: ReviewApprovalDto) {
+    const account = await this.corporateService.findByOwner(user.id);
+    return this.corporateService.reviewApproval(
+      account.id,
+      id,
+      user.id,
+      dto.status === 'approved' ? CorporateApprovalStatus.APPROVED : CorporateApprovalStatus.REJECTED,
+      dto.notes,
+    );
   }
 
   @Get('admin/accounts')

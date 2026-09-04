@@ -32,6 +32,7 @@ const ALLOWED_FOLDERS = [
   'chat-attachments',
   'support-evidence',
   'profile-photos',
+  'delivery-proof',
 ];
 
 // Matches exactly what StorageService.upload() generates: a UUID plus one

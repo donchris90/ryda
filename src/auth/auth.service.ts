@@ -5,7 +5,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, MoreThan } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomUUID } from 'crypto';
 import { JwtService } from '@nestjs/jwt';
@@ -25,6 +25,20 @@ import { LoginDto } from './dto/login.dto';
 import { SendOtpDto, VerifyOtpDto } from './dto/otp.dto';
 import { AuditService } from '../audit/audit.service';
 import { FraudService } from '../fraud/fraud.service';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationChannel, NotificationCategory } from '../notifications/entities/notification.entity';
+
+/**
+ * Captured at login and at every refresh-rotation, threaded down from
+ * the controller's request object. Everything optional - a missing
+ * piece (no fingerprint sent, IP unavailable behind some proxy setup)
+ * still issues the token, just with a less descriptive session row.
+ */
+export interface SessionContext {
+  deviceFingerprint?: string;
+  ipAddress?: string;
+  userAgent?: string;
+}
 
 @Injectable()
 export class AuthService {
@@ -37,6 +51,7 @@ export class AuthService {
     private readonly config: ConfigService,
     private readonly auditService: AuditService,
     private readonly fraudService: FraudService,
+    private readonly notificationsService: NotificationsService,
     private readonly otpService: OtpService,
     private readonly authTokensService: AuthTokensService,
     private readonly mailerService: MailerService,
@@ -221,7 +236,7 @@ export class AuthService {
     return { verified: true };
   }
 
-  async login(dto: LoginDto) {
+  async login(dto: LoginDto, context: SessionContext = {}) {
     const user = await this.usersService.findByEmailWithPassword(dto.email);
     if (!user || !user.passwordHash) {
       await this.auditService.log({
@@ -262,10 +277,31 @@ export class AuthService {
     });
 
     if (dto.deviceFingerprint) {
-      await this.fraudService.recordDeviceFingerprint(user.id, dto.deviceFingerprint);
+      const { isNewDevice } = await this.fraudService.recordDeviceFingerprint(
+        user.id,
+        dto.deviceFingerprint,
+        context.ipAddress,
+      );
+      if (isNewDevice) {
+        // Best-effort, deliberately not awaited into a failure path -
+        // a notification-send hiccup must never block a legitimate
+        // login. In-app + email only: this isn't urgent enough to
+        // justify SMS cost, and a security notice landing in email is
+        // the conventional place a user would expect to find it.
+        this.notificationsService
+          .notify(
+            user.id,
+            [NotificationChannel.IN_APP, NotificationChannel.EMAIL],
+            'New login to your account',
+            `Your account was just signed in to from a new device${context.ipAddress ? ` (IP ${context.ipAddress})` : ''}. If this wasn't you, change your password immediately.`,
+            undefined,
+            NotificationCategory.SECURITY,
+          )
+          .catch(() => undefined);
+      }
     }
 
-    const tokens = await this.issueTokens(user.id, user.role);
+    const tokens = await this.issueTokens(user.id, user.role, context);
     return { user: this.sanitizeUser(user), ...tokens };
   }
 
@@ -276,7 +312,7 @@ export class AuthService {
    * being replayed), so every refresh token for that user is revoked as a
    * precaution and the caller must log in again.
    */
-  async refresh(refreshToken: string) {
+  async refresh(refreshToken: string, context: SessionContext = {}) {
     let payload: { sub: string; role: string };
     try {
       payload = this.jwtService.verify(refreshToken, {
@@ -300,7 +336,16 @@ export class AuthService {
     await this.refreshTokenRepo.update(stored.id, { revoked: true });
 
     const user = await this.usersService.findById(payload.sub);
-    return this.issueTokens(user.id, user.role);
+    // A plain refresh call (background token renewal) typically carries
+    // no fresh deviceFingerprint from the client - falling back to the
+    // rotating-away token's own recorded context means the session
+    // shown in "my devices" stays descriptive across silent refreshes,
+    // not just at the original login.
+    return this.issueTokens(user.id, user.role, {
+      deviceFingerprint: context.deviceFingerprint ?? stored.deviceFingerprint ?? undefined,
+      ipAddress: context.ipAddress ?? stored.ipAddress ?? undefined,
+      userAgent: context.userAgent ?? stored.userAgent ?? undefined,
+    });
   }
 
   /** Revokes a single refresh token (logout on one device). */
@@ -316,12 +361,39 @@ export class AuthService {
     return { loggedOut: true };
   }
 
+  /**
+   * "My devices" / session management - every currently-active login
+   * for this user, most recent first. Deliberately excludes revoked
+   * and expired sessions - a user reviewing "where am I logged in"
+   * wants to see what's actually live, not a full historical log.
+   */
+  async listSessions(userId: string): Promise<RefreshToken[]> {
+    return this.refreshTokenRepo.find({
+      where: { userId, revoked: false, expiresAt: MoreThan(new Date()) },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  /**
+   * Revokes one specific session by id - "log out this device" without
+   * logging out everywhere. Scoped to the requesting user: a session
+   * id belonging to someone else must fail closed as "not found", not
+   * leak whether that id exists at all.
+   */
+  async revokeSession(userId: string, sessionId: string): Promise<{ loggedOut: boolean }> {
+    const result = await this.refreshTokenRepo.update({ id: sessionId, userId, revoked: false }, { revoked: true });
+    if (!result.affected) {
+      throw new BadRequestException('Session not found');
+    }
+    return { loggedOut: true };
+  }
+
   private sanitizeUser(user: User) {
     const { passwordHash, ...safe } = user;
     return safe;
   }
 
-  private async issueTokens(userId: string, role: string) {
+  private async issueTokens(userId: string, role: string, context: SessionContext = {}) {
     // A random jti ensures two tokens issued within the same second (e.g.
     // rapid refresh calls) are never byte-identical, since JWT signing is
     // otherwise deterministic for identical payload+iat+secret.
@@ -343,6 +415,9 @@ export class AuthService {
         userId,
         tokenHash: this.hashToken(refreshToken),
         expiresAt: this.resolveExpiry(refreshExpiresIn),
+        deviceFingerprint: context.deviceFingerprint ?? null,
+        ipAddress: context.ipAddress ?? null,
+        userAgent: context.userAgent ?? null,
       }),
     );
 

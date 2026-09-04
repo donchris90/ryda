@@ -8,7 +8,7 @@ function fakeUser(overrides: Partial<any> = {}) {
 
 function build(overrides: { existingPending?: any; user?: any } = {}) {
   const transferRequestsRepo = { findOne: jest.fn().mockResolvedValue(overrides.existingPending ?? null), save: jest.fn(async (d: any) => ({ id: 'request-1', expiresAt: new Date(Date.now() + 600_000), ...d })), create: jest.fn((d) => d) } as any;
-  const txRepo = { find: jest.fn().mockResolvedValue([]) } as any;
+  const txRepo = { find: jest.fn().mockResolvedValue([]), count: jest.fn().mockResolvedValue(0) } as any;
   const walletsService = {
     getByUserId: jest.fn().mockResolvedValue({ id: 'wallet-1', balance: '10000.00' }),
   } as any;
@@ -19,8 +19,9 @@ function build(overrides: { existingPending?: any; user?: any } = {}) {
   } as any;
   const otpService = { send: jest.fn().mockResolvedValue({ expiresInSeconds: 300 }) } as any;
   const settingsService = { getNumber: jest.fn().mockImplementation((_key, fallback) => Promise.resolve(fallback)) } as any;
+  const fraudService = { checkWalletVelocity: jest.fn().mockResolvedValue(undefined) } as any;
 
-  const service = new WalletTransfersService(transferRequestsRepo, txRepo, walletsService, usersService, otpService, settingsService);
+  const service = new WalletTransfersService(transferRequestsRepo, txRepo, walletsService, usersService, otpService, settingsService, fraudService);
   return { service, transferRequestsRepo, otpService };
 }
 
@@ -77,7 +78,7 @@ describe('WalletTransfersService.expireStaleRequests() - proactive cleanup for a
     };
     const transferRequestsRepo = { createQueryBuilder: jest.fn().mockReturnValue(qb) } as any;
     const service = new WalletTransfersService(
-      transferRequestsRepo, {} as any, {} as any, {} as any, {} as any, {} as any,
+      transferRequestsRepo, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
     );
     return { service, qb };
   }
@@ -95,5 +96,56 @@ describe('WalletTransfersService.expireStaleRequests() - proactive cleanup for a
     const { service } = buildWithQueryBuilder(0);
 
     await expect(service.expireStaleRequests()).resolves.toBeUndefined();
+  });
+});
+
+describe('WalletTransfersService.confirm() - wallet-velocity detection', () => {
+  function buildForConfirm(overrides: { txCount?: number; fraudService?: any } = {}) {
+    const pendingRequest = {
+      id: 'request-1',
+      senderId: 'sender-1',
+      recipientId: 'recipient-1',
+      amount: '500.00',
+      fee: '10.00',
+      note: null,
+      status: WalletTransferStatus.PENDING,
+      expiresAt: new Date(Date.now() + 600_000),
+    };
+    const transferRequestsRepo = {
+      findOne: jest.fn().mockResolvedValue(pendingRequest),
+      save: jest.fn(async (d: any) => d),
+    } as any;
+    const txRepo = { find: jest.fn().mockResolvedValue([]), count: jest.fn().mockResolvedValue(overrides.txCount ?? 0) } as any;
+    const walletsService = {
+      getByUserId: jest.fn().mockResolvedValue({ id: 'wallet-sender', balance: '10000.00' }),
+      transfer: jest.fn().mockResolvedValue({ senderWallet: { balance: '9490.00' }, recipientWallet: {} }),
+    } as any;
+    const usersService = {
+      findById: jest.fn().mockResolvedValue({ id: 'sender-1', phone: '+2348011110000', firstName: 'Sender', lastName: 'One' }),
+    } as any;
+    const otpService = { verify: jest.fn().mockResolvedValue(undefined) } as any;
+    const settingsService = { getNumber: jest.fn() } as any;
+    const fraudService = { checkWalletVelocity: jest.fn().mockResolvedValue(undefined), ...overrides.fraudService };
+
+    const service = new WalletTransfersService(transferRequestsRepo, txRepo, walletsService, usersService, otpService, settingsService, fraudService);
+    return { service, txRepo, fraudService };
+  }
+
+  it('checks the velocity pattern (with the recent-transfer count) once a transfer genuinely completes', async () => {
+    const { service, fraudService } = buildForConfirm({ txCount: 6 });
+
+    await service.confirm('sender-1', { transferRequestId: 'request-1', otpCode: '123456' } as any);
+
+    expect(fraudService.checkWalletVelocity).toHaveBeenCalledWith('sender-1', 6);
+  });
+
+  it('never breaks the transfer response if the fraud check itself fails', async () => {
+    const { service } = buildForConfirm({
+      fraudService: { checkWalletVelocity: jest.fn().mockRejectedValue(new Error('fraud service down')) },
+    });
+
+    await expect(
+      service.confirm('sender-1', { transferRequestId: 'request-1', otpCode: '123456' } as any),
+    ).resolves.toBeDefined();
   });
 });

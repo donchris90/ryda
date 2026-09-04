@@ -1,12 +1,13 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { WithdrawalsService } from './withdrawals.service';
 import { WithdrawalStatus } from './entities/withdrawal-request.entity';
+import { RiskBand } from '../fraud/risk-engine.service';
 
 function fakeUser(overrides: Partial<any> = {}) {
   return { id: 'user-1', phone: '+2348011110000', isPhoneVerified: true, ...overrides };
 }
 
-function build(overrides: { existingPending?: any; user?: any } = {}) {
+function build(overrides: { existingPending?: any; user?: any; riskEngineService?: any } = {}) {
   const bankAccountsRepo = { findOne: jest.fn().mockResolvedValue({ id: 'bank-1', userId: 'user-1', bankName: 'Test Bank', accountNumber: '0123456789', accountName: 'User One', paystackRecipientCode: 'RCP_1' }) } as any;
   const withdrawalsRepo = { findOne: jest.fn().mockResolvedValue(overrides.existingPending ?? null), save: jest.fn((d) => d), create: jest.fn((d) => d) } as any;
   const walletsService = { getByUserId: jest.fn().mockResolvedValue({ id: 'wallet-1', balance: '10000.00' }) } as any;
@@ -15,9 +16,24 @@ function build(overrides: { existingPending?: any; user?: any } = {}) {
   const events = { emit: jest.fn() } as any;
   const usersService = { findById: jest.fn().mockResolvedValue(overrides.user ?? fakeUser()) } as any;
   const otpService = { send: jest.fn().mockResolvedValue({ expiresInSeconds: 300 }) } as any;
+  const riskEngineService = overrides.riskEngineService ?? {
+    assess: jest.fn().mockResolvedValue({ userId: 'user-1', score: 0, band: RiskBand.LOW, reasons: [] }),
+  };
+  const fraudService = { raiseFlag: jest.fn().mockResolvedValue(undefined) } as any;
 
-  const service = new WithdrawalsService(bankAccountsRepo, withdrawalsRepo, walletsService, paystack, config, events, usersService, otpService);
-  return { service, withdrawalsRepo, otpService };
+  const service = new WithdrawalsService(
+    bankAccountsRepo,
+    withdrawalsRepo,
+    walletsService,
+    paystack,
+    config,
+    events,
+    usersService,
+    otpService,
+    riskEngineService,
+    fraudService,
+  );
+  return { service, withdrawalsRepo, otpService, riskEngineService, fraudService };
 }
 
 describe('WithdrawalsService.initiateWithdrawal() - duplicate pending request prevention', () => {
@@ -53,6 +69,59 @@ describe('WithdrawalsService.initiateWithdrawal() - duplicate pending request pr
   });
 });
 
+describe('WithdrawalsService.initiateWithdrawal() - risk-based graduated response', () => {
+  it('allows LOW-risk requests through untouched, with no flag raised', async () => {
+    const { service, fraudService } = build({
+      riskEngineService: { assess: jest.fn().mockResolvedValue({ userId: 'user-1', score: 5, band: RiskBand.LOW, reasons: [] }) },
+    });
+
+    await expect(service.initiateWithdrawal('user-1', 'bank-1', 1000)).resolves.toBeDefined();
+    expect(fraudService.raiseFlag).not.toHaveBeenCalled();
+  });
+
+  it('allows MEDIUM-risk requests through untouched too - only HIGH and CRITICAL trigger a graduated response', async () => {
+    const { service, fraudService } = build({
+      riskEngineService: { assess: jest.fn().mockResolvedValue({ userId: 'user-1', score: 25, band: RiskBand.MEDIUM, reasons: [] }) },
+    });
+
+    await expect(service.initiateWithdrawal('user-1', 'bank-1', 1000)).resolves.toBeDefined();
+    expect(fraudService.raiseFlag).not.toHaveBeenCalled();
+  });
+
+  it('allows a HIGH-risk request to proceed, but flags it for admin review', async () => {
+    const { service, otpService, fraudService } = build({
+      riskEngineService: { assess: jest.fn().mockResolvedValue({ userId: 'user-1', score: 60, band: RiskBand.HIGH, reasons: [] }) },
+    });
+
+    await expect(service.initiateWithdrawal('user-1', 'bank-1', 1000)).resolves.toBeDefined();
+    expect(otpService.send).toHaveBeenCalled(); // still goes through the normal verification step
+    expect(fraudService.raiseFlag).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'high_risk_withdrawal_attempt', userId: 'user-1', severity: 'high' }),
+    );
+  });
+
+  it('blocks a CRITICAL-risk request outright - the only band that actually refuses the operation', async () => {
+    const { service, otpService, fraudService } = build({
+      riskEngineService: { assess: jest.fn().mockResolvedValue({ userId: 'user-1', score: 95, band: RiskBand.CRITICAL, reasons: [] }) },
+    });
+
+    await expect(service.initiateWithdrawal('user-1', 'bank-1', 1000)).rejects.toThrow(BadRequestException);
+    expect(otpService.send).not.toHaveBeenCalled();
+    expect(fraudService.raiseFlag).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'critical_risk_withdrawal_blocked', userId: 'user-1', severity: 'critical' }),
+    );
+  });
+
+  it('a CRITICAL-risk block never touches the wallet balance or creates a withdrawal record', async () => {
+    const { service, withdrawalsRepo } = build({
+      riskEngineService: { assess: jest.fn().mockResolvedValue({ userId: 'user-1', score: 95, band: RiskBand.CRITICAL, reasons: [] }) },
+    });
+
+    await expect(service.initiateWithdrawal('user-1', 'bank-1', 1000)).rejects.toThrow(BadRequestException);
+    expect(withdrawalsRepo.save).not.toHaveBeenCalled();
+  });
+});
+
 describe('WithdrawalsService.expireStaleRequests() - proactive cleanup for abandoned requests', () => {
   function buildWithQueryBuilder(affected = 1) {
     const executeMock = jest.fn().mockResolvedValue({ affected });
@@ -65,7 +134,7 @@ describe('WithdrawalsService.expireStaleRequests() - proactive cleanup for aband
     };
     const withdrawalsRepo = { createQueryBuilder: jest.fn().mockReturnValue(qb) } as any;
     const service = new WithdrawalsService(
-      {} as any, withdrawalsRepo, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
+      {} as any, withdrawalsRepo, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any,
     );
     return { service, qb };
   }

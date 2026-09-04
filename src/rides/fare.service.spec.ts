@@ -188,4 +188,92 @@ describe('FareService', () => {
     expect(await withOverride.getCancellationFee()).toBe(1500);
     expect(await withoutOverride.getCancellationFee()).toBe(500); // env default
   });
+
+  describe('multi-stop routing', () => {
+    // Deliberately well off the direct pickup->dropoff line (which runs
+    // roughly SSE) - a stop nudged only slightly off-path can add just
+    // enough distance to round away when each leg's duration is rounded
+    // to the nearest minute separately. This one adds a real detour.
+    const stop1 = { lat: 6.60, lng: 3.50, address: 'Opebi Road' };
+
+    it('a trip with a stop covers MORE distance than the same pickup/dropoff with no stop at all', async () => {
+      const service = new FareService(makeConfigService(), makeGoogleMapsService(), makeSettingsService());
+      const daytime = new Date('2026-01-01T14:00:00');
+
+      const direct = await service.estimate(RideCategory.ECONOMY, pickup, dropoff, { at: daytime });
+      const withStop = await service.estimate(RideCategory.ECONOMY, pickup, dropoff, { at: daytime, stops: [stop1] });
+
+      expect(withStop.estimatedDistanceKm).toBeGreaterThan(direct.estimatedDistanceKm);
+    });
+
+    it('a trip with a stop takes MORE time than the same trip with no stop', async () => {
+      const service = new FareService(makeConfigService(), makeGoogleMapsService(), makeSettingsService());
+      const daytime = new Date('2026-01-01T14:00:00');
+
+      const direct = await service.estimate(RideCategory.ECONOMY, pickup, dropoff, { at: daytime });
+      const withStop = await service.estimate(RideCategory.ECONOMY, pickup, dropoff, { at: daytime, stops: [stop1] });
+
+      expect(withStop.estimatedDurationMin).toBeGreaterThan(direct.estimatedDurationMin);
+    });
+
+    it('costs strictly more than the direct trip - the extra distance and time both feed the fare', async () => {
+      const service = new FareService(makeConfigService(), makeGoogleMapsService(), makeSettingsService());
+      const daytime = new Date('2026-01-01T14:00:00');
+
+      const direct = await service.estimate(RideCategory.ECONOMY, pickup, dropoff, { at: daytime });
+      const withStop = await service.estimate(RideCategory.ECONOMY, pickup, dropoff, { at: daytime, stops: [stop1] });
+
+      expect(withStop.totalFare).toBeGreaterThan(direct.totalFare);
+    });
+
+    it('sums distance/time across MULTIPLE stops (pickup -> stop1 -> stop2 -> dropoff), not just one', async () => {
+      const stop2 = { lat: 6.45, lng: 3.40, address: 'Awolowo Road' };
+      const service = new FareService(makeConfigService(), makeGoogleMapsService(), makeSettingsService());
+      const daytime = new Date('2026-01-01T14:00:00');
+
+      const oneStop = await service.estimate(RideCategory.ECONOMY, pickup, dropoff, { at: daytime, stops: [stop1] });
+      const twoStops = await service.estimate(RideCategory.ECONOMY, pickup, dropoff, { at: daytime, stops: [stop1, stop2] });
+
+      expect(twoStops.estimatedDistanceKm).toBeGreaterThan(oneStop.estimatedDistanceKm);
+    });
+
+    it('an empty stops array behaves identically to no stops at all', async () => {
+      const service = new FareService(makeConfigService(), makeGoogleMapsService(), makeSettingsService());
+      const daytime = new Date('2026-01-01T14:00:00');
+
+      const noStopsField = await service.estimate(RideCategory.ECONOMY, pickup, dropoff, { at: daytime });
+      const emptyStopsArray = await service.estimate(RideCategory.ECONOMY, pickup, dropoff, { at: daytime, stops: [] });
+
+      expect(emptyStopsArray.estimatedDistanceKm).toBe(noStopsField.estimatedDistanceKm);
+    });
+
+    it('reports usedRealRouting false when even one leg falls back to Haversine, not just the first/last leg', async () => {
+      const googleMaps = makeGoogleMapsService(true);
+      // First leg (pickup -> stop1) succeeds with real directions,
+      // second leg (stop1 -> dropoff) fails and falls back.
+      googleMaps.getDirections
+        .mockResolvedValueOnce({ distanceKm: 5, durationMin: 10 })
+        .mockResolvedValueOnce(null);
+      const service = new FareService(makeConfigService(), googleMaps, makeSettingsService());
+      const daytime = new Date('2026-01-01T14:00:00');
+
+      const result = await service.estimate(RideCategory.ECONOMY, pickup, dropoff, { at: daytime, stops: [stop1] });
+
+      expect(result.usedRealRouting).toBe(false);
+    });
+
+    it('reports usedRealRouting true only when EVERY leg got real directions', async () => {
+      const googleMaps = makeGoogleMapsService(true);
+      googleMaps.getDirections
+        .mockResolvedValueOnce({ distanceKm: 5, durationMin: 10 })
+        .mockResolvedValueOnce({ distanceKm: 8, durationMin: 15 });
+      const service = new FareService(makeConfigService(), googleMaps, makeSettingsService());
+      const daytime = new Date('2026-01-01T14:00:00');
+
+      const result = await service.estimate(RideCategory.ECONOMY, pickup, dropoff, { at: daytime, stops: [stop1] });
+
+      expect(result.usedRealRouting).toBe(true);
+      expect(googleMaps.getDirections).toHaveBeenCalledTimes(2); // pickup->stop1, stop1->dropoff
+    });
+  });
 });

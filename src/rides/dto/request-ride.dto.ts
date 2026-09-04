@@ -1,7 +1,19 @@
-import { IsBoolean, IsDateString, IsEnum, IsNumber, IsOptional, IsString } from 'class-validator';
+import { IsBoolean, IsDateString, IsEnum, IsNumber, IsOptional, IsString, ValidateNested, ArrayMaxSize } from 'class-validator';
+import { Type } from 'class-transformer';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { RideCategory, PaymentMethod } from '../../common/enums/ride.enum';
 import { DispatchMode } from '../../candidate-search/candidate-search.types';
+
+export class RideStopDto {
+  @IsNumber()
+  lat: number;
+
+  @IsNumber()
+  lng: number;
+
+  @IsString()
+  address: string;
+}
 
 export class RequestRideDto {
   @IsEnum(RideCategory)
@@ -85,4 +97,16 @@ export class RequestRideDto {
   @IsOptional()
   @IsEnum(DispatchMode)
   dispatchMode?: DispatchMode;
+
+  // Pickup → stop 1 → stop 2 → ... → dropoff, in visit order. Capped
+  // at 3 - a genuinely long waypoint chain starts looking like a
+  // different product (a delivery route, not a ride), and each extra
+  // stop is another real-routing API call on top of the base
+  // pickup→dropoff one.
+  @ApiPropertyOptional({ type: [RideStopDto], description: 'Intermediate stops in visit order, between pickup and dropoff' })
+  @IsOptional()
+  @ValidateNested({ each: true })
+  @Type(() => RideStopDto)
+  @ArrayMaxSize(3)
+  stops?: RideStopDto[];
 }

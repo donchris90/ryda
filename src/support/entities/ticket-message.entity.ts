@@ -24,6 +24,13 @@ export class TicketMessage {
   @Column('text')
   message: string;
 
+  // Uploaded separately via the existing generic POST
+  // /storage/upload/support-evidence endpoint - this just links the
+  // resulting URL to the message. Null for the overwhelming majority
+  // of messages, which are plain text.
+  @Column({ type: 'varchar', nullable: true })
+  attachmentUrl: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 }

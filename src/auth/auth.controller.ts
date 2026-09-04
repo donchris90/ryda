@@ -1,4 +1,5 @@
-import { Body, Controller, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post, Req, UseGuards } from '@nestjs/common';
+import type { Request } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags, ApiTooManyRequestsResponse, ApiUnauthorizedResponse } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
@@ -50,8 +51,12 @@ export class AuthController {
   @ApiTooManyRequestsResponse({ description: 'Rate limited — 10 requests/minute per IP.' })
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('login')
-  login(@Body() dto: LoginDto) {
-    return this.authService.login(dto);
+  login(@Body() dto: LoginDto, @Req() req: Request) {
+    return this.authService.login(dto, {
+      deviceFingerprint: dto.deviceFingerprint,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
   }
 
   @ApiOperation({ summary: 'Verify an email address', description: 'Consumes the single-use token from the verification link and activates the account.' })
@@ -117,8 +122,30 @@ export class AuthController {
   @ApiOperation({ summary: 'Exchange a refresh token for a new pair', description: 'Rotates the token — the presented refresh token is revoked and a new one issued. Reusing an already-revoked token revokes ALL of that user\'s tokens (theft response).' })
   @ApiUnauthorizedResponse({ description: 'Invalid, expired, or reused (revoked) refresh token.' })
   @Post('refresh')
-  refresh(@Body() dto: RefreshTokenDto) {
-    return this.authService.refresh(dto.refreshToken);
+  refresh(@Body() dto: RefreshTokenDto, @Req() req: Request) {
+    return this.authService.refresh(dto.refreshToken, {
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+  }
+
+  @ApiOperation({
+    summary: 'List my active sessions',
+    description: 'Every currently active login (device/IP/user-agent, when known) - "where am I logged in".',
+  })
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard)
+  @Get('sessions')
+  listSessions(@CurrentUser() user: User) {
+    return this.authService.listSessions(user.id);
+  }
+
+  @ApiOperation({ summary: 'Revoke one session', description: 'Logs out a single device/session without affecting others.' })
+  @ApiBearerAuth('access-token')
+  @UseGuards(JwtAuthGuard)
+  @Delete('sessions/:id')
+  revokeSession(@CurrentUser() user: User, @Param('id') id: string) {
+    return this.authService.revokeSession(user.id, id);
   }
 
   @ApiOperation({ summary: 'Log out on one device', description: 'Revokes a single refresh token.' })

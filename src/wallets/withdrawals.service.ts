@@ -13,6 +13,9 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { UsersService } from '../users/users.service';
 import { OtpService } from '../otp/otp.service';
 import { OtpPurpose } from '../otp/otp-code.entity';
+import { RiskEngineService, RiskBand } from '../fraud/risk-engine.service';
+import { FraudService } from '../fraud/fraud.service';
+import { FraudFlagType, FraudFlagSeverity } from '../fraud/entities/fraud-flag.entity';
 
 const WITHDRAWAL_REQUEST_TTL_MINUTES = 10;
 
@@ -31,6 +34,8 @@ export class WithdrawalsService {
     private readonly events: EventEmitter2,
     private readonly usersService: UsersService,
     private readonly otpService: OtpService,
+    private readonly riskEngineService: RiskEngineService,
+    private readonly fraudService: FraudService,
   ) {}
 
   async listBanks() {
@@ -123,6 +128,36 @@ export class WithdrawalsService {
     const minAmount = this.config.get<number>('wallet.minWithdrawalAmount')!;
     if (amount < minAmount) {
       throw new BadRequestException(`Minimum withdrawal amount is ₦${minAmount}.`);
+    }
+
+    // Graduated response, not a binary allow/ban: LOW and MEDIUM risk
+    // proceed through the same OTP-verified flow every withdrawal
+    // already goes through - that OTP step already IS this system's
+    // "require verification" action for everyone. HIGH additionally
+    // gets flagged for admin review without being blocked (a real
+    // withdrawal request going through, just with eyes on it).
+    // CRITICAL is the one band that actually blocks the operation -
+    // never the account itself, never anything but this one request;
+    // the user can still do everything else on the platform.
+    const risk = await this.riskEngineService.assess(userId);
+    if (risk.band === RiskBand.CRITICAL) {
+      await this.fraudService.raiseFlag({
+        type: FraudFlagType.CRITICAL_RISK_WITHDRAWAL_BLOCKED,
+        userId,
+        severity: FraudFlagSeverity.CRITICAL,
+        details: { amount, riskScore: risk.score, reasonCount: risk.reasons.length },
+      });
+      throw new BadRequestException(
+        'This withdrawal cannot be processed right now — please contact support to continue.',
+      );
+    }
+    if (risk.band === RiskBand.HIGH) {
+      await this.fraudService.raiseFlag({
+        type: FraudFlagType.HIGH_RISK_WITHDRAWAL_ATTEMPT,
+        userId,
+        severity: FraudFlagSeverity.HIGH,
+        details: { amount, riskScore: risk.score, reasonCount: risk.reasons.length },
+      });
     }
 
     const bankAccount = await this.bankAccountsRepo.findOne({ where: { id: bankAccountId } });

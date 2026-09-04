@@ -36,6 +36,7 @@ function buildService(overrides: Record<string, any> = {}) {
     findOne: jest.fn(),
     createQueryBuilder: jest.fn(() => queryBuilder),
     update: jest.fn().mockResolvedValue(undefined),
+    count: jest.fn().mockResolvedValue(0),
     ...overrides.ridesRepo,
   };
 
@@ -76,6 +77,8 @@ function buildService(overrides: Record<string, any> = {}) {
     candidateSearchService: {},
     driverRankingService: {},
     geofenceService: { isWithinServiceArea: jest.fn().mockResolvedValue(true), checkPoint: jest.fn().mockResolvedValue([]) },
+    airportService: {},
+    fraudService: { checkRepeatedCancellations: jest.fn().mockResolvedValue(undefined), ...overrides.fraudService },
   };
 
   const service = new RidesService(
@@ -104,7 +107,8 @@ function buildService(overrides: Record<string, any> = {}) {
     deps.candidateSearchService as any,
     deps.driverRankingService as any,
     deps.geofenceService as any,
-    {} as any, // airportService (not exercised by this suite's scenarios)
+    deps.airportService as any,
+    deps.fraudService as any,
   );
 
   return { service, deps, queryBuilder };
@@ -212,5 +216,48 @@ describe('RidesService.cancelRide — atomic cancellation claim (batch 9)', () =
     // that acceptRide() just reserved ON_TRIP is never silently restored
     // to online by this losing cancel attempt.
     expect(deps.driversService.restoreAvailabilityAfterTrip).not.toHaveBeenCalled();
+  });
+});
+
+describe('RidesService.cancelRide() - repeated-cancellation detection', () => {
+  it('checks the pattern (with the recent-cancellation count) when the PASSENGER cancels', async () => {
+    const { service, deps } = buildService();
+    deps.ridesRepo.findOne.mockResolvedValue(fakeRide({ status: RideStatus.SEARCHING }));
+    deps.ridesRepo.count.mockResolvedValue(5);
+
+    await service.cancelRide('ride-1', 'passenger-1', CancelledBy.PASSENGER, {});
+
+    expect(deps.fraudService.checkRepeatedCancellations).toHaveBeenCalledWith('passenger-1', 5);
+  });
+
+  it('never checks the pattern when the DRIVER cancels - this signal is about passenger behavior specifically', async () => {
+    const { service, deps } = buildService();
+    deps.ridesRepo.findOne.mockResolvedValue(fakeRide({ status: RideStatus.ACCEPTED, driverId: 'driver-1' }));
+
+    await service.cancelRide('ride-1', 'driver-1', CancelledBy.DRIVER, {});
+
+    expect(deps.fraudService.checkRepeatedCancellations).not.toHaveBeenCalled();
+  });
+
+  it('never checks the pattern when an ADMIN cancels on the passenger\'s behalf', async () => {
+    const { service, deps } = buildService();
+    deps.ridesRepo.findOne.mockResolvedValue(fakeRide({ status: RideStatus.SEARCHING }));
+
+    await service.cancelRide('ride-1', 'admin-1', CancelledBy.ADMIN, { reason: 'ops override' });
+
+    expect(deps.fraudService.checkRepeatedCancellations).not.toHaveBeenCalled();
+  });
+
+  it('counts only this exact passenger\'s own prior self-cancellations, not the whole platform\'s', async () => {
+    const { service, deps } = buildService();
+    deps.ridesRepo.findOne.mockResolvedValue(fakeRide({ status: RideStatus.SEARCHING, passengerId: 'passenger-9' }));
+
+    await service.cancelRide('ride-1', 'passenger-9', CancelledBy.PASSENGER, {});
+
+    expect(deps.ridesRepo.count).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ passengerId: 'passenger-9', cancelledBy: CancelledBy.PASSENGER }),
+      }),
+    );
   });
 });

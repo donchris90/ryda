@@ -15,6 +15,7 @@ import {
   DeliveryStatus,
   DeliveryVehicleType,
   DeliveryDispatchMode,
+  CodCollectionStatus,
 } from './entities/delivery-order.entity';
 import {
   EstimateDeliveryDto,
@@ -32,6 +33,7 @@ import { haversineDistanceKm } from '../common/utils/geo.util';
 import { DriversService } from '../drivers/drivers.service';
 import { VehiclesService } from '../vehicles/vehicles.service';
 import { WalletsService } from '../wallets/wallets.service';
+import { User } from '../users/entities/user.entity';
 import { CommissionService } from '../commission/commission.service';
 import { CorporateService } from '../corporate/corporate.service';
 import { FleetService } from '../fleet/fleet.service';
@@ -84,6 +86,17 @@ export interface CourierCandidateResult {
   etaMinutes: number;
   distanceKm: number;
 }
+
+// Every status before DELIVERED/CANCELLED/FAILED - what "active
+// deliveries" means for the admin list's activeOnly filter.
+const ACTIVE_DELIVERY_STATUSES = [
+  DeliveryStatus.REQUESTED,
+  DeliveryStatus.SEARCHING,
+  DeliveryStatus.ACCEPTED,
+  DeliveryStatus.PICKUP_ARRIVED,
+  DeliveryStatus.PICKED_UP,
+  DeliveryStatus.IN_TRANSIT,
+];
 
 @Injectable()
 export class LogisticsService {
@@ -485,6 +498,164 @@ export class LogisticsService {
     return order;
   }
 
+  /**
+   * COD orders where the driver reported collecting less than
+   * expected (or nothing at all) and nobody has reconciled it yet -
+   * the admin worklist this feature exists to drive. A COLLECTED
+   * order never appears here at all (nothing to reconcile); a
+   * PARTIAL/FAILED one drops off the list the moment codReconciledAt
+   * is set, not before.
+   */
+  async listOutstandingCodReconciliations(page = 1, limit = 25) {
+    const qb = this.ordersRepo
+      .createQueryBuilder('order')
+      .where('order.isCod = true')
+      .andWhere('order.codCollectionStatus IN (:...statuses)', {
+        statuses: [CodCollectionStatus.PARTIAL, CodCollectionStatus.FAILED],
+      })
+      .andWhere('order.codReconciledAt IS NULL')
+      .orderBy('order.deliveredAt', 'ASC'); // oldest shortfall first
+
+    const total = await qb.getCount();
+    const items = await qb
+      .offset((page - 1) * limit)
+      .limit(limit)
+      .getMany();
+
+    return { items, total, page, limit };
+  }
+
+  /** Marks a COD shortfall as reconciled - the debt itself (recorded at delivery time, see markDelivered()) is settled separately via ReconciliationService, same as any other driver debt. */
+  async reconcileCodShortfall(orderId: string): Promise<DeliveryOrder> {
+    const order = await this.findById(orderId);
+    if (!order.isCod || order.codCollectionStatus === CodCollectionStatus.COLLECTED) {
+      throw new BadRequestException('This order has no outstanding COD shortfall to reconcile');
+    }
+    order.codReconciledAt = new Date();
+    return this.ordersRepo.save(order);
+  }
+
+  /**
+   * Admin delivery list/search - same gap RidesService.listForAdmin()
+   * closed for rides, now closed here: before this, nothing let staff
+   * look up deliveries at all beyond a customer's or driver's own
+   * `/mine` view. Same query-builder join pattern (User joined twice
+   * by role, no new service dependencies just for names) as that
+   * method, deliberately kept identical rather than inventing a
+   * different shape for a very similar list.
+   */
+  async listForAdmin(
+    filter?: { status?: DeliveryStatus; activeOnly?: boolean; search?: string },
+    page = 1,
+    limit = 25,
+  ) {
+    const qb = this.ordersRepo
+      .createQueryBuilder('order')
+      .leftJoin(User, 'customer', 'customer.id::text = order.customerId')
+      .leftJoin(User, 'driver', 'driver.id::text = order.driverId')
+      .select('order.id', 'id')
+      .addSelect('order.status', 'status')
+      .addSelect('order.category', 'category')
+      .addSelect('order.vehicleType', 'vehicleType')
+      .addSelect('order.pickupAddress', 'pickupAddress')
+      .addSelect('order.dropoffAddress', 'dropoffAddress')
+      .addSelect('order.city', 'city')
+      .addSelect('order.totalFare', 'totalFare')
+      .addSelect('order.paymentMethod', 'paymentMethod')
+      .addSelect('order.isCod', 'isCod')
+      .addSelect('order.codCollectionStatus', 'codCollectionStatus')
+      .addSelect('order.createdAt', 'createdAt')
+      .addSelect('order.deliveredAt', 'deliveredAt')
+      .addSelect('customer.firstName', 'customerFirstName')
+      .addSelect('customer.lastName', 'customerLastName')
+      .addSelect('customer.phone', 'customerPhone')
+      .addSelect('driver.firstName', 'driverFirstName')
+      .addSelect('driver.lastName', 'driverLastName')
+      .addSelect('driver.phone', 'driverPhone')
+      .orderBy('order.createdAt', 'DESC');
+
+    if (filter?.status) {
+      qb.andWhere('order.status = :status', { status: filter.status });
+    }
+    if (filter?.activeOnly) {
+      qb.andWhere('order.status IN (:...activeStatuses)', { activeStatuses: ACTIVE_DELIVERY_STATUSES });
+    }
+    if (filter?.search) {
+      qb.andWhere(
+        `(CAST(order.id AS TEXT) ILIKE :search
+          OR customer."firstName" ILIKE :search OR customer."lastName" ILIKE :search OR customer.phone ILIKE :search
+          OR driver."firstName" ILIKE :search OR driver."lastName" ILIKE :search OR driver.phone ILIKE :search)`,
+        { search: `%${filter.search}%` },
+      );
+    }
+
+    const total = await qb.getCount();
+    const items = await qb
+      .offset((page - 1) * limit)
+      .limit(limit)
+      .getRawMany();
+
+    return { items, total, page, limit };
+  }
+
+  /**
+   * Revenue over a date range (defaults to all time) - only counts
+   * DELIVERED orders, since a cancelled/failed order never actually
+   * earned anything regardless of what its estimated fare said.
+   */
+  async getRevenueSummary(from?: Date, to?: Date) {
+    const qb = this.ordersRepo
+      .createQueryBuilder('order')
+      .where('order.status = :status', { status: DeliveryStatus.DELIVERED });
+    if (from) qb.andWhere('order.deliveredAt >= :from', { from });
+    if (to) qb.andWhere('order.deliveredAt <= :to', { to });
+
+    const row = await qb
+      .select('COUNT(*)', 'orderCount')
+      .addSelect('COALESCE(SUM(order.totalFare), 0)', 'totalRevenue')
+      .addSelect('COALESCE(SUM(order.commissionAmount), 0)', 'totalCommission')
+      .addSelect('COALESCE(SUM(order.driverEarnings), 0)', 'totalDriverEarnings')
+      .getRawOne();
+
+    const orderCount = parseInt(row.orderCount, 10);
+    return {
+      orderCount,
+      totalRevenue: parseFloat(row.totalRevenue).toFixed(2),
+      totalCommission: parseFloat(row.totalCommission).toFixed(2),
+      totalDriverEarnings: parseFloat(row.totalDriverEarnings).toFixed(2),
+      averageFare: orderCount > 0 ? (parseFloat(row.totalRevenue) / orderCount).toFixed(2) : '0.00',
+    };
+  }
+
+  /**
+   * Per-courier delivery stats - completion/failure/cancellation
+   * counts, average rating, total earnings, and COD reliability (the
+   * share of their COD deliveries that came back fully collected,
+   * not partial or failed). A driver with zero COD deliveries gets
+   * null here rather than a misleading 100% or 0%.
+   */
+  async getCourierPerformance(driverUserId: string) {
+    const orders = await this.ordersRepo.find({ where: { driverId: driverUserId } });
+
+    const delivered = orders.filter((o) => o.status === DeliveryStatus.DELIVERED);
+    const failed = orders.filter((o) => o.status === DeliveryStatus.FAILED);
+    const cancelled = orders.filter((o) => o.status === DeliveryStatus.CANCELLED);
+    const rated = delivered.filter((o) => o.driverRating != null);
+    const codDelivered = delivered.filter((o) => o.isCod);
+    const codFullyCollected = codDelivered.filter((o) => o.codCollectionStatus === CodCollectionStatus.COLLECTED);
+
+    return {
+      driverUserId,
+      totalOrders: orders.length,
+      deliveredCount: delivered.length,
+      failedCount: failed.length,
+      cancelledCount: cancelled.length,
+      averageRating: rated.length > 0 ? (rated.reduce((sum, o) => sum + (o.driverRating ?? 0), 0) / rated.length).toFixed(2) : null,
+      totalEarnings: delivered.reduce((sum, o) => sum + parseFloat(o.driverEarnings ?? '0'), 0).toFixed(2),
+      codReliabilityPercent: codDelivered.length > 0 ? Math.round((codFullyCollected.length / codDelivered.length) * 100) : null,
+    };
+  }
+
   async findForCustomer(customerId: string): Promise<DeliveryOrder[]> {
     return this.ordersRepo.find({
       where: { customerId },
@@ -709,6 +880,14 @@ export class LogisticsService {
   async markDelivered(
     orderId: string,
     driverUserId: string,
+    proof: {
+      photoUrl: string;
+      signatureUrl?: string;
+      recipientName?: string;
+      deliveryLat?: number;
+      deliveryLng?: number;
+      codCollectedAmount?: number;
+    },
   ): Promise<DeliveryOrder> {
     const order = await this.getOwnedByDriver(orderId, driverUserId);
     if (
@@ -718,6 +897,24 @@ export class LogisticsService {
       throw new BadRequestException(
         'Delivery must be picked up/in transit to complete',
       );
+    }
+    // A photo is always required - cheap for the driver to capture and
+    // the single piece of evidence that protects both sides in almost
+    // every "was this actually delivered" dispute. Signature is only
+    // required when THIS order was flagged for it at creation time
+    // (order.requiresSignature) - most deliveries never ask for one.
+    if (!proof.photoUrl) {
+      throw new BadRequestException('A delivery photo is required to complete this delivery');
+    }
+    if (order.requiresSignature && !proof.signatureUrl) {
+      throw new BadRequestException('This delivery requires a recipient signature to complete');
+    }
+    // A COD delivery must report what was actually collected - the
+    // driver can't just mark it delivered and leave the money
+    // unaccounted for, since that's exactly the gap this feature
+    // exists to close.
+    if (order.isCod && proof.codCollectedAmount == null) {
+      throw new BadRequestException('Report the amount collected to complete a cash-on-delivery order');
     }
 
     const driverProfile = await this.driversService.findByUserId(driverUserId);
@@ -741,6 +938,33 @@ export class LogisticsService {
 
     order.status = DeliveryStatus.DELIVERED;
     order.deliveredAt = new Date();
+    order.proofPhotoUrl = proof.photoUrl;
+    order.proofSignatureUrl = proof.signatureUrl ?? null;
+    order.proofRecipientName = proof.recipientName ?? null;
+    order.proofDeliveryLat = proof.deliveryLat ?? null;
+    order.proofDeliveryLng = proof.deliveryLng ?? null;
+
+    if (order.isCod) {
+      const expected = parseFloat(order.codAmount ?? '0');
+      const collected = proof.codCollectedAmount!;
+      order.codCollectedAmount = collected.toFixed(2);
+      order.codCollectionStatus =
+        collected >= expected
+          ? CodCollectionStatus.COLLECTED
+          : collected > 0
+            ? CodCollectionStatus.PARTIAL
+            : CodCollectionStatus.FAILED;
+
+      // Courier responsibility: a shortfall is the driver's own debt,
+      // not absorbed silently or left for the customer to be chased
+      // for again - same recordDebt() mechanism already used for a
+      // commission shortfall a few lines below, just against the
+      // gap between what was expected and what actually came back.
+      const shortfall = this.round(expected - collected);
+      if (shortfall > 0) {
+        await this.reconciliationService.recordDebt(driverUserId, driverProfile.fleetCompanyId, order.id, shortfall);
+      }
+    }
     order.commissionPercent = commissionPercent.toFixed(2);
     order.commissionAmount = commissionAmount.toFixed(2);
     order.driverEarnings = driverEarnings.toFixed(2);
@@ -839,7 +1063,7 @@ export class LogisticsService {
         throw new BadRequestException(
           'Customer is not linked to a corporate account',
         );
-      await this.corporateService.debitForRide(account.id, totalFare, order.id);
+      await this.corporateService.debitForRide(account.id, totalFare, order.id, order.customerId);
       await this.creditDriverEarnings(
         order,
         driverProfile,

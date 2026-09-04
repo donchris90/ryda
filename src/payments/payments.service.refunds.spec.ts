@@ -51,21 +51,24 @@ function makePaymentsRepo(initialRecord: PaymentRecord) {
   const paymentsRepo = {
     manager: { transaction: jest.fn((cb: (m: typeof manager) => unknown) => cb(manager)) },
     findOneOrFail: jest.fn(async () => ({ ...current })),
+    count: jest.fn().mockResolvedValue(0),
   } as any;
 
   return { paymentsRepo, getCurrentRecord: () => current };
 }
 
-function build(initialRecord: PaymentRecord, overrides: { paystack?: any } = {}) {
+function build(initialRecord: PaymentRecord, overrides: { paystack?: any; fraudService?: any; paymentsRepoOverrides?: any } = {}) {
   const { paymentsRepo, getCurrentRecord } = makePaymentsRepo(initialRecord);
+  if (overrides.paymentsRepoOverrides) Object.assign(paymentsRepo, overrides.paymentsRepoOverrides);
   const savedCardsRepo = {} as any;
   const paystack = { refund: jest.fn(), ...overrides.paystack };
   const config = { get: jest.fn() } as any;
   const events = { emit: jest.fn() } as any;
   const walletsService = {} as any;
 
-  const service = new PaymentsService(paymentsRepo, savedCardsRepo, paystack as any, config, events, walletsService);
-  return { service, paymentsRepo, paystack, events, getCurrentRecord };
+  const fraudService = { checkExcessiveRefunds: jest.fn().mockResolvedValue(undefined), ...overrides.fraudService };
+  const service = new PaymentsService(paymentsRepo, savedCardsRepo, paystack as any, config, events, walletsService, fraudService, {} as any);
+  return { service, paymentsRepo, paystack, events, fraudService, getCurrentRecord };
 }
 
 describe('PaymentsService refunds', () => {
@@ -92,6 +95,25 @@ describe('PaymentsService refunds', () => {
       expect(paystack.refund).toHaveBeenCalledWith({ transactionReference: 'ref-1', amountKobo: 30000 });
       expect(getCurrentRecord().status).toBe(PaymentStatus.PARTIALLY_REFUNDED);
       expect(getCurrentRecord().refundedAmount).toBe('300.00');
+    });
+
+    it('checks the excessive-refunds pattern (with the recent-refund count) once a refund genuinely succeeds', async () => {
+      const { service, paystack, fraudService } = build(fakeRecord({ amount: '1000.00', userId: 'user-7' }), {
+        paymentsRepoOverrides: { count: jest.fn().mockResolvedValue(4) },
+      });
+      paystack.refund.mockResolvedValue({ status: 'success' });
+
+      await service.refundPayment('payment-1');
+
+      expect(fraudService.checkExcessiveRefunds).toHaveBeenCalledWith('user-7', 4);
+    });
+
+    it('never checks the pattern when Paystack reports the refund as failed', async () => {
+      const { service, paystack, fraudService } = build(fakeRecord({ amount: '1000.00' }));
+      paystack.refund.mockResolvedValue({ status: 'failed' });
+
+      await expect(service.refundPayment('payment-1')).rejects.toThrow(ConflictException);
+      expect(fraudService.checkExcessiveRefunds).not.toHaveBeenCalled();
     });
 
     it('a second partial refund on top of an already-partially-refunded payment correctly targets only the remaining amount, and can complete the refund', async () => {

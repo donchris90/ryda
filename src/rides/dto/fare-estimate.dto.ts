@@ -1,6 +1,8 @@
-import { IsBoolean, IsEnum, IsNumber, IsOptional, IsString } from 'class-validator';
+import { IsBoolean, IsEnum, IsNumber, IsOptional, IsString, ValidateNested, ArrayMaxSize } from 'class-validator';
+import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { RideCategory } from '../../common/enums/ride.enum';
+import { RideStopDto } from './request-ride.dto';
 
 export class FareEstimateDto {
   @ApiProperty({ enum: RideCategory, example: RideCategory.ECONOMY })
@@ -32,4 +34,11 @@ export class FareEstimateDto {
   @IsOptional()
   @IsBoolean()
   isAirportTrip?: boolean;
+
+  @ApiPropertyOptional({ type: [RideStopDto], description: 'Intermediate stops in visit order, between pickup and dropoff' })
+  @IsOptional()
+  @ValidateNested({ each: true })
+  @Type(() => RideStopDto)
+  @ArrayMaxSize(3)
+  stops?: RideStopDto[];
 }

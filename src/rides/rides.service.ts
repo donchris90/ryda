@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, MoreThan } from 'typeorm';
 import { Ride } from './entities/ride.entity';
 import { GoogleMapsService } from '../maps/google-maps.service';
 import { decodePolyline } from '../common/utils/polyline.util';
@@ -48,6 +48,7 @@ import { DriverRankingService } from '../ranking/ranking.service';
 import { GeofenceService } from '../tracking/geofence/geofence.service';
 import { GeofenceType } from '../tracking/geofence/entities/geofence.entity';
 import { AirportService } from '../airport/airport.service';
+import { FraudService } from '../fraud/fraud.service';
 import { OnEvent } from '@nestjs/event-emitter';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -119,6 +120,7 @@ export class RidesService {
     private readonly driverRankingService: DriverRankingService,
     private readonly geofenceService: GeofenceService,
     private readonly airportService: AirportService,
+    private readonly fraudService: FraudService,
   ) {}
 
   async estimateFare(dto: FareEstimateDto) {
@@ -127,7 +129,7 @@ export class RidesService {
       dto.category,
       { lat: dto.pickupLat, lng: dto.pickupLng },
       { lat: dto.dropoffLat, lng: dto.dropoffLng },
-      { isAirportTrip: dto.isAirportTrip, surgeMultiplier: surge.multiplier },
+      { isAirportTrip: dto.isAirportTrip, surgeMultiplier: surge.multiplier, stops: dto.stops },
     );
   }
 
@@ -193,7 +195,7 @@ export class RidesService {
       dto.category,
       { lat: dto.pickupLat, lng: dto.pickupLng },
       { lat: dto.dropoffLat, lng: dto.dropoffLng },
-      { isAirportTrip: dto.isAirportTrip, surgeMultiplier: surge.multiplier },
+      { isAirportTrip: dto.isAirportTrip, surgeMultiplier: surge.multiplier, stops: dto.stops },
     );
 
     const paymentMethod = dto.paymentMethod ?? PaymentMethod.CASH;
@@ -221,6 +223,24 @@ export class RidesService {
           'You are not linked to an active corporate account',
         );
       }
+      // Checked against the SAME estimate breakdown this ride is about
+      // to be created with - not a separate, possibly-drifted fare
+      // recalculation. scheduledAt ?? now, so a scheduled-for-later
+      // ride is checked against the hour it'll actually run at, not
+      // the hour it happened to be booked.
+      const policyCheck = this.corporateService.checkRidePolicy(account, {
+        category: dto.category,
+        estimatedFare: breakdown.totalFare,
+        city: dto.city,
+        requestedAt: scheduledAt ?? new Date(),
+      });
+      if (!policyCheck.allowed) {
+        throw new BadRequestException(policyCheck.reason);
+      }
+      const spendLimitCheck = await this.corporateService.checkEmployeeSpendLimit(passengerId, breakdown.totalFare);
+      if (!spendLimitCheck.allowed) {
+        throw new BadRequestException(spendLimitCheck.reason);
+      }
     }
 
     const ride = this.ridesRepo.create({
@@ -247,6 +267,7 @@ export class RidesService {
       dropoffLat: dto.dropoffLat,
       dropoffLng: dto.dropoffLng,
       dropoffAddress: dto.dropoffAddress,
+      stops: dto.stops ?? null,
       city: dto.city ?? null,
       estimatedDistanceKm: breakdown.estimatedDistanceKm,
       estimatedDurationMin: breakdown.estimatedDurationMin,
@@ -314,6 +335,33 @@ export class RidesService {
           backoff: { type: 'exponential', delay: 5000 },
         },
       );
+
+      // A separate delayed job, well before activation - "your ride
+      // is coming up" is meant to give the passenger time to be
+      // ready, not fire at the same moment the ride starts actually
+      // searching for a driver. Skipped outright (not just clamped
+      // to zero-delay) when the reminder's own lead time has already
+      // passed by booking time - a ride scheduled 15 minutes out with
+      // a 60-minute reminder window has nothing meaningful left to
+      // remind the passenger of that activation itself won't already
+      // cover.
+      const reminderLeadMinutes = await this.settingsService.getNumber(
+        SETTING_KEYS.SCHEDULED_RIDE_REMINDER_LEAD_MINUTES,
+        60,
+      );
+      const remindAt = scheduledAt.getTime() - reminderLeadMinutes * 60 * 1000;
+      if (remindAt > Date.now()) {
+        await this.scheduledRidesQueue.add(
+          'remind',
+          { rideId: savedRide.id },
+          {
+            delay: remindAt - Date.now(),
+            jobId: `remind-${savedRide.id}`,
+            attempts: 3,
+            backoff: { type: 'exponential', delay: 5000 },
+          },
+        );
+      }
     }
     // No automatic dispatch for MANUAL rides — the passenger picks a
     // driver themselves from the nearby-drivers list
@@ -858,6 +906,24 @@ export class RidesService {
     }
     // MANUAL: no auto-dispatch — same reasoning as requestRide() above.
     // The passenger picks a driver from the list once the ride activates.
+  }
+
+  /**
+   * Called by ScheduledRideProcessor when the (earlier, separate)
+   * reminder job fires. Same not-still-SCHEDULED guard as
+   * activateScheduledRide() above - a ride cancelled or somehow
+   * already activated in the meantime gets no reminder, since there's
+   * nothing left to remind the passenger to be ready for.
+   */
+  async sendScheduledRideReminder(rideId: string): Promise<void> {
+    const ride = await this.ridesRepo.findOne({ where: { id: rideId } });
+    if (!ride || ride.status !== RideStatus.SCHEDULED) return;
+
+    this.events.emit('ride.scheduled_reminder', {
+      passengerId: ride.passengerId,
+      pickupAddress: ride.pickupAddress,
+      scheduledAt: ride.scheduledAt,
+    });
   }
 
   async findForDriver(driverId: string): Promise<Ride[]> {
@@ -1467,6 +1533,13 @@ export class RidesService {
           account.id,
           totalFare,
           ride.id,
+          ride.passengerId,
+        );
+        await this.corporateService.flagRideForApprovalIfNeeded(
+          account,
+          ride.id,
+          ride.passengerId,
+          totalFare,
         );
         await this.creditDriverEarnings(
           ride,
@@ -1610,8 +1683,10 @@ export class RidesService {
     }
 
     if (ride.status === RideStatus.SCHEDULED) {
-      const job = await this.scheduledRidesQueue.getJob(`activate-${ride.id}`);
-      await job?.remove().catch(() => undefined);
+      const activateJob = await this.scheduledRidesQueue.getJob(`activate-${ride.id}`);
+      await activateJob?.remove().catch(() => undefined);
+      const remindJob = await this.scheduledRidesQueue.getJob(`remind-${ride.id}`);
+      await remindJob?.remove().catch(() => undefined);
     }
 
     // A driver was already engaged (en route or arrived) — the passenger
@@ -1747,6 +1822,23 @@ export class RidesService {
     }
     this.emitStatusChanged(ride);
     this.metricsService.rideCancellationsTotal.inc({ cancelledBy });
+
+    if (cancelledBy === CancelledBy.PASSENGER) {
+      // Fire-and-forget, same reasoning as the other fraud checks -
+      // never let this affect the cancellation response itself.
+      // Scoped to passenger-initiated cancels specifically: a driver
+      // or admin cancelling isn't a signal about the PASSENGER's
+      // behavior at all.
+      const recentCancellationCount = await this.ridesRepo.count({
+        where: {
+          passengerId: ride.passengerId,
+          status: RideStatus.CANCELLED,
+          cancelledBy: CancelledBy.PASSENGER,
+          cancelledAt: MoreThan(new Date(Date.now() - 24 * 60 * 60 * 1000)),
+        },
+      });
+      this.fraudService.checkRepeatedCancellations(ride.passengerId, recentCancellationCount).catch(() => undefined);
+    }
 
     return ride;
   }

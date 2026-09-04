@@ -1,21 +1,20 @@
 import { FraudService } from './fraud.service';
-import { FraudFlagSeverity, FraudFlagStatus, FraudFlagType } from './entities/fraud-flag.entity';
-import { NotFoundException } from '@nestjs/common';
+import { FraudFlagType, FraudFlagSeverity } from './entities/fraud-flag.entity';
 
 function buildService(overrides: Record<string, any> = {}) {
   const devicesRepo = {
     findOne: jest.fn().mockResolvedValue(null),
+    count: jest.fn().mockResolvedValue(0),
+    create: jest.fn((d: any) => d),
+    save: jest.fn(async (d: any) => d),
     find: jest.fn().mockResolvedValue([]),
-    create: jest.fn((data) => data),
-    save: jest.fn(async (data) => data),
     ...overrides.devicesRepo,
   };
-
   const flagsRepo = {
-    create: jest.fn((data) => ({ id: 'flag-1', ...data })),
-    save: jest.fn(async (data) => data),
-    findOne: jest.fn(),
-    createQueryBuilder: jest.fn(),
+    create: jest.fn((d: any) => d),
+    save: jest.fn(async (d: any) => d),
+    find: jest.fn().mockResolvedValue([]),
+    count: jest.fn().mockResolvedValue(0),
     ...overrides.flagsRepo,
   };
 
@@ -23,262 +22,437 @@ function buildService(overrides: Record<string, any> = {}) {
   return { service, devicesRepo, flagsRepo };
 }
 
-describe('FraudService.recordDeviceFingerprint', () => {
-  it('does nothing when no fingerprint is provided', async () => {
-    const { service, devicesRepo } = buildService();
-    await service.recordDeviceFingerprint('user-1', '');
-    expect(devicesRepo.save).not.toHaveBeenCalled();
+describe('FraudService.recordDeviceFingerprint() - new-device detection', () => {
+  it("does not treat a user's very first-ever login as a new-device signal", async () => {
+    const { service, devicesRepo, flagsRepo } = buildService({
+      devicesRepo: { findOne: jest.fn().mockResolvedValue(null), count: jest.fn().mockResolvedValue(0) },
+    });
+
+    const result = await service.recordDeviceFingerprint('user-1', 'fp-1', '1.2.3.4');
+
+    expect(result.isNewDevice).toBe(false);
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+    expect(devicesRepo.save).toHaveBeenCalled(); // the device is still recorded either way
   });
 
-  it('creates a new device record and raises no flag when the fingerprint is unique to this user', async () => {
-    const { service, devicesRepo, flagsRepo } = buildService({
+  it('flags and reports a new device when the user already has at least one other device on file', async () => {
+    const { service, flagsRepo } = buildService({
+      devicesRepo: { findOne: jest.fn().mockResolvedValue(null), count: jest.fn().mockResolvedValue(1) },
+    });
+
+    const result = await service.recordDeviceFingerprint('user-1', 'fp-2', '1.2.3.4');
+
+    expect(result.isNewDevice).toBe(true);
+    expect(flagsRepo.save).toHaveBeenCalledWith(expect.objectContaining({ type: FraudFlagType.NEW_DEVICE_LOGIN, userId: 'user-1' }));
+  });
+
+  it('does not re-flag a device the user has already logged in from before', async () => {
+    const { service, flagsRepo } = buildService({
       devicesRepo: {
-        findOne: jest.fn().mockResolvedValue(null),
-        find: jest.fn().mockResolvedValue([{ userId: 'user-1', fingerprint: 'fp-1' }]),
+        findOne: jest.fn().mockResolvedValue({ id: 'device-1', userId: 'user-1', fingerprint: 'fp-known' }),
+        count: jest.fn().mockResolvedValue(2),
       },
     });
 
-    await service.recordDeviceFingerprint('user-1', 'fp-1', '1.2.3.4');
+    const result = await service.recordDeviceFingerprint('user-1', 'fp-known', '1.2.3.4');
 
-    expect(devicesRepo.save).toHaveBeenCalled();
+    expect(result.isNewDevice).toBe(false);
     expect(flagsRepo.save).not.toHaveBeenCalled();
   });
 
-  it('updates the existing record\'s IP rather than creating a duplicate when the user/fingerprint pair already exists', async () => {
-    const existing = { userId: 'user-1', fingerprint: 'fp-1', ipAddress: 'old-ip' };
+  it('updates the stored IP for an already-known device rather than duplicating the record', async () => {
+    const existing = { id: 'device-1', userId: 'user-1', fingerprint: 'fp-known', ipAddress: 'old-ip' };
     const { service, devicesRepo } = buildService({
-      devicesRepo: {
-        findOne: jest.fn().mockResolvedValue(existing),
-        find: jest.fn().mockResolvedValue([existing]),
-      },
+      devicesRepo: { findOne: jest.fn().mockResolvedValue(existing), count: jest.fn().mockResolvedValue(1) },
     });
 
-    await service.recordDeviceFingerprint('user-1', 'fp-1', 'new-ip');
+    await service.recordDeviceFingerprint('user-1', 'fp-known', 'new-ip');
 
     expect(devicesRepo.create).not.toHaveBeenCalled();
-    expect(existing.ipAddress).toBe('new-ip');
+    expect(devicesRepo.save).toHaveBeenCalledWith(expect.objectContaining({ ipAddress: 'new-ip' }));
   });
 
-  it('raises a MEDIUM flag when the fingerprint is shared with exactly one other user', async () => {
+  it('is a no-op (no device saved, no flags) when no fingerprint is supplied', async () => {
+    const { service, devicesRepo, flagsRepo } = buildService();
+
+    const result = await service.recordDeviceFingerprint('user-1', '');
+
+    expect(result.isNewDevice).toBe(false);
+    expect(devicesRepo.save).not.toHaveBeenCalled();
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+});
+
+describe('FraudService.recordDeviceFingerprint() - multi-account sharing (independent of new-device status)', () => {
+  it('flags MULTIPLE_ACCOUNTS_SAME_DEVICE when the fingerprint is already used by a different account', async () => {
     const { service, flagsRepo } = buildService({
       devicesRepo: {
         findOne: jest.fn().mockResolvedValue(null),
+        count: jest.fn().mockResolvedValue(0),
         find: jest.fn().mockResolvedValue([
-          { userId: 'user-1', fingerprint: 'fp-1' },
-          { userId: 'user-2', fingerprint: 'fp-1' },
+          { userId: 'user-1', fingerprint: 'fp-shared' },
+          { userId: 'user-2', fingerprint: 'fp-shared' },
         ]),
       },
     });
 
-    await service.recordDeviceFingerprint('user-1', 'fp-1');
+    await service.recordDeviceFingerprint('user-1', 'fp-shared', '1.2.3.4');
 
     expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ type: FraudFlagType.MULTIPLE_ACCOUNTS_SAME_DEVICE, userId: 'user-1', relatedUserId: 'user-2' }),
+    );
+  });
+
+  it('escalates to HIGH severity when more than two other accounts share the device', async () => {
+    const { service, flagsRepo } = buildService({
+      devicesRepo: {
+        findOne: jest.fn().mockResolvedValue(null),
+        count: jest.fn().mockResolvedValue(0),
+        find: jest.fn().mockResolvedValue([
+          { userId: 'user-1', fingerprint: 'fp-shared' },
+          { userId: 'user-2', fingerprint: 'fp-shared' },
+          { userId: 'user-3', fingerprint: 'fp-shared' },
+          { userId: 'user-4', fingerprint: 'fp-shared' },
+        ]),
+      },
+    });
+
+    await service.recordDeviceFingerprint('user-1', 'fp-shared', '1.2.3.4');
+
+    const call = flagsRepo.save.mock.calls.find((c: any[]) => c[0].type === FraudFlagType.MULTIPLE_ACCOUNTS_SAME_DEVICE);
+    expect(call[0].severity).toBe('high');
+  });
+
+  it('raises both a new-device flag and a multi-account flag when both conditions are true at once', async () => {
+    const { service, flagsRepo } = buildService({
+      devicesRepo: {
+        findOne: jest.fn().mockResolvedValue(null),
+        count: jest.fn().mockResolvedValue(1),
+        find: jest.fn().mockResolvedValue([
+          { userId: 'user-1', fingerprint: 'fp-shared' },
+          { userId: 'user-2', fingerprint: 'fp-shared' },
+        ]),
+      },
+    });
+
+    const result = await service.recordDeviceFingerprint('user-1', 'fp-shared', '1.2.3.4');
+
+    expect(result.isNewDevice).toBe(true);
+    const types = flagsRepo.save.mock.calls.map((c: any[]) => c[0].type);
+    expect(types).toEqual(expect.arrayContaining([FraudFlagType.NEW_DEVICE_LOGIN, FraudFlagType.MULTIPLE_ACCOUNTS_SAME_DEVICE]));
+  });
+});
+
+describe('FraudService.checkPaymentFailurePattern()', () => {
+  it('does not flag a single failed payment - one decline is common and unremarkable', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkPaymentFailurePattern('user-1', 1);
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('does not flag two failures either - the threshold is deliberately not hair-trigger', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkPaymentFailurePattern('user-1', 2);
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('flags at MEDIUM severity once three failures cluster together', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkPaymentFailurePattern('user-1', 3);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ type: FraudFlagType.REPEATED_PAYMENT_FAILURES, userId: 'user-1', severity: FraudFlagSeverity.MEDIUM }),
+    );
+  });
+
+  it('escalates to HIGH severity at five or more failures - the classic card-testing volume', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkPaymentFailurePattern('user-1', 5);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ type: FraudFlagType.REPEATED_PAYMENT_FAILURES, severity: FraudFlagSeverity.HIGH }),
+    );
+  });
+});
+
+describe('FraudService.checkMultipleCardsAdded()', () => {
+  it('does not flag adding one or two cards - ordinary account setup', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkMultipleCardsAdded('user-1', 2);
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('flags at MEDIUM severity once three distinct cards are added in the same window', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkMultipleCardsAdded('user-1', 3);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ type: FraudFlagType.MULTIPLE_CARDS_ADDED, userId: 'user-1', severity: FraudFlagSeverity.MEDIUM }),
+    );
+  });
+
+  it('escalates to HIGH severity at five or more cards', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkMultipleCardsAdded('user-1', 6);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ type: FraudFlagType.MULTIPLE_CARDS_ADDED, severity: FraudFlagSeverity.HIGH }),
+    );
+  });
+});
+
+describe('FraudService.checkPromoRedemptionPattern()', () => {
+  it('does not flag redeeming a few promos over time - ordinary usage', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkPromoRedemptionPattern('user-1', 3);
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('flags at MEDIUM severity once four redemptions cluster in the window', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkPromoRedemptionPattern('user-1', 4);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ type: FraudFlagType.REPEATED_PROMO_REDEMPTION, userId: 'user-1', severity: FraudFlagSeverity.MEDIUM }),
+    );
+  });
+
+  it('escalates to HIGH severity at eight or more redemptions', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkPromoRedemptionPattern('user-1', 8);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ type: FraudFlagType.REPEATED_PROMO_REDEMPTION, severity: FraudFlagSeverity.HIGH }),
+    );
+  });
+});
+
+describe('FraudService.checkRepeatedCancellations()', () => {
+  it('does not flag a few cancellations - ordinary rider behavior (driver ran late, plans changed)', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkRepeatedCancellations('user-1', 3);
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('flags at MEDIUM severity once four cancellations cluster in the window', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkRepeatedCancellations('user-1', 4);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ type: FraudFlagType.REPEATED_CANCELLATIONS, userId: 'user-1', severity: FraudFlagSeverity.MEDIUM }),
+    );
+  });
+
+  it('escalates to HIGH severity at eight or more cancellations', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkRepeatedCancellations('user-1', 9);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ type: FraudFlagType.REPEATED_CANCELLATIONS, severity: FraudFlagSeverity.HIGH }),
+    );
+  });
+});
+
+describe('FraudService.checkExcessiveRefunds()', () => {
+  it('does not flag one or two refunds - refunds are a normal, healthy part of the marketplace', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkExcessiveRefunds('user-1', 2);
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('flags at MEDIUM severity once three refunds cluster in the window', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkExcessiveRefunds('user-1', 3);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ type: FraudFlagType.EXCESSIVE_REFUNDS, userId: 'user-1', severity: FraudFlagSeverity.MEDIUM }),
+    );
+  });
+
+  it('escalates to HIGH severity at six or more refunds', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkExcessiveRefunds('user-1', 6);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ type: FraudFlagType.EXCESSIVE_REFUNDS, severity: FraudFlagSeverity.HIGH }),
+    );
+  });
+});
+
+describe('FraudService.checkWalletVelocity()', () => {
+  it('does not flag a handful of transfers - ordinary usage', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkWalletVelocity('user-1', 4);
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('flags at MEDIUM severity once five transfers cluster within the window', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkWalletVelocity('user-1', 5);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ type: FraudFlagType.UNUSUAL_WALLET_VELOCITY, userId: 'user-1', severity: FraudFlagSeverity.MEDIUM }),
+    );
+  });
+
+  it('escalates to HIGH severity at ten or more transfers', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkWalletVelocity('user-1', 10);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ type: FraudFlagType.UNUSUAL_WALLET_VELOCITY, severity: FraudFlagSeverity.HIGH }),
+    );
+  });
+});
+
+describe('FraudService.checkChargebackHistory() - deliberately a lower bar than the other checks', () => {
+  it('does not flag zero chargebacks', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkChargebackHistory('user-1', 0);
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('flags at MEDIUM severity for even a single resolved chargeback - unlike a failed payment, this is a completed dispute with real money already moved', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkChargebackHistory('user-1', 1);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ type: FraudFlagType.CHARGEBACK_HISTORY, userId: 'user-1', severity: FraudFlagSeverity.MEDIUM }),
+    );
+  });
+
+  it('escalates to HIGH severity at two or more resolved chargebacks', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkChargebackHistory('user-1', 2);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({ type: FraudFlagType.CHARGEBACK_HISTORY, severity: FraudFlagSeverity.HIGH }),
+    );
+  });
+});
+
+describe('FraudService.getSummary()', () => {
+  it('counts high-severity open flags across both HIGH and CRITICAL severities', async () => {
+    const countMock = jest.fn()
+      .mockResolvedValueOnce(50) // total
+      .mockResolvedValueOnce(20) // open
+      .mockResolvedValueOnce(5) // escalated
+      .mockResolvedValueOnce(8); // high-severity open (HIGH + CRITICAL combined)
+    const { service } = buildService({ flagsRepo: { count: countMock } });
+
+    const result = await service.getSummary();
+
+    expect(result).toEqual({ totalFlags: 50, openCount: 20, escalatedCount: 5, highSeverityOpenCount: 8 });
+    expect(countMock).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        type: FraudFlagType.MULTIPLE_ACCOUNTS_SAME_DEVICE,
-        userId: 'user-1',
-        relatedUserId: 'user-2',
-        severity: FraudFlagSeverity.MEDIUM,
+        where: [
+          { status: 'open', severity: FraudFlagSeverity.HIGH },
+          { status: 'open', severity: FraudFlagSeverity.CRITICAL },
+        ],
       }),
     );
   });
+});
 
-  it('escalates to HIGH severity when the fingerprint is shared across more than 2 other users', async () => {
-    const { service, flagsRepo } = buildService({
-      devicesRepo: {
-        findOne: jest.fn().mockResolvedValue(null),
-        find: jest.fn().mockResolvedValue([
-          { userId: 'user-1', fingerprint: 'fp-1' },
-          { userId: 'user-2', fingerprint: 'fp-1' },
-          { userId: 'user-3', fingerprint: 'fp-1' },
-          { userId: 'user-4', fingerprint: 'fp-1' },
-        ]),
-      },
-    });
+describe('FraudService.listDevicesForUser()', () => {
+  it("returns this user's own devices, most recently seen first", async () => {
+    const devices = [{ id: 'd1', userId: 'user-1', fingerprint: 'fp-1' }];
+    const { service, devicesRepo } = buildService({ devicesRepo: { find: jest.fn().mockResolvedValue(devices) } });
 
-    await service.recordDeviceFingerprint('user-1', 'fp-1');
+    const result = await service.listDevicesForUser('user-1');
 
-    expect(flagsRepo.save).toHaveBeenCalledWith(
-      expect.objectContaining({ severity: FraudFlagSeverity.HIGH }),
-    );
-  });
-
-  it('does not count the user\'s own other device rows as "other users"', async () => {
-    const { service, flagsRepo } = buildService({
-      devicesRepo: {
-        findOne: jest.fn().mockResolvedValue(null),
-        // Same user, same fingerprint recorded twice (e.g. re-login) — must not self-flag.
-        find: jest.fn().mockResolvedValue([
-          { userId: 'user-1', fingerprint: 'fp-1' },
-          { userId: 'user-1', fingerprint: 'fp-1' },
-        ]),
-      },
-    });
-
-    await service.recordDeviceFingerprint('user-1', 'fp-1');
-
-    expect(flagsRepo.save).not.toHaveBeenCalled();
+    expect(result).toBe(devices);
+    expect(devicesRepo.find).toHaveBeenCalledWith({ where: { userId: 'user-1' }, order: { lastSeenAt: 'DESC' } });
   });
 });
 
-describe('FraudService.checkGpsSpoof', () => {
-  it('does nothing on a driver\'s first location update (no previous point to compare)', async () => {
-    const { service, flagsRepo } = buildService();
-    await service.checkGpsSpoof('driver-1', null, { lat: 6.5, lng: 3.4, at: new Date() });
-    expect(flagsRepo.save).not.toHaveBeenCalled();
-  });
-
-  it('does not flag a plausible driving speed', async () => {
-    const { service, flagsRepo } = buildService();
-    const t0 = new Date('2026-01-01T00:00:00Z');
-    const t1 = new Date('2026-01-01T00:05:00Z'); // 5 minutes later
-    // ~0.09 degrees latitude ≈ 10km — a plausible 120 km/h over 5 minutes.
-    await service.checkGpsSpoof(
-      'driver-1',
-      { lat: 6.5, lng: 3.4, at: t0 },
-      { lat: 6.59, lng: 3.4, at: t1 },
-    );
-    expect(flagsRepo.save).not.toHaveBeenCalled();
-  });
-
-  it('flags an implied speed above the impossible-speed threshold', async () => {
-    const { service, flagsRepo } = buildService();
-    const t0 = new Date('2026-01-01T00:00:00Z');
-    const t1 = new Date('2026-01-01T00:01:00Z'); // 1 minute later
-    // ~1 degree latitude ≈ 111km in 1 minute ≈ 6,660 km/h — nowhere close to plausible.
-    await service.checkGpsSpoof(
-      'driver-1',
-      { lat: 6.5, lng: 3.4, at: t0 },
-      { lat: 7.5, lng: 3.4, at: t1 },
-    );
-    expect(flagsRepo.save).toHaveBeenCalledWith(
-      expect.objectContaining({ type: FraudFlagType.GPS_SPOOF, userId: 'driver-1', severity: FraudFlagSeverity.HIGH }),
-    );
-  });
-
-  it('does not flag (and does not divide by zero) when the two updates share the same or an earlier timestamp', async () => {
-    const { service, flagsRepo } = buildService();
-    const t0 = new Date('2026-01-01T00:00:00Z');
-    await service.checkGpsSpoof(
-      'driver-1',
-      { lat: 6.5, lng: 3.4, at: t0 },
-      { lat: 7.5, lng: 3.4, at: t0 }, // same instant
-    );
-    expect(flagsRepo.save).not.toHaveBeenCalled();
-  });
-});
-
-describe('FraudService.checkReferralAbuse', () => {
-  it('does not flag when referrer and referee share no device fingerprint', async () => {
-    const { service, flagsRepo } = buildService({
+describe('FraudService.findRelatedAccounts()', () => {
+  it('includes another account sharing a device fingerprint', async () => {
+    const { service, devicesRepo } = buildService({
       devicesRepo: {
-        find: jest
-          .fn()
-          .mockResolvedValueOnce([{ userId: 'referrer-1', fingerprint: 'fp-a' }])
-          .mockResolvedValueOnce([{ userId: 'referee-1', fingerprint: 'fp-b' }]),
+        find: jest.fn()
+          .mockResolvedValueOnce([{ userId: 'user-1', fingerprint: 'fp-shared' }]) // this user's own devices
+          .mockResolvedValueOnce([
+            { userId: 'user-1', fingerprint: 'fp-shared' },
+            { userId: 'user-2', fingerprint: 'fp-shared' },
+          ]), // everyone on that fingerprint
       },
     });
 
-    await service.checkReferralAbuse('referrer-1', 'referee-1');
+    const result = await service.findRelatedAccounts('user-1');
 
-    expect(flagsRepo.save).not.toHaveBeenCalled();
+    expect(result).toEqual(['user-2']);
   });
 
-  it('flags referral abuse when referrer and referee share a device fingerprint', async () => {
-    const { service, flagsRepo } = buildService({
-      devicesRepo: {
-        find: jest
-          .fn()
-          .mockResolvedValueOnce([{ userId: 'referrer-1', fingerprint: 'fp-shared' }])
-          .mockResolvedValueOnce([{ userId: 'referee-1', fingerprint: 'fp-shared' }]),
+  it("includes a flag's relatedUserId even with no shared device at all", async () => {
+    const { service } = buildService({
+      devicesRepo: { find: jest.fn().mockResolvedValue([]) },
+      flagsRepo: {
+        find: jest.fn().mockResolvedValue([{ userId: 'user-1', relatedUserId: 'user-9' }]),
       },
     });
 
-    await service.checkReferralAbuse('referrer-1', 'referee-1');
+    const result = await service.findRelatedAccounts('user-1');
 
-    expect(flagsRepo.save).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: FraudFlagType.REFERRAL_ABUSE,
-        userId: 'referee-1',
-        relatedUserId: 'referrer-1',
-        severity: FraudFlagSeverity.HIGH,
-      }),
-    );
+    expect(result).toEqual(['user-9']);
   });
-});
 
-describe('FraudService.reviewFlag', () => {
-  it('updates status, reviewer, and notes on an existing flag', async () => {
-    const flag = { id: 'flag-1', status: FraudFlagStatus.OPEN, reviewedBy: null, reviewNotes: null };
-    const { service, flagsRepo } = buildService({
-      flagsRepo: { findOne: jest.fn().mockResolvedValue(flag) },
+  it('never includes the user themselves, and de-duplicates accounts related through both signals', async () => {
+    const { service } = buildService({
+      devicesRepo: {
+        find: jest.fn()
+          .mockResolvedValueOnce([{ userId: 'user-1', fingerprint: 'fp-shared' }])
+          .mockResolvedValueOnce([
+            { userId: 'user-1', fingerprint: 'fp-shared' },
+            { userId: 'user-2', fingerprint: 'fp-shared' },
+          ]),
+      },
+      flagsRepo: {
+        find: jest.fn().mockResolvedValue([{ userId: 'user-1', relatedUserId: 'user-2' }]),
+      },
     });
 
-    const result = await service.reviewFlag('flag-1', 'admin-1', FraudFlagStatus.DISMISSED, 'False positive');
+    const result = await service.findRelatedAccounts('user-1');
 
-    expect(result.status).toBe(FraudFlagStatus.DISMISSED);
-    expect(result.reviewedBy).toBe('admin-1');
-    expect(result.reviewNotes).toBe('False positive');
+    expect(result).toEqual(['user-2']);
   });
 
-  it('throws when the flag does not exist', async () => {
-    const { service } = buildService({ flagsRepo: { findOne: jest.fn().mockResolvedValue(null) } });
-    await expect(service.reviewFlag('missing', 'admin-1', FraudFlagStatus.REVIEWED)).rejects.toThrow(
-      NotFoundException,
-    );
-  });
-});
+  it('returns an empty array when nothing connects this account to any other', async () => {
+    const { service } = buildService({
+      devicesRepo: { find: jest.fn().mockResolvedValue([]) },
+      flagsRepo: { find: jest.fn().mockResolvedValue([]) },
+    });
 
-describe('FraudService.listFlags', () => {
-  function fakeQueryBuilder(result: [any[], number]) {
-    const qb: any = {
-      orderBy: jest.fn().mockReturnThis(),
-      andWhere: jest.fn().mockReturnThis(),
-      skip: jest.fn().mockReturnThis(),
-      take: jest.fn().mockReturnThis(),
-      getManyAndCount: jest.fn().mockResolvedValue(result),
-    };
-    return qb;
-  }
-
-  it('applies default pagination (page 1, pageSize 50) when none is given', async () => {
-    const qb = fakeQueryBuilder([[], 0]);
-    const { service } = buildService({ flagsRepo: { createQueryBuilder: jest.fn(() => qb) } });
-
-    const result = await service.listFlags({});
-
-    expect(result.page).toBe(1);
-    expect(result.pageSize).toBe(50);
-    expect(qb.skip).toHaveBeenCalledWith(0);
-    expect(qb.take).toHaveBeenCalledWith(50);
-  });
-
-  it('caps pageSize at 200 even if a larger value is requested', async () => {
-    const qb = fakeQueryBuilder([[], 0]);
-    const { service } = buildService({ flagsRepo: { createQueryBuilder: jest.fn(() => qb) } });
-
-    const result = await service.listFlags({ pageSize: 10_000 });
-
-    expect(result.pageSize).toBe(200);
-    expect(qb.take).toHaveBeenCalledWith(200);
-  });
-
-  it('applies type/status/userId filters only when provided', async () => {
-    const qb = fakeQueryBuilder([[], 0]);
-    const { service } = buildService({ flagsRepo: { createQueryBuilder: jest.fn(() => qb) } });
-
-    await service.listFlags({ type: FraudFlagType.GPS_SPOOF, status: FraudFlagStatus.OPEN, userId: 'user-1' });
-
-    expect(qb.andWhere).toHaveBeenCalledWith('flag.type = :type', { type: FraudFlagType.GPS_SPOOF });
-    expect(qb.andWhere).toHaveBeenCalledWith('flag.status = :status', { status: FraudFlagStatus.OPEN });
-    expect(qb.andWhere).toHaveBeenCalledWith('flag.userId = :userId', { userId: 'user-1' });
-  });
-
-  it('applies no filters when none are provided', async () => {
-    const qb = fakeQueryBuilder([[], 0]);
-    const { service } = buildService({ flagsRepo: { createQueryBuilder: jest.fn(() => qb) } });
-
-    await service.listFlags({});
-
-    expect(qb.andWhere).not.toHaveBeenCalled();
+    expect(await service.findRelatedAccounts('user-1')).toEqual([]);
   });
 });

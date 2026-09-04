@@ -11,11 +11,13 @@ import { SendGridProvider } from './providers/sendgrid.provider';
 import { FcmProvider } from './providers/fcm.provider';
 import { ExpoPushProvider } from './providers/expo-push.provider';
 import { UsersModule } from '../users/users.module';
+import { MailerModule } from '../mailer/mailer.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Notification, DeviceToken]),
     UsersModule,
+    MailerModule,
     BullModule.registerQueue({ name: 'notifications' }),
   ],
   providers: [NotificationsService, NotificationsProcessor, TwilioProvider, SendGridProvider, FcmProvider, ExpoPushProvider],

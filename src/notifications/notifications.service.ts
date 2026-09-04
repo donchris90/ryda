@@ -11,6 +11,7 @@ import { SendGridProvider } from './providers/sendgrid.provider';
 import { FcmProvider } from './providers/fcm.provider';
 import { ExpoPushProvider } from './providers/expo-push.provider';
 import { UsersService } from '../users/users.service';
+import { MailerService } from '../mailer/mailer.service';
 import { SAFETY_OPS_ROLES } from '../common/enums/user-role.enum';
 
 @Injectable()
@@ -27,6 +28,7 @@ export class NotificationsService {
     private readonly fcm: FcmProvider,
     private readonly expoPush: ExpoPushProvider,
     private readonly usersService: UsersService,
+    private readonly mailerService: MailerService,
     @InjectQueue('notifications') private readonly notificationsQueue: Queue,
   ) {}
 
@@ -49,33 +51,54 @@ export class NotificationsService {
 
   // ---- Per-channel sends ----
 
-  async sendSms(userId: string, phone: string, title: string, body: string, category?: NotificationCategory): Promise<Notification> {
-    const record = await this.createRecord(userId, NotificationChannel.SMS, title, body, undefined, category);
+  async sendSms(userId: string, phone: string, title: string, body: string, category?: NotificationCategory, idempotencyKey?: string): Promise<Notification> {
+    const { record, alreadySent } = await this.createRecord(userId, NotificationChannel.SMS, title, body, undefined, category, idempotencyKey);
+    if (alreadySent) return record;
     if (!this.twilio.isSmsConfigured()) return this.markSimulated(record);
 
     const result = await this.twilio.sendSms(phone, body);
     return this.applyResult(record, result);
   }
 
-  async sendWhatsapp(userId: string, phone: string, title: string, body: string, category?: NotificationCategory): Promise<Notification> {
-    const record = await this.createRecord(userId, NotificationChannel.WHATSAPP, title, body, undefined, category);
+  async sendWhatsapp(userId: string, phone: string, title: string, body: string, category?: NotificationCategory, idempotencyKey?: string): Promise<Notification> {
+    const { record, alreadySent } = await this.createRecord(userId, NotificationChannel.WHATSAPP, title, body, undefined, category, idempotencyKey);
+    if (alreadySent) return record;
     if (!this.twilio.isWhatsappConfigured()) return this.markSimulated(record);
 
     const result = await this.twilio.sendWhatsapp(phone, body);
     return this.applyResult(record, result);
   }
 
-  async sendEmail(userId: string, email: string, subject: string, body: string, category?: NotificationCategory): Promise<Notification> {
-    const record = await this.createRecord(userId, NotificationChannel.EMAIL, subject, body, undefined, category);
-    if (!this.sendgrid.isConfigured()) return this.markSimulated(record);
+  /**
+   * Primary → fallback, not silently give up: SendGrid first (this
+   * category's usual provider); if it's not configured OR the send
+   * itself fails, retries via MailerService/Brevo (the same provider
+   * auth's own verification/reset emails already use) before finally
+   * marking simulated. A caller never sees "email not configured" as
+   * long as at least one of the two actually is.
+   */
+  async sendEmail(userId: string, email: string, subject: string, body: string, category?: NotificationCategory, idempotencyKey?: string): Promise<Notification> {
+    const { record, alreadySent } = await this.createRecord(userId, NotificationChannel.EMAIL, subject, body, undefined, category, idempotencyKey);
+    if (alreadySent) return record;
 
-    const result = await this.sendgrid.sendEmail(email, subject, body);
-    return this.applyResult(record, result);
+    if (this.sendgrid.isConfigured()) {
+      const result = await this.sendgrid.sendEmail(email, subject, body);
+      if (result.success) return this.applyResult(record, result);
+      this.logger.warn(`SendGrid email to user ${userId} failed, falling back to Brevo: ${result.error}`);
+    }
+
+    if (this.mailerService.isConfigured()) {
+      const fallbackResult = await this.mailerService.send(email, subject, body);
+      return this.applyResult(record, fallbackResult);
+    }
+
+    return this.markSimulated(record);
   }
 
   /** Sends to every device registered for this user. Records one Notification row regardless of device count. */
-  async sendPush(userId: string, title: string, body: string, data?: Record<string, string>, category?: NotificationCategory): Promise<Notification> {
-    const record = await this.createRecord(userId, NotificationChannel.PUSH, title, body, data, category);
+  async sendPush(userId: string, title: string, body: string, data?: Record<string, string>, category?: NotificationCategory, idempotencyKey?: string): Promise<Notification> {
+    const { record, alreadySent } = await this.createRecord(userId, NotificationChannel.PUSH, title, body, data, category, idempotencyKey);
+    if (alreadySent) return record;
 
     const devices = await this.deviceTokensRepo.find({ where: { userId } });
     if (devices.length === 0) {
@@ -108,8 +131,9 @@ export class NotificationsService {
     );
   }
 
-  async sendInApp(userId: string, title: string, body: string, metadata?: Record<string, unknown>, category?: NotificationCategory): Promise<Notification> {
-    const record = await this.createRecord(userId, NotificationChannel.IN_APP, title, body, metadata, category);
+  async sendInApp(userId: string, title: string, body: string, metadata?: Record<string, unknown>, category?: NotificationCategory, idempotencyKey?: string): Promise<Notification> {
+    const { record, alreadySent } = await this.createRecord(userId, NotificationChannel.IN_APP, title, body, metadata, category, idempotencyKey);
+    if (alreadySent) return record;
     record.status = NotificationStatus.SENT; // in-app "delivery" is just the DB write itself
     return this.notificationsRepo.save(record);
   }
@@ -122,6 +146,7 @@ export class NotificationsService {
     body: string,
     metadata?: Record<string, unknown>,
     category?: NotificationCategory,
+    idempotencyKey?: string,
   ): Promise<void> {
     const user = await this.usersService.findById(userId);
 
@@ -129,15 +154,15 @@ export class NotificationsService {
       channels.map(async (channel) => {
         switch (channel) {
           case NotificationChannel.IN_APP:
-            return this.sendInApp(userId, title, body, metadata, category);
+            return this.sendInApp(userId, title, body, metadata, category, idempotencyKey);
           case NotificationChannel.SMS:
-            return user.phone ? this.sendSms(userId, user.phone, title, body, category) : undefined;
+            return user.phone ? this.sendSms(userId, user.phone, title, body, category, idempotencyKey) : undefined;
           case NotificationChannel.WHATSAPP:
-            return user.phone ? this.sendWhatsapp(userId, user.phone, title, body, category) : undefined;
+            return user.phone ? this.sendWhatsapp(userId, user.phone, title, body, category, idempotencyKey) : undefined;
           case NotificationChannel.EMAIL:
-            return user.email ? this.sendEmail(userId, user.email, title, body, category) : undefined;
+            return user.email ? this.sendEmail(userId, user.email, title, body, category, idempotencyKey) : undefined;
           case NotificationChannel.PUSH:
-            return this.sendPush(userId, title, body, metadata as Record<string, string> | undefined, category);
+            return this.sendPush(userId, title, body, metadata as Record<string, string> | undefined, category, idempotencyKey);
         }
       }),
     );
@@ -171,6 +196,14 @@ export class NotificationsService {
 
   // ---- Internals ----
 
+  /**
+   * Creates the row this send will update - or, if an idempotencyKey
+   * is given and a record for this exact (userId, channel, key) already
+   * reached a terminal state (SENT/SIMULATED), returns that one instead
+   * and signals the caller not to send again. FAILED is deliberately
+   * NOT treated as terminal here - a retry after a real failure should
+   * still retry the actual send, not just replay the failure.
+   */
   private async createRecord(
     userId: string,
     channel: NotificationChannel,
@@ -178,10 +211,21 @@ export class NotificationsService {
     body: string,
     metadata?: Record<string, unknown>,
     category: NotificationCategory = NotificationCategory.GENERAL,
-  ): Promise<Notification> {
-    return this.notificationsRepo.save(
-      this.notificationsRepo.create({ userId, channel, category, title, body, metadata: metadata ?? null }),
+    idempotencyKey?: string,
+  ): Promise<{ record: Notification; alreadySent: boolean }> {
+    if (idempotencyKey) {
+      const existing = await this.notificationsRepo.findOne({
+        where: { userId, channel, idempotencyKey },
+        order: { createdAt: 'DESC' },
+      });
+      if (existing && (existing.status === NotificationStatus.SENT || existing.status === NotificationStatus.SIMULATED)) {
+        return { record: existing, alreadySent: true };
+      }
+    }
+    const record = await this.notificationsRepo.save(
+      this.notificationsRepo.create({ userId, channel, category, title, body, metadata: metadata ?? null, idempotencyKey: idempotencyKey ?? null }),
     );
+    return { record, alreadySent: false };
   }
 
   private async markSimulated(record: Notification): Promise<Notification> {
@@ -224,6 +268,45 @@ export class NotificationsService {
       "Your driver is waiting at the pickup point.",
       undefined,
       NotificationCategory.RIDE,
+    );
+  }
+
+  @OnEvent('ride.scheduled_reminder')
+  async onScheduledRideReminder(payload: { passengerId: string; pickupAddress: string; scheduledAt: Date | null }) {
+    const timeLabel = payload.scheduledAt
+      ? new Date(payload.scheduledAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+      : 'soon';
+    await this.safeNotify(
+      payload.passengerId,
+      [NotificationChannel.IN_APP, NotificationChannel.PUSH],
+      'Upcoming ride reminder',
+      `Your ride from ${payload.pickupAddress} is scheduled for ${timeLabel}.`,
+      undefined,
+      NotificationCategory.RIDE,
+    );
+  }
+
+  @OnEvent('split_fare.expired')
+  async onSplitFareExpired(payload: { initiatorId: string; rideId: string }) {
+    await this.safeNotify(
+      payload.initiatorId,
+      [NotificationChannel.IN_APP, NotificationChannel.PUSH],
+      'Split fare request expired',
+      "Not everyone paid their share in time. You'll need to cover the rest, or ask them to pay you directly.",
+      undefined,
+      NotificationCategory.RIDE,
+    );
+  }
+
+  @OnEvent('corporate.ride_flagged_for_approval')
+  async onCorporateRideFlaggedForApproval(payload: { ownerId: string; rideId: string; fareAmount: number }) {
+    await this.safeNotify(
+      payload.ownerId,
+      [NotificationChannel.IN_APP, NotificationChannel.EMAIL],
+      'A ride needs your review',
+      `A ride costing ₦${payload.fareAmount.toLocaleString()} exceeded your company's approval threshold and is waiting for your review.`,
+      undefined,
+      NotificationCategory.GENERAL,
     );
   }
 

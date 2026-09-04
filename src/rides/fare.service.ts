@@ -86,6 +86,37 @@ export class FareService {
   }
 
   /**
+   * Multi-stop routing is just resolveRoute() applied leg by leg and
+   * summed - pickup→stop1, stop1→stop2, ..., lastStop→dropoff - not a
+   * separate routing concept. usedRealRouting is true only if EVERY
+   * leg got real directions; one leg falling back to Haversine (a
+   * transient Directions API failure) makes the whole trip's routing
+   * flag honest about being partially estimated, not silently hiding
+   * it behind the legs that did succeed.
+   */
+  private async resolveRouteWithStops(
+    pickup: { lat: number; lng: number },
+    dropoff: { lat: number; lng: number },
+    stops?: { lat: number; lng: number }[],
+  ): Promise<{ distanceKm: number; durationMin: number; usedRealRouting: boolean }> {
+    if (!stops || stops.length === 0) return this.resolveRoute(pickup, dropoff);
+
+    const waypoints = [pickup, ...stops, dropoff];
+    let totalDistanceKm = 0;
+    let totalDurationMin = 0;
+    let allLegsUsedRealRouting = true;
+
+    for (let i = 0; i < waypoints.length - 1; i++) {
+      const leg = await this.resolveRoute(waypoints[i], waypoints[i + 1]);
+      totalDistanceKm += leg.distanceKm;
+      totalDurationMin += leg.durationMin;
+      if (!leg.usedRealRouting) allLegsUsedRealRouting = false;
+    }
+
+    return { distanceKm: totalDistanceKm, durationMin: totalDurationMin, usedRealRouting: allLegsUsedRealRouting };
+  }
+
+  /**
    * Tiered time-based fare: the first `tierMinutes` of estimated trip
    * duration cost `tierBaseFare` flat. Each additional block of
    * `tierMinutes` (a partial block still counts as a full one, same as
@@ -120,10 +151,10 @@ export class FareService {
     category: RideCategory,
     pickup: { lat: number; lng: number },
     dropoff: { lat: number; lng: number },
-    options: { surgeMultiplier?: number; isAirportTrip?: boolean; at?: Date } = {},
+    options: { surgeMultiplier?: number; isAirportTrip?: boolean; at?: Date; stops?: { lat: number; lng: number }[] } = {},
   ): Promise<FareBreakdown> {
     const surgeMultiplier = options.surgeMultiplier ?? 1.0;
-    const { distanceKm, durationMin, usedRealRouting } = await this.resolveRoute(pickup, dropoff);
+    const { distanceKm, durationMin, usedRealRouting } = await this.resolveRouteWithStops(pickup, dropoff, options.stops);
 
     const perKm = await this.settingsService.getNumber(
       SETTING_KEYS.PRICING_PER_KM,

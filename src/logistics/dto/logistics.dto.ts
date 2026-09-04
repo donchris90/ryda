@@ -4,6 +4,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  IsUrl,
   Min,
 } from 'class-validator';
 import {
@@ -98,4 +99,39 @@ export class CancelDeliveryDto {
   @IsOptional()
   @IsString()
   reason?: string;
+}
+
+export class MarkDeliveredDto {
+  // Uploaded separately via POST /storage/upload/delivery-proof - this
+  // just links the resulting URL. Always required (see
+  // LogisticsService.markDelivered()'s own reasoning for why).
+  @IsUrl()
+  photoUrl: string;
+
+  // Only actually required when the order itself was flagged
+  // requiresSignature at creation - enforced in the service layer,
+  // not here, since that check depends on the order's own data.
+  @IsOptional()
+  @IsUrl()
+  signatureUrl?: string;
+
+  @IsOptional()
+  @IsString()
+  recipientName?: string;
+
+  @IsOptional()
+  @IsNumber()
+  deliveryLat?: number;
+
+  @IsOptional()
+  @IsNumber()
+  deliveryLng?: number;
+
+  // Only actually required for COD orders (order.isCod) - enforced in
+  // the service layer since that depends on the order's own data, same
+  // reasoning as signatureUrl above.
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  codCollectedAmount?: number;
 }

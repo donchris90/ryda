@@ -27,6 +27,7 @@ import { ObservabilityModule } from '../observability/observability.module';
 import { CandidateSearchModule } from '../candidate-search/candidate-search.module';
 import { RankingModule } from '../ranking/ranking.module';
 import { GeofenceModule } from '../tracking/geofence/geofence.module';
+import { FraudModule } from '../fraud/fraud.module';
 
 @Module({
   imports: [
@@ -52,6 +53,7 @@ import { GeofenceModule } from '../tracking/geofence/geofence.module';
     CandidateSearchModule,
     RankingModule,
     GeofenceModule,
+    FraudModule,
   ],
   providers: [RidesService, FareService, ScheduledRideProcessor],
   controllers: [RidesController, AdminDispatchController],

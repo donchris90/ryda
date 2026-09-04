@@ -11,6 +11,7 @@ import { OtpPurpose } from '../otp/otp-code.entity';
 import { SystemSettingsService, SETTING_KEYS } from '../settings/settings.service';
 import { TransactionCategory } from '../common/enums/transaction.enum';
 import { InitiateTransferDto, ConfirmTransferDto } from './dto/transfer.dto';
+import { FraudService } from '../fraud/fraud.service';
 
 const TRANSFER_REQUEST_TTL_MINUTES = 10;
 
@@ -45,6 +46,7 @@ export class WalletTransfersService {
     private readonly usersService: UsersService,
     private readonly otpService: OtpService,
     private readonly settingsService: SystemSettingsService,
+    private readonly fraudService: FraudService,
   ) {}
 
   async initiate(senderId: string, dto: InitiateTransferDto) {
@@ -181,6 +183,19 @@ export class WalletTransfersService {
 
     request.status = WalletTransferStatus.COMPLETED;
     await this.transferRequestsRepo.save(request);
+
+    // Fire-and-forget, same reasoning as the other fraud checks -
+    // never let this affect the transfer response itself. Counts
+    // TRANSFER_SENT transactions for this sender in the last hour -
+    // velocity, not the daily value cap already enforced elsewhere.
+    const recentTransferCount = await this.txRepo.count({
+      where: {
+        walletId: senderWallet.id,
+        category: TransactionCategory.TRANSFER_SENT,
+        createdAt: MoreThan(new Date(Date.now() - 60 * 60 * 1000)),
+      },
+    });
+    this.fraudService.checkWalletVelocity(senderId, recentTransferCount).catch(() => undefined);
 
     return {
       transferRequestId: request.id,

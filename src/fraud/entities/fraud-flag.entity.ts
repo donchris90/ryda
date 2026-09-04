@@ -12,16 +12,28 @@ export enum FraudFlagType {
   GPS_SPOOF = 'gps_spoof', // implied travel speed physically impossible
   REFERRAL_ABUSE = 'referral_abuse', // referrer and referee share a device
   MULTIPLE_ACCOUNTS_SAME_DEVICE = 'multiple_accounts_same_device',
+  NEW_DEVICE_LOGIN = 'new_device_login', // login from a device fingerprint never seen before for this account
+  HIGH_RISK_WITHDRAWAL_ATTEMPT = 'high_risk_withdrawal_attempt', // withdrawal allowed to proceed, but the requester's risk band was HIGH
+  CRITICAL_RISK_WITHDRAWAL_BLOCKED = 'critical_risk_withdrawal_blocked', // withdrawal itself refused - risk band was CRITICAL
+  REPEATED_PAYMENT_FAILURES = 'repeated_payment_failures', // several card charges failed in a short window - possible card testing
+  MULTIPLE_CARDS_ADDED = 'multiple_cards_added', // several distinct cards added to one account in a short window
+  REPEATED_PROMO_REDEMPTION = 'repeated_promo_redemption', // several promo codes redeemed by one user in a short window
+  REPEATED_CANCELLATIONS = 'repeated_cancellations', // several rides cancelled by the same passenger in a short window
+  EXCESSIVE_REFUNDS = 'excessive_refunds', // several refunds issued to the same user in a short window
+  UNUSUAL_WALLET_VELOCITY = 'unusual_wallet_velocity', // several wallet-to-wallet transfers sent by the same user in a short window
+  CHARGEBACK_HISTORY = 'chargeback_history', // one or more chargebacks resolved against this user
 }
 
 export enum FraudFlagSeverity {
   LOW = 'low',
   MEDIUM = 'medium',
   HIGH = 'high',
+  CRITICAL = 'critical',
 }
 
 export enum FraudFlagStatus {
   OPEN = 'open',
+  ESCALATED = 'escalated',
   REVIEWED = 'reviewed',
   DISMISSED = 'dismissed',
 }

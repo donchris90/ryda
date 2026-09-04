@@ -1,7 +1,6 @@
 import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { FraudFlag, FraudFlagSeverity, FraudFlagStatus } from '../fraud/entities/fraud-flag.entity';
+import { FraudFlagStatus } from '../fraud/entities/fraud-flag.entity';
+import { RiskEngineService, RiskBand } from '../fraud/risk-engine.service';
 
 export interface RiskScoreResult {
   userId: string;
@@ -11,45 +10,36 @@ export interface RiskScoreResult {
   contributingFlags: { type: string; severity: string }[];
 }
 
-const SEVERITY_WEIGHT: Record<FraudFlagSeverity, number> = {
-  [FraudFlagSeverity.LOW]: 10,
-  [FraudFlagSeverity.MEDIUM]: 25,
-  [FraudFlagSeverity.HIGH]: 45,
+const BAND_TO_LEVEL: Record<RiskBand, RiskScoreResult['level']> = {
+  [RiskBand.LOW]: 'low',
+  [RiskBand.MEDIUM]: 'medium',
+  [RiskBand.HIGH]: 'high',
+  [RiskBand.CRITICAL]: 'critical',
 };
 
 /**
- * Turns FraudService's individual flags into one composite score per user
- * — makes "should we look at this account" a single number instead of
- * making an admin manually weigh several separate flags. Dismissed flags
- * don't contribute; reviewed-but-not-dismissed ones count at half weight
- * (a human already looked and didn't clear it, but didn't escalate either).
+ * Thin adapter over RiskEngineService (see fraud/risk-engine.service.ts
+ * for the actual scoring logic, now the single source of truth) -
+ * kept so the existing GET /ai/fraud-risk/:userId endpoint's response
+ * shape doesn't change for whatever already calls it. score here is
+ * clamped to 0-100 for that same backward-compatibility reason (the
+ * underlying engine's score is unbounded, since severity weights and
+ * band thresholds are independently admin-configurable and could be
+ * set arbitrarily high).
  */
 @Injectable()
 export class FraudAiService {
-  constructor(
-    @InjectRepository(FraudFlag)
-    private readonly flagsRepo: Repository<FraudFlag>,
-  ) {}
+  constructor(private readonly riskEngineService: RiskEngineService) {}
 
   async getRiskScore(userId: string): Promise<RiskScoreResult> {
-    const flags = await this.flagsRepo.find({ where: { userId } });
-    const relevant = flags.filter((f) => f.status !== FraudFlagStatus.DISMISSED);
-
-    let rawScore = 0;
-    for (const flag of relevant) {
-      const weight = SEVERITY_WEIGHT[flag.severity];
-      rawScore += flag.status === FraudFlagStatus.REVIEWED ? weight * 0.5 : weight;
-    }
-
-    const score = Math.min(100, Math.round(rawScore));
-    const level = score >= 70 ? 'critical' : score >= 40 ? 'high' : score >= 15 ? 'medium' : 'low';
+    const assessment = await this.riskEngineService.assess(userId);
 
     return {
       userId,
-      score,
-      level,
-      openFlagCount: relevant.filter((f) => f.status === FraudFlagStatus.OPEN).length,
-      contributingFlags: relevant.map((f) => ({ type: f.type, severity: f.severity })),
+      score: Math.min(100, Math.round(assessment.score)),
+      level: BAND_TO_LEVEL[assessment.band],
+      openFlagCount: assessment.reasons.filter((r) => r.status === FraudFlagStatus.OPEN).length,
+      contributingFlags: assessment.reasons.map((r) => ({ type: r.type, severity: r.severity })),
     };
   }
 }

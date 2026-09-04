@@ -15,6 +15,7 @@ import { AuditModule } from '../audit/audit.module';
 import { FraudModule } from '../fraud/fraud.module';
 import { OtpModule } from '../otp/otp.module';
 import { MailerModule } from '../mailer/mailer.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { MailerModule } from '../mailer/mailer.module';
     FraudModule,
     OtpModule,
     MailerModule,
+    NotificationsModule,
     PassportModule,
     JwtModule.registerAsync({
       inject: [ConfigService],

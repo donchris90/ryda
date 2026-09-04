@@ -75,6 +75,7 @@ function buildService(overrides: Record<string, any> = {}) {
     deps.driverRankingService as any,
     deps.geofenceService as any,
     {} as any, // airportService (not exercised by this suite's scenarios)
+    {} as any, // fraudService (not exercised by this suite's scenarios)
   );
 
   return { service, deps };

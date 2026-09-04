@@ -17,6 +17,7 @@ import { PaymentsModule } from '../payments/payments.module';
 import { UsersModule } from '../users/users.module';
 import { OtpModule } from '../otp/otp.module';
 import { MailerModule } from '../mailer/mailer.module';
+import { FraudModule } from '../fraud/fraud.module';
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { MailerModule } from '../mailer/mailer.module';
     UsersModule,
     OtpModule,
     MailerModule,
+    FraudModule,
   ],
   providers: [WalletsService, WalletTransfersService, WithdrawalsService],
   controllers: [WalletsController, AdminWalletsController, WithdrawalsController],

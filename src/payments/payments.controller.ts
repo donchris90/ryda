@@ -192,6 +192,21 @@ export class PaymentsController {
       return { received: true };
     }
 
+    // Chargebacks - charge.dispute.create when one's first raised,
+    // .remind every 4 hours until resolved, .resolve with the final
+    // outcome. All three update the same PaymentDispute row (keyed by
+    // Paystack's own dispute id), so only .resolve triggers a fraud
+    // check - .create/.remind are still open disputes with no outcome
+    // to score yet.
+    if (
+      event.event === 'charge.dispute.create' ||
+      event.event === 'charge.dispute.remind' ||
+      event.event === 'charge.dispute.resolve'
+    ) {
+      await this.paymentsService.handleDisputeWebhook(event.event, event.data);
+      return { received: true };
+    }
+
     const reference: string | undefined = event?.data?.reference;
     if (!reference) return { received: true };
 

@@ -62,8 +62,31 @@ export class SupportTicket {
   @Column({ type: 'varchar', nullable: true })
   rideId: string | null;
 
+  // Set when this ticket is about a specific payment (charge dispute,
+  // refund request) - the "payment context" a support agent needs
+  // without having to go dig through the passenger's payment history
+  // themselves.
+  @Index()
+  @Column({ type: 'varchar', nullable: true })
+  paymentId: string | null;
+
   @Column({ type: 'varchar', nullable: true })
   assignedAgentId: string | null;
+
+  // Computed at creation and whenever priority changes, from the
+  // admin-configurable per-priority SLA minutes (SETTING_KEYS.
+  // SLA_RESOLUTION_MINUTES_*). Null only for a ticket created before
+  // this column existed - never recomputed retroactively for those.
+  @Column({ type: 'timestamp', nullable: true })
+  dueAt: Date | null;
+
+  // Set the first time a support-staff message (not the customer's
+  // own) is added to this ticket - first-response time is a distinct
+  // SLA metric from resolution time, and conflating them would hide
+  // a ticket that got a fast first reply but then stalled, or vice
+  // versa.
+  @Column({ type: 'timestamp', nullable: true })
+  firstRespondedAt: Date | null;
 
   @CreateDateColumn()
   createdAt: Date;

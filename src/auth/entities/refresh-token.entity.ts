@@ -28,6 +28,21 @@ export class RefreshToken {
   @Column()
   expiresAt: Date;
 
+  // Session context, captured at issue time - what "session management"
+  // (listing/revoking individual logins) and suspicious-login detection
+  // both need to show/compare. All nullable: a client that sends no
+  // deviceFingerprint (e.g. a browser) or a request the server couldn't
+  // get a real IP for still gets a session row, just a less descriptive
+  // one - never blocks issuing the token over missing context.
+  @Column({ type: 'varchar', nullable: true })
+  deviceFingerprint: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  ipAddress: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  userAgent: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 }

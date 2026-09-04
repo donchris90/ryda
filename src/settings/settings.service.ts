@@ -30,6 +30,35 @@ export const SETTING_KEYS = {
   WALLET_TRANSFER_MAX_PER_TRANSACTION: 'wallet.transferMaxPerTransaction',
   WALLET_TRANSFER_MAX_DAILY: 'wallet.transferMaxDaily',
   WALLET_TRANSFER_FEE: 'wallet.transferFee',
+  // Risk engine (fraud module) - per-severity score weights and the
+  // score thresholds that separate LOW/MEDIUM/HIGH/CRITICAL bands.
+  // Admin-configurable so the bands can be tuned without a redeploy as
+  // real false-positive/false-negative rates come in.
+  RISK_WEIGHT_LOW: 'risk.weightLow',
+  RISK_WEIGHT_MEDIUM: 'risk.weightMedium',
+  RISK_WEIGHT_HIGH: 'risk.weightHigh',
+  RISK_WEIGHT_CRITICAL: 'risk.weightCritical',
+  RISK_THRESHOLD_MEDIUM: 'risk.thresholdMedium',
+  RISK_THRESHOLD_HIGH: 'risk.thresholdHigh',
+  RISK_THRESHOLD_CRITICAL: 'risk.thresholdCritical',
+  RISK_LOOKBACK_DAYS: 'risk.lookbackDays',
+  // Support ticket SLA - minutes from creation (or a priority change)
+  // to the resolution due-by timestamp, per priority tier. Admin-
+  // configurable so response-time targets can be tuned without a
+  // redeploy.
+  SLA_RESOLUTION_MINUTES_URGENT: 'support.slaMinutesUrgent',
+  SLA_RESOLUTION_MINUTES_HIGH: 'support.slaMinutesHigh',
+  SLA_RESOLUTION_MINUTES_NORMAL: 'support.slaMinutesNormal',
+  SLA_RESOLUTION_MINUTES_LOW: 'support.slaMinutesLow',
+  // Minutes before a scheduled ride's pickup time that the reminder
+  // notification fires (separate from dispatch.scheduledRideLeadMinutes,
+  // which controls when the ride actually activates for matching -
+  // the reminder is meant to fire well before that, not at the same
+  // moment).
+  SCHEDULED_RIDE_REMINDER_LEAD_MINUTES: 'rides.scheduledReminderLeadMinutes',
+  // Minutes after a split-fare request is created that any
+  // still-unpaid participant invite expires.
+  SPLIT_FARE_EXPIRY_MINUTES: 'rides.splitFareExpiryMinutes',
   CONTACT_COMPANY_NAME: 'contact.companyName',
   CONTACT_SUPPORT_EMAIL: 'contact.supportEmail',
   CONTACT_SUPPORT_PHONE: 'contact.supportPhone',

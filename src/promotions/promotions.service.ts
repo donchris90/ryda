@@ -1,6 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { MoreThan, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Promotion, PromotionType } from './entities/promotion.entity';
 import { PromotionRedemption } from './entities/promotion-redemption.entity';
@@ -122,6 +122,14 @@ export class PromotionsService {
       }),
     );
     await this.promotionsRepo.increment({ id: preview.promotion.id }, 'timesRedeemed', 1);
+
+    // Fire-and-forget, same reasoning as the payment-fraud checks -
+    // never let a fraud-check hiccup affect the redemption the caller
+    // is waiting on.
+    const recentRedemptionCount = await this.redemptionsRepo.count({
+      where: { userId, redeemedAt: MoreThan(new Date(Date.now() - 24 * 60 * 60 * 1000)) },
+    });
+    this.fraudService.checkPromoRedemptionPattern(userId, recentRedemptionCount).catch(() => undefined);
 
     this.events.emit('promotion.redeemed', {
       userId,

@@ -5,8 +5,8 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { UserRole } from '../common/enums/user-role.enum';
 import { User } from '../users/entities/user.entity';
-import { SupportService } from './support.service';
-import { AddMessageDto, AssignTicketDto, CreateTicketDto } from './dto/support.dto';
+import { SupportService, SUPPORT_STAFF_ROLES } from './support.service';
+import { AddMessageDto, AssignTicketDto, CreateTicketDto, UpdateTicketPriorityDto } from './dto/support.dto';
 import { TicketStatus } from './entities/support-ticket.entity';
 import { Audit } from '../audit/decorators/audit.decorator';
 
@@ -17,7 +17,11 @@ export class SupportController {
 
   @Post('support/tickets')
   create(@CurrentUser() user: User, @Body() dto: CreateTicketDto) {
-    return this.supportService.createTicket(user.id, dto);
+    // A customer can't self-declare their own ticket URGENT - only
+    // staff logging a ticket on a caller's behalf get to set priority
+    // directly at creation (see CreateTicketDto's own doc comment).
+    const isStaff = SUPPORT_STAFF_ROLES.includes(user.role as UserRole);
+    return this.supportService.createTicket(user.id, isStaff ? dto : { ...dto, priority: undefined });
   }
 
   @Get('support/tickets/mine')
@@ -56,6 +60,15 @@ export class SupportController {
     return this.supportService.assign(id, dto.agentUserId);
   }
 
+  /** Also recomputes the SLA due-by timestamp for the new priority - see SupportService.setPriority(). */
+  @Patch('support/tickets/:id/priority')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.SUPPORT_AGENT)
+  @Audit('support_ticket.priority_change')
+  setPriority(@Param('id') id: string, @Body() dto: UpdateTicketPriorityDto) {
+    return this.supportService.setPriority(id, dto.priority);
+  }
+
   @Get('admin/support/tickets')
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.SUPPORT_AGENT)
@@ -63,6 +76,7 @@ export class SupportController {
     @Query('status') status?: TicketStatus,
     @Query('category') category?: string,
     @Query('assignedAgentId') assignedAgentId?: string,
+    @Query('breachedOnly') breachedOnly?: string,
     @Query('page') page?: string,
     @Query('pageSize') pageSize?: string,
   ) {
@@ -70,6 +84,7 @@ export class SupportController {
       status,
       category,
       assignedAgentId,
+      breachedOnly: breachedOnly === 'true',
       page: page ? parseInt(page, 10) : undefined,
       pageSize: pageSize ? parseInt(pageSize, 10) : undefined,
     });

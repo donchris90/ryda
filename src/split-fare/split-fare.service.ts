@@ -1,12 +1,15 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { Cron, CronExpression } from '@nestjs/schedule';
+import { EventEmitter2 } from '@nestjs/event-emitter';
 import { SplitFareRequest, SplitFareStatus } from './entities/split-fare-request.entity';
 import { SplitFareParticipant, SplitParticipantStatus } from './entities/split-fare-participant.entity';
 import { Ride } from '../rides/entities/ride.entity';
 import { UsersService } from '../users/users.service';
 import { WalletsService } from '../wallets/wallets.service';
 import { TransactionCategory } from '../common/enums/transaction.enum';
+import { SystemSettingsService, SETTING_KEYS } from '../settings/settings.service';
 
 interface CreateSplitInput {
   participantPhones: string[];
@@ -16,6 +19,8 @@ interface CreateSplitInput {
 
 @Injectable()
 export class SplitFareService {
+  private readonly logger = new Logger(SplitFareService.name);
+
   constructor(
     @InjectRepository(SplitFareRequest)
     private readonly requestsRepo: Repository<SplitFareRequest>,
@@ -25,6 +30,8 @@ export class SplitFareService {
     private readonly ridesRepo: Repository<Ride>,
     private readonly usersService: UsersService,
     private readonly walletsService: WalletsService,
+    private readonly settingsService: SystemSettingsService,
+    private readonly events: EventEmitter2,
   ) {}
 
   async create(rideId: string, initiatorId: string, input: CreateSplitInput): Promise<SplitFareRequest> {
@@ -71,8 +78,14 @@ export class SplitFareService {
       }),
     );
 
+    const expiryMinutes = await this.settingsService.getNumber(SETTING_KEYS.SPLIT_FARE_EXPIRY_MINUTES, 48 * 60);
     const request = await this.requestsRepo.save(
-      this.requestsRepo.create({ rideId, initiatorId, totalAmount: totalFare.toFixed(2) }),
+      this.requestsRepo.create({
+        rideId,
+        initiatorId,
+        totalAmount: totalFare.toFixed(2),
+        expiresAt: new Date(Date.now() + expiryMinutes * 60 * 1000),
+      }),
     );
 
     await this.participantsRepo.save(
@@ -109,6 +122,9 @@ export class SplitFareService {
     if (participant.status === SplitParticipantStatus.PAID) {
       throw new BadRequestException('You already paid your share');
     }
+    if (request.status === SplitFareStatus.EXPIRED) {
+      throw new BadRequestException('This split fare request has expired');
+    }
 
     const amount = parseFloat(participant.amountOwed);
     const participantWallet = await this.walletsService.getByUserId(participantUserId);
@@ -140,5 +156,36 @@ export class SplitFareService {
     }
 
     return participant;
+  }
+
+  /**
+   * Same shape as WithdrawalsService/WalletTransfersService's own
+   * expireStaleRequests() - a bulk status update, not one row at a
+   * time. Only PENDING requests past their own expiresAt are touched;
+   * a COMPLETED or already-CANCELLED request is left alone regardless
+   * of how old it is. Notifies the initiator afterward so they know
+   * some participants never paid, rather than leaving them to
+   * discover it by checking the ride's split-fare screen themselves.
+   */
+  @Cron(CronExpression.EVERY_HOUR)
+  async expireStaleRequests(): Promise<void> {
+    const stale = await this.requestsRepo.find({
+      where: { status: SplitFareStatus.PENDING },
+    });
+    const toExpire = stale.filter((r) => r.expiresAt && r.expiresAt < new Date());
+    if (toExpire.length === 0) return;
+
+    await this.requestsRepo
+      .createQueryBuilder()
+      .update(SplitFareRequest)
+      .set({ status: SplitFareStatus.EXPIRED })
+      .where('id IN (:...ids)', { ids: toExpire.map((r) => r.id) })
+      .execute();
+
+    this.logger.log(`Marked ${toExpire.length} stale split fare request(s) as expired.`);
+
+    for (const request of toExpire) {
+      this.events.emit('split_fare.expired', { initiatorId: request.initiatorId, rideId: request.rideId });
+    }
   }
 }

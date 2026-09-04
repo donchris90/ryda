@@ -11,6 +11,7 @@ import { MoreThan, Repository } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { PaymentRecord, PaymentStatus } from './entities/payment-record.entity';
 import { SavedCard } from './entities/saved-card.entity';
+import { PaymentDispute, DisputeStatus, DisputeResolution } from './entities/payment-dispute.entity';
 import { PaymentMethod } from '../common/enums/ride.enum';
 import { PaystackService } from './paystack/paystack.service';
 import { ConfigService } from '@nestjs/config';
@@ -18,6 +19,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter';
 import { WalletsService } from '../wallets/wallets.service';
 import { TransactionCategory } from '../common/enums/transaction.enum';
 import { User } from '../users/entities/user.entity';
+import { FraudService } from '../fraud/fraud.service';
 
 export interface ChargeResult {
   record: PaymentRecord;
@@ -37,6 +39,9 @@ export class PaymentsService {
     private readonly events: EventEmitter2,
     @Inject(forwardRef(() => WalletsService))
     private readonly walletsService: WalletsService,
+    private readonly fraudService: FraudService,
+    @InjectRepository(PaymentDispute)
+    private readonly disputesRepo: Repository<PaymentDispute>,
   ) {}
 
   // ---------------------------------------------------------------------
@@ -306,7 +311,21 @@ export class PaymentsService {
       record.failureReason = (err as Error).message;
     }
 
-    return this.paymentsRepo.save(record);
+    const saved = await this.paymentsRepo.save(record);
+
+    if (saved.status === PaymentStatus.FAILED) {
+      // Fire-and-forget: a fraud-check hiccup must never affect the
+      // payment response the caller is waiting on. Classic
+      // card-testing signature - several failed charges clustering
+      // in a short window - not "this user's card happened to
+      // decline once," which is common and unremarkable on its own.
+      const recentFailureCount = await this.paymentsRepo.count({
+        where: { userId, method: PaymentMethod.CARD, status: PaymentStatus.FAILED, createdAt: MoreThan(new Date(Date.now() - 30 * 60 * 1000)) },
+      });
+      this.fraudService.checkPaymentFailurePattern(userId, recentFailureCount).catch(() => undefined);
+    }
+
+    return saved;
   }
 
   /**
@@ -524,15 +543,15 @@ export class PaymentsService {
     succeeded: boolean,
     expectedAmount?: number,
   ): Promise<void> {
-    await this.paymentsRepo.manager.transaction(async (manager) => {
+    const refundedUserId = await this.paymentsRepo.manager.transaction(async (manager) => {
       const record = await manager.findOne(PaymentRecord, {
         where: { reference },
         lock: { mode: 'pessimistic_write' },
       });
-      if (!record) return;
+      if (!record) return null;
 
       const pending = parseFloat(record.pendingRefundAmount ?? '0');
-      if (pending <= 0) return; // nothing in flight — already resolved
+      if (pending <= 0) return null; // nothing in flight — already resolved
 
       const amount = expectedAmount ?? pending;
 
@@ -548,7 +567,23 @@ export class PaymentsService {
       }
       record.pendingRefundAmount = null;
       await manager.save(record);
+      return succeeded ? record.userId : null;
     });
+
+    if (refundedUserId) {
+      // Fire-and-forget, outside the transaction - a fraud-check
+      // hiccup must never roll back a refund that already genuinely
+      // succeeded. Counts REFUNDED/PARTIALLY_REFUNDED payment records
+      // for this user, not just this one - the signal is several
+      // refunds, not the size of any single one.
+      const recentRefundCount = await this.paymentsRepo.count({
+        where: [
+          { userId: refundedUserId, status: PaymentStatus.REFUNDED, createdAt: MoreThan(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)) },
+          { userId: refundedUserId, status: PaymentStatus.PARTIALLY_REFUNDED, createdAt: MoreThan(new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)) },
+        ],
+      });
+      this.fraudService.checkExcessiveRefunds(refundedUserId, recentRefundCount).catch(() => undefined);
+    }
   }
 
   /** Called from the webhook controller on refund.processed/refund.failed. */
@@ -557,6 +592,54 @@ export class PaymentsService {
     succeeded: boolean,
   ): Promise<void> {
     await this.finalizeRefund(transactionReference, succeeded);
+  }
+
+  /**
+   * Handles all three Paystack dispute events (charge.dispute.create,
+   * .remind, .resolve) through one method, keyed by Paystack's own
+   * dispute id - upserts rather than always-inserting, since .remind
+   * fires every 4 hours for the SAME dispute until it's resolved, and
+   * a webhook can always be replayed. Only .resolve (status RESOLVED)
+   * checks the fraud pattern - .create and .remind are still open,
+   * nothing to score yet.
+   */
+  async handleDisputeWebhook(eventType: string, data: {
+    id: number | string;
+    status: string;
+    resolution?: string | null;
+    amount: number; // kobo, per every other Paystack amount field
+    reason?: string | null;
+    dueAt?: string | null;
+    transaction?: { reference?: string };
+  }): Promise<void> {
+    const paystackDisputeId = String(data.id);
+    const paymentReference = data.transaction?.reference;
+    if (!paymentReference) return; // malformed payload — nothing to link this to
+
+    const existing = await this.disputesRepo.findOne({ where: { paystackDisputeId } });
+    const paymentRecord = await this.paymentsRepo.findOne({ where: { reference: paymentReference } });
+
+    const dispute = existing ?? this.disputesRepo.create({ paystackDisputeId, paymentReference });
+    dispute.userId = paymentRecord?.userId ?? dispute.userId ?? null;
+    dispute.amount = (data.amount / 100).toFixed(2);
+    dispute.status = (data.status as DisputeStatus) ?? DisputeStatus.AWAITING_MERCHANT_FEEDBACK;
+    dispute.resolution = (data.resolution as DisputeResolution) ?? null;
+    dispute.reason = data.reason ?? dispute.reason ?? null;
+    dispute.dueAt = data.dueAt ? new Date(data.dueAt) : dispute.dueAt ?? null;
+    const saved = await this.disputesRepo.save(dispute);
+
+    if (eventType === 'charge.dispute.resolve' && saved.status === DisputeStatus.RESOLVED && saved.userId) {
+      // Fire-and-forget, same reasoning as every other fraud check in
+      // this service - never let it affect the webhook response
+      // Paystack is waiting on. Counts every RESOLVED dispute for this
+      // user, not just this one - a first dispute is still a real
+      // signal (see checkChargebackHistory's own doc comment), several
+      // is a much stronger one.
+      const resolvedCount = await this.disputesRepo.count({
+        where: { userId: saved.userId, status: DisputeStatus.RESOLVED },
+      });
+      this.fraudService.checkChargebackHistory(saved.userId, resolvedCount).catch(() => undefined);
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -646,7 +729,18 @@ export class PaymentsService {
       bank,
       isDefault: hasAnyCard === 0,
     });
-    return this.savedCardsRepo.save(card);
+    const saved = await this.savedCardsRepo.save(card);
+
+    // Fire-and-forget, same reasoning as the payment-failure check
+    // above - the signal is several distinct cards added quickly
+    // (stolen-card-list testing), not the ordinary case of a user
+    // adding one or two cards over time.
+    const recentCardCount = await this.savedCardsRepo.count({
+      where: { userId, createdAt: MoreThan(new Date(Date.now() - 30 * 60 * 1000)) },
+    });
+    this.fraudService.checkMultipleCardsAdded(userId, recentCardCount).catch(() => undefined);
+
+    return saved;
   }
 
   // ---------------------------------------------------------------------
