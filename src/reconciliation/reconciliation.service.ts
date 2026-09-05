@@ -69,6 +69,54 @@ export class ReconciliationService {
     return this.repo.find({ where: { status: ReconciliationStatus.PENDING }, order: { createdAt: 'ASC' } });
   }
 
+  /**
+   * Platform-wide totals for the admin Reconciliation page's summary cards
+   * (Outstanding / Drivers owing / Settled to date / Written off). Distinct
+   * from getOutstandingBalance(), which is scoped to a single driver -
+   * this aggregates across every driver/fleet at once, so it's implemented
+   * with grouped SQL rather than reusing the per-driver method in a loop.
+   */
+  async getSummary(): Promise<{
+    pendingCount: number;
+    pendingTotal: string;
+    settledCount: number;
+    settledTotal: string;
+    writtenOffCount: number;
+    writtenOffTotal: string;
+    driversWithPendingDebt: number;
+  }> {
+    const rows = await this.repo
+      .createQueryBuilder('r')
+      .select('r.status', 'status')
+      .addSelect('COUNT(*)', 'count')
+      .addSelect('COALESCE(SUM(r.amountOwed), 0)', 'total')
+      .groupBy('r.status')
+      .getRawMany<{ status: ReconciliationStatus; count: string; total: string }>();
+
+    const byStatus = new Map(rows.map((r) => [r.status, r]));
+
+    const pending = byStatus.get(ReconciliationStatus.PENDING);
+    const settled = byStatus.get(ReconciliationStatus.SETTLED);
+    const writtenOff = byStatus.get(ReconciliationStatus.WRITTEN_OFF);
+
+    const driversRow = await this.repo
+      .createQueryBuilder('r')
+      .select('COUNT(DISTINCT r.driverId)', 'driversWithPendingDebt')
+      .where('r.status = :status', { status: ReconciliationStatus.PENDING })
+      .andWhere('r.driverId IS NOT NULL')
+      .getRawOne<{ driversWithPendingDebt: string }>();
+
+    return {
+      pendingCount: Number(pending?.count ?? 0),
+      pendingTotal: parseFloat(pending?.total ?? '0').toFixed(2),
+      settledCount: Number(settled?.count ?? 0),
+      settledTotal: parseFloat(settled?.total ?? '0').toFixed(2),
+      writtenOffCount: Number(writtenOff?.count ?? 0),
+      writtenOffTotal: parseFloat(writtenOff?.total ?? '0').toFixed(2),
+      driversWithPendingDebt: Number(driversRow?.driversWithPendingDebt ?? 0),
+    };
+  }
+
   async writeOff(id: string, adminUserId: string, reason: string): Promise<CashReconciliation> {
     const item = await this.repo.findOne({ where: { id } });
     if (!item) throw new NotFoundException('Reconciliation item not found');

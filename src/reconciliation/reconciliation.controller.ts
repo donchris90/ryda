@@ -30,6 +30,13 @@ export class ReconciliationController {
     return { summary, items };
   }
 
+  @Get('admin/reconciliation/summary')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCE)
+  getSummary() {
+    return this.reconciliationService.getSummary();
+  }
+
   @Get('admin/reconciliation/pending')
   @UseGuards(RolesGuard)
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCE)
@@ -54,6 +61,14 @@ export class ReconciliationController {
   @Audit('reconciliation.write_off')
   writeOff(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: WriteOffDto) {
     return this.reconciliationService.writeOff(id, user.id, dto.reason);
+  }
+
+  @Post('admin/reconciliation/driver/:driverId/attempt-settle')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.FINANCE)
+  @Audit('reconciliation.attempt_settle')
+  attemptSettle(@Param('driverId') driverId: string) {
+    return this.reconciliationService.attemptSettle(driverId);
   }
 
   @Post('admin/ledger-audit/scan')
