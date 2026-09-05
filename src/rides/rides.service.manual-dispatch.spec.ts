@@ -276,6 +276,11 @@ describe('RidesService — acceptRide atomic driver reservation', () => {
     return {
       createQueryBuilder: jest.fn(() => queryBuilder),
       findOneOrFail: jest.fn().mockResolvedValue(fakeRide({ status: RideStatus.ACCEPTED })),
+      // Defaults to a non-cancelled status so tests that don't care
+      // about the specific claim-failure reason still get the generic
+      // "accepted by another driver" message - see the dedicated test
+      // below for the cancelled-ride case, which overrides this.
+      findOne: jest.fn().mockResolvedValue(fakeRide({ status: RideStatus.SEARCHING })),
       __queryBuilder: queryBuilder,
       ...overrides,
     };
@@ -383,6 +388,22 @@ describe('RidesService — acceptRide atomic driver reservation', () => {
 
     await expect(service.acceptRide('ride-1', 'driver-1')).rejects.toThrow(
       'This ride was just accepted by another driver.',
+    );
+
+    expect(allDeps.driversService.emitReservedForTrip).not.toHaveBeenCalled();
+  });
+
+  it('gives the accurate reason when the claim lost to a passenger cancellation, not a generic "another driver" message', async () => {
+    const manager = fakeManager();
+    manager.__queryBuilder.execute.mockResolvedValue({ affected: 0 });
+    manager.findOne.mockResolvedValue(fakeRide({ status: RideStatus.CANCELLED }));
+    const deps = baseDeps(manager);
+
+    const { service, deps: allDeps } = buildService(deps);
+    allDeps.ridesRepo.findOne.mockResolvedValue(fakeRide());
+
+    await expect(service.acceptRide('ride-1', 'driver-1')).rejects.toThrow(
+      'This ride was just cancelled by the passenger.',
     );
 
     expect(allDeps.driversService.emitReservedForTrip).not.toHaveBeenCalled();

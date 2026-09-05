@@ -456,3 +456,230 @@ describe('FraudService.findRelatedAccounts()', () => {
     expect(await service.findRelatedAccounts('user-1')).toEqual([]);
   });
 });
+
+describe('FraudService.checkGpsSpoof() - false positives', () => {
+  it('does nothing on a location update with no previous point to compare against - a brand-new session has nothing to imply a speed from', async () => {
+    const { service, flagsRepo } = buildService();
+
+    await service.checkGpsSpoof('driver-1', null, { lat: 6.5, lng: 3.3, at: new Date() });
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('does not flag ordinary city driving speed', async () => {
+    const { service, flagsRepo } = buildService();
+    const t0 = new Date('2026-01-01T10:00:00Z');
+    // ~6.6km in 10 minutes = ~40 km/h - unremarkable city traffic.
+    const previous = { lat: 6.5244, lng: 3.3792, at: t0 };
+    const next = { lat: 6.58, lng: 3.38, at: new Date(t0.getTime() + 10 * 60_000) };
+
+    await service.checkGpsSpoof('driver-1', previous, next);
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('does not flag a long trip covering real distance over a proportionally long time, even though the raw distance is large', async () => {
+    const { service, flagsRepo } = buildService();
+    const t0 = new Date('2026-01-01T08:00:00Z');
+    // Lagos to Ibadan-ish distance (~120km) over 2 hours = 60 km/h -
+    // a big number in isolation, but nothing suspicious once time is
+    // accounted for. The check most needs to get this right: distance
+    // alone is never the signal, implied speed is.
+    const previous = { lat: 6.5244, lng: 3.3792, at: t0 };
+    const next = { lat: 7.3775, lng: 3.947, at: new Date(t0.getTime() + 2 * 3_600_000) };
+
+    await service.checkGpsSpoof('driver-1', previous, next);
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('does not flag zero movement, no matter how the clocks compare', async () => {
+    const { service, flagsRepo } = buildService();
+    const t0 = new Date('2026-01-01T10:00:00Z');
+    const point = { lat: 6.5244, lng: 3.3792 };
+
+    await service.checkGpsSpoof('driver-1', { ...point, at: t0 }, { ...point, at: new Date(t0.getTime() + 1000) });
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('does not flag (and does not divide by zero/negative) when the new update is not actually after the previous one - a re-delivered or out-of-order location ping, not spoofing', async () => {
+    const { service, flagsRepo } = buildService();
+    const t0 = new Date('2026-01-01T10:00:00Z');
+
+    // Same timestamp (elapsedHours === 0)
+    await service.checkGpsSpoof(
+      'driver-1',
+      { lat: 6.5244, lng: 3.3792, at: t0 },
+      { lat: 6.6, lng: 3.4, at: t0 },
+    );
+    // Earlier timestamp than the "previous" point (elapsedHours < 0) -
+    // e.g. two updates arriving to the server out of send order.
+    await service.checkGpsSpoof(
+      'driver-1',
+      { lat: 6.5244, lng: 3.3792, at: t0 },
+      { lat: 6.6, lng: 3.4, at: new Date(t0.getTime() - 60_000) },
+    );
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('does not flag a speed exactly at the threshold - only strictly over it counts, so the boundary itself is not a false positive', async () => {
+    const { service, flagsRepo } = buildService();
+    const t0 = new Date('2026-01-01T10:00:00Z');
+    // Exactly 250 km/h over exactly 1 hour.
+    const previous = { lat: 0, lng: 0, at: t0 };
+    const next = { lat: 2.2457, lng: 0, at: new Date(t0.getTime() + 3_600_000) }; // ~250km north
+
+    await service.checkGpsSpoof('driver-1', previous, next);
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+});
+
+describe('FraudService.checkGpsSpoof() - true positives', () => {
+  it('flags an implied speed far beyond anything physically possible for a road vehicle', async () => {
+    const { service, flagsRepo } = buildService();
+    const t0 = new Date('2026-01-01T10:00:00Z');
+    // ~120km in 60 seconds = ~7200 km/h - a genuine teleport, not a
+    // delayed GPS ping under any realistic explanation.
+    const previous = { lat: 6.5244, lng: 3.3792, at: t0 };
+    const next = { lat: 7.5992, lng: 3.3792, at: new Date(t0.getTime() + 60_000) };
+
+    await service.checkGpsSpoof('driver-1', previous, next);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: FraudFlagType.GPS_SPOOF,
+        userId: 'driver-1',
+        severity: FraudFlagSeverity.HIGH,
+        details: expect.objectContaining({ previous, next }),
+      }),
+    );
+  });
+
+  it('includes the computed speed/distance/elapsed time in the flag details, not just the raw points - an admin reviewing this flag needs the numbers, not just coordinates to do the arithmetic themselves', async () => {
+    const { service, flagsRepo } = buildService();
+    const t0 = new Date('2026-01-01T10:00:00Z');
+    const previous = { lat: 6.5244, lng: 3.3792, at: t0 };
+    const next = { lat: 7.5992, lng: 3.3792, at: new Date(t0.getTime() + 60_000) };
+
+    await service.checkGpsSpoof('driver-1', previous, next);
+
+    const savedDetails = (flagsRepo.save as jest.Mock).mock.calls[0][0].details;
+    expect(savedDetails.impliedSpeedKmh).toBeGreaterThan(250);
+    expect(savedDetails.distanceKm).toBeGreaterThan(0);
+    expect(savedDetails.elapsedSeconds).toBe(60);
+  });
+
+  it('flags a speed just barely over the threshold, not only extreme teleports', async () => {
+    const { service, flagsRepo } = buildService();
+    const t0 = new Date('2026-01-01T10:00:00Z');
+    // 251 km/h over 1 hour - just past the line.
+    const previous = { lat: 0, lng: 0, at: t0 };
+    const next = { lat: 2.2547, lng: 0, at: new Date(t0.getTime() + 3_600_000) };
+
+    await service.checkGpsSpoof('driver-1', previous, next);
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(expect.objectContaining({ type: FraudFlagType.GPS_SPOOF }));
+  });
+});
+
+describe('FraudService.checkReferralAbuse() - false positives', () => {
+  it('does not flag when referrer and referee have entirely different devices', async () => {
+    const { service, flagsRepo, devicesRepo } = buildService({
+      devicesRepo: {
+        find: jest.fn((arg: any) =>
+          arg.where.userId === 'referrer-1'
+            ? Promise.resolve([{ userId: 'referrer-1', fingerprint: 'fp-a' }])
+            : Promise.resolve([{ userId: 'referee-1', fingerprint: 'fp-b' }]),
+        ),
+      },
+    });
+
+    await service.checkReferralAbuse('referrer-1', 'referee-1');
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+    expect(devicesRepo.find).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not flag when neither party has any devices on file at all', async () => {
+    const { service, flagsRepo } = buildService({
+      devicesRepo: { find: jest.fn().mockResolvedValue([]) },
+    });
+
+    await service.checkReferralAbuse('referrer-1', 'referee-1');
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+
+  it('does not flag when each side has several devices but none overlap', async () => {
+    const { service, flagsRepo } = buildService({
+      devicesRepo: {
+        find: jest.fn((arg: any) =>
+          arg.where.userId === 'referrer-1'
+            ? Promise.resolve([
+                { userId: 'referrer-1', fingerprint: 'fp-a' },
+                { userId: 'referrer-1', fingerprint: 'fp-b' },
+              ])
+            : Promise.resolve([
+                { userId: 'referee-1', fingerprint: 'fp-c' },
+                { userId: 'referee-1', fingerprint: 'fp-d' },
+              ]),
+        ),
+      },
+    });
+
+    await service.checkReferralAbuse('referrer-1', 'referee-1');
+
+    expect(flagsRepo.save).not.toHaveBeenCalled();
+  });
+});
+
+describe('FraudService.checkReferralAbuse() - true positives', () => {
+  it('flags when referrer and referee share exactly one device fingerprint - the classic self-referral pattern', async () => {
+    const { service, flagsRepo } = buildService({
+      devicesRepo: {
+        find: jest.fn((arg: any) =>
+          arg.where.userId === 'referrer-1'
+            ? Promise.resolve([{ userId: 'referrer-1', fingerprint: 'fp-shared' }])
+            : Promise.resolve([{ userId: 'referee-1', fingerprint: 'fp-shared' }]),
+        ),
+      },
+    });
+
+    await service.checkReferralAbuse('referrer-1', 'referee-1');
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: FraudFlagType.REFERRAL_ABUSE,
+        userId: 'referee-1',
+        relatedUserId: 'referrer-1',
+        severity: FraudFlagSeverity.HIGH,
+        details: expect.objectContaining({ sharedFingerprint: 'fp-shared' }),
+      }),
+    );
+  });
+
+  it('still flags when the shared device is only one of several each side owns - any overlap at all is the signal, not exclusivity', async () => {
+    const { service, flagsRepo } = buildService({
+      devicesRepo: {
+        find: jest.fn((arg: any) =>
+          arg.where.userId === 'referrer-1'
+            ? Promise.resolve([
+                { userId: 'referrer-1', fingerprint: 'fp-own-1' },
+                { userId: 'referrer-1', fingerprint: 'fp-shared' },
+              ])
+            : Promise.resolve([
+                { userId: 'referee-1', fingerprint: 'fp-shared' },
+                { userId: 'referee-1', fingerprint: 'fp-own-2' },
+              ]),
+        ),
+      },
+    });
+
+    await service.checkReferralAbuse('referrer-1', 'referee-1');
+
+    expect(flagsRepo.save).toHaveBeenCalledWith(expect.objectContaining({ type: FraudFlagType.REFERRAL_ABUSE }));
+  });
+});

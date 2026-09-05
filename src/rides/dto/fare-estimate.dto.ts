@@ -41,4 +41,13 @@ export class FareEstimateDto {
   @Type(() => RideStopDto)
   @ArrayMaxSize(3)
   stops?: RideStopDto[];
+
+  // Mirrors RequestRideDto's own field - lets the estimate reflect the
+  // pool discount up front (see RidesService.estimateFare()'s own
+  // comment on why this is safe to show even though the actual
+  // discount only ever really applies once a match succeeds).
+  @ApiPropertyOptional({ description: 'Preview the fare as if this ride opts into shared/pooled matching' })
+  @IsOptional()
+  @IsBoolean()
+  isPooled?: boolean;
 }

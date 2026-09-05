@@ -4,7 +4,7 @@ import { Repository } from 'typeorm';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { OnEvent } from '@nestjs/event-emitter';
-import { CashReconciliation, ReconciliationStatus } from './entities/cash-reconciliation.entity';
+import { CashReconciliation, ReconciliationStatus, ReconciliationSourceType } from './entities/cash-reconciliation.entity';
 import { WalletsService } from '../wallets/wallets.service';
 import { FleetService } from '../fleet/fleet.service';
 import { TransactionCategory } from '../common/enums/transaction.enum';
@@ -37,12 +37,14 @@ export class ReconciliationService {
     fleetCompanyId: string | null,
     rideId: string,
     amount: number,
+    sourceType: ReconciliationSourceType = ReconciliationSourceType.RIDE,
   ): Promise<CashReconciliation> {
     return this.repo.save(
       this.repo.create({
         driverId,
         fleetCompanyId,
         rideId,
+        sourceType,
         amountOwed: amount.toFixed(2),
       }),
     );

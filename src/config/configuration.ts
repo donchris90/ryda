@@ -322,6 +322,14 @@ export default () => ({
       process.env.DEFAULT_STREAK_REWARD ?? '2000',
     ),
   },
+  pooling: {
+    // Flat fraction taken off each rider's own solo fare once matched
+    // - see PoolMatchingService.pairRides()'s own comment on why this
+    // is a flat fraction of each fare rather than a split of the
+    // combined trip cost. 0.25 (25% off) matches what this module's
+    // own tests have always assumed as the working default.
+    discountFraction: parseFloat(process.env.POOLING_DISCOUNT_FRACTION ?? '0.25'),
+  },
   observability: {
     sentryDsn: process.env.SENTRY_DSN ?? '',
     otelExporterUrl: process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? '',

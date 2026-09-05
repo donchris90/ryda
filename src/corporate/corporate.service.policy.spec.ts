@@ -19,7 +19,7 @@ function buildService() {
   // checkRidePolicy() and updatePolicy() don't touch most of the
   // constructor's other dependencies - {} as any fillers are safe
   // for everything this suite doesn't exercise.
-  return new CorporateService({} as any, {} as any, {} as any, {} as any, {} as any, {} as any);
+  return new CorporateService({} as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any);
 }
 
 const baseRide = { category: RideCategory.ECONOMY, estimatedFare: 2000, city: 'Lagos', requestedAt: new Date('2026-01-01T14:00:00') };
@@ -173,7 +173,7 @@ describe('CorporateService.updatePolicy()', () => {
       findOne: jest.fn().mockResolvedValue(fakeAccount({ maxFarePerRide: '3000.00', allowedCities: ['Lagos'] })),
       save: jest.fn(async (a: any) => a),
     };
-    const service = new CorporateService(accountsRepo as any, {} as any, {} as any, {} as any, {} as any, {} as any);
+    const service = new CorporateService(accountsRepo as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any);
 
     const result = await service.updatePolicy('account-1', { maxFarePerRide: 5000 });
 
@@ -186,7 +186,7 @@ describe('CorporateService.updatePolicy()', () => {
       findOne: jest.fn().mockResolvedValue(fakeAccount({ maxFarePerRide: '3000.00' })),
       save: jest.fn(async (a: any) => a),
     };
-    const service = new CorporateService(accountsRepo as any, {} as any, {} as any, {} as any, {} as any, {} as any);
+    const service = new CorporateService(accountsRepo as any, {} as any, {} as any, {} as any, {} as any, {} as any, {} as any);
 
     const result = await service.updatePolicy('account-1', { maxFarePerRide: null });
 
@@ -213,7 +213,7 @@ describe('CorporateService.checkEmployeeSpendLimit()', () => {
       })),
       ...overrides.txRepo,
     };
-    return new CorporateService({} as any, employeesRepo as any, txRepo as any, {} as any, {} as any, {} as any);
+    return new CorporateService({} as any, employeesRepo as any, txRepo as any, {} as any, {} as any, {} as any, {} as any);
   }
 
   it('allows a ride when this month\'s spend + the new ride stays within the limit', async () => {
@@ -258,7 +258,7 @@ describe('CorporateService.updateEmployee()', () => {
       findOne: jest.fn().mockResolvedValue({ userId: 'employee-1', corporateAccountId: 'account-1', department: null, monthlySpendLimit: null }),
       save: jest.fn(async (e: any) => e),
     };
-    const service = new CorporateService({} as any, employeesRepo as any, {} as any, {} as any, {} as any, {} as any);
+    const service = new CorporateService({} as any, employeesRepo as any, {} as any, {} as any, {} as any, {} as any, {} as any);
 
     const result = await service.updateEmployee('account-1', 'employee-1', { department: 'Engineering', monthlySpendLimit: 10000 });
 
@@ -268,7 +268,7 @@ describe('CorporateService.updateEmployee()', () => {
 
   it('throws when the target user is not actually an employee of THIS account', async () => {
     const employeesRepo = { findOne: jest.fn().mockResolvedValue(null) };
-    const service = new CorporateService({} as any, employeesRepo as any, {} as any, {} as any, {} as any, {} as any);
+    const service = new CorporateService({} as any, employeesRepo as any, {} as any, {} as any, {} as any, {} as any, {} as any);
 
     await expect(service.updateEmployee('account-1', 'not-my-employee', { department: 'Sales' })).rejects.toThrow();
   });
@@ -286,7 +286,7 @@ describe('CorporateService reporting - getSpendByEmployee() / getSpendByDepartme
       getRawMany: jest.fn().mockResolvedValue([{ employeeUserId: 'employee-1', totalSpent: '5000.00' }]),
     };
     const txRepo = { createQueryBuilder: jest.fn().mockReturnValue(qb) };
-    const service = new CorporateService({} as any, {} as any, txRepo as any, {} as any, {} as any, {} as any);
+    const service = new CorporateService({} as any, {} as any, txRepo as any, {} as any, {} as any, {} as any, {} as any);
 
     const result = await service.getSpendByEmployee('account-1');
 
@@ -306,7 +306,7 @@ describe('CorporateService reporting - getSpendByEmployee() / getSpendByDepartme
       getRawMany: jest.fn().mockResolvedValue([]),
     };
     const txRepo = { createQueryBuilder: jest.fn().mockReturnValue(qb) };
-    const service = new CorporateService({} as any, {} as any, txRepo as any, {} as any, {} as any, {} as any);
+    const service = new CorporateService({} as any, {} as any, txRepo as any, {} as any, {} as any, {} as any, {} as any);
 
     await service.getSpendByDepartment('account-1');
 
@@ -328,7 +328,7 @@ describe('CorporateService.debitForRide() - employee/department attribution', ()
       findOne: jest.fn().mockResolvedValue({ userId: 'employee-1', department: 'Sales' }),
       ...overrides.employeesRepo,
     };
-    const service = new CorporateService(accountsRepo as any, employeesRepo as any, {} as any, {} as any, {} as any, {} as any);
+    const service = new CorporateService(accountsRepo as any, employeesRepo as any, {} as any, {} as any, {} as any, {} as any, {} as any);
     return { service, manager };
   }
 
@@ -362,7 +362,7 @@ describe('CorporateService.flagRideForApprovalIfNeeded()', () => {
       ...overrides.approvalsRepo,
     };
     const events = { emit: jest.fn() };
-    const service = new CorporateService({} as any, {} as any, {} as any, {} as any, approvalsRepo as any, events as any);
+    const service = new CorporateService({} as any, {} as any, {} as any, {} as any, approvalsRepo as any, {} as any, events as any);
     return { service, approvalsRepo, events };
   }
 
@@ -404,7 +404,7 @@ describe('CorporateService.reviewApproval() - tenant isolation and state', () =>
       save: jest.fn(async (d: any) => d),
       ...overrides.approvalsRepo,
     };
-    const service = new CorporateService({} as any, {} as any, {} as any, {} as any, approvalsRepo as any, {} as any);
+    const service = new CorporateService({} as any, {} as any, {} as any, {} as any, approvalsRepo as any, {} as any, {} as any);
     return { service, approvalsRepo };
   }
 

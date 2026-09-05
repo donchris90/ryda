@@ -207,3 +207,98 @@ describe('AuthService.login() - new-device notification', () => {
     expect(deps.notificationsService.notify).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Security-critical: a public, unauthenticated register call must
+ * never be able to create a staff/admin account by simply passing
+ * role: "admin" in the request body. Found with zero test coverage
+ * at all - these tests exist specifically so that gap can't reopen
+ * silently the next time this DTO or service method is touched.
+ */
+describe('AuthService.register() - role-escalation prevention', () => {
+  function buildForRegister(overrides: Record<string, any> = {}) {
+    return buildService({
+      deps: {
+        usersService: {
+          findByEmail: jest.fn().mockResolvedValue(null),
+          findByPhone: jest.fn().mockResolvedValue(null),
+          create: jest.fn(async (input: any) => fakeUser({ id: 'new-user-1', ...input })),
+          ...overrides.usersService,
+        },
+        walletsService: { createForUser: jest.fn().mockResolvedValue(undefined) },
+        mailerService: { send: jest.fn().mockResolvedValue(undefined) },
+        authTokensService: { issue: jest.fn().mockResolvedValue('verify-token') },
+        ...overrides.deps,
+      },
+    });
+  }
+
+  const basePayload = {
+    email: 'new@example.com',
+    password: 'Passw0rd!',
+    firstName: 'New',
+    lastName: 'User',
+    termsAccepted: true,
+  };
+
+  it.each(['admin', 'super_admin', 'dispatcher', 'country_admin', 'city_manager', 'support_agent', 'finance', 'marketing', 'auditor'])(
+    'rejects registering directly as "%s" - staff access is never self-grantable',
+    async (staffRole) => {
+      const { service, deps } = buildForRegister();
+
+      await expect(service.register({ ...basePayload, role: staffRole as any })).rejects.toThrow(BadRequestException);
+      expect(deps.usersService.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['passenger', 'driver', 'corporate', 'fleet_owner'])(
+    'still allows registering as "%s" - the legitimate public self-signup roles',
+    async (publicRole) => {
+      const { service, deps } = buildForRegister();
+
+      await service.register({ ...basePayload, role: publicRole as any });
+
+      expect(deps.usersService.create).toHaveBeenCalledWith(expect.objectContaining({ role: publicRole }));
+    },
+  );
+
+  it('defaults to a normal registration (no role specified) without being blocked', async () => {
+    const { service, deps } = buildForRegister();
+
+    await service.register({ ...basePayload });
+
+    expect(deps.usersService.create).toHaveBeenCalled();
+  });
+});
+
+describe('AuthService.addRole() - role-escalation prevention', () => {
+  it.each(['admin', 'super_admin', 'dispatcher', 'auditor'])(
+    'rejects an already-authenticated user self-adding the staff role "%s"',
+    async (staffRole) => {
+      const { service, deps } = buildService({
+        deps: { usersService: { addRole: jest.fn() } },
+      });
+
+      await expect(service.addRole('user-1', staffRole as any)).rejects.toThrow(BadRequestException);
+      expect(deps.usersService.addRole).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['passenger', 'driver', 'corporate', 'fleet_owner'])(
+    'still allows an authenticated user adding the legitimate self-service role "%s"',
+    async (publicRole) => {
+      const { service, deps } = buildService({
+        deps: {
+          usersService: {
+            addRole: jest.fn().mockResolvedValue(fakeUser({ roles: ['passenger', publicRole] })),
+            sanitize: jest.fn((u: any) => u),
+          },
+        },
+      });
+
+      await service.addRole('user-1', publicRole as any);
+
+      expect(deps.usersService.addRole).toHaveBeenCalledWith('user-1', publicRole);
+    },
+  );
+});

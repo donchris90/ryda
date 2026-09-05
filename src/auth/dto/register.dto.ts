@@ -2,14 +2,14 @@ import {
   Equals,
   IsBoolean,
   IsEmail,
-  IsEnum,
+  IsIn,
   IsOptional,
   IsPhoneNumber,
   IsString,
   MinLength,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { UserRole } from '../../common/enums/user-role.enum';
+import { UserRole, SELF_REGISTERABLE_ROLES } from '../../common/enums/user-role.enum';
 
 export class RegisterDto {
   @ApiProperty({ example: 'ada@example.com' })
@@ -42,9 +42,13 @@ export class RegisterDto {
   @Equals(true, { message: 'You must accept the Terms & Conditions to register' })
   termsAccepted: boolean;
 
-  @ApiPropertyOptional({ enum: UserRole, default: UserRole.PASSENGER })
+  @ApiPropertyOptional({
+    enum: SELF_REGISTERABLE_ROLES,
+    default: UserRole.PASSENGER,
+    description: 'Staff roles (admin, dispatcher, etc.) can never be self-registered - only provisioned by an existing admin.',
+  })
   @IsOptional()
-  @IsEnum(UserRole)
+  @IsIn(SELF_REGISTERABLE_ROLES, { message: 'role must be one of: passenger, driver, corporate, fleet_owner' })
   role?: UserRole;
 
   @ApiPropertyOptional({ description: "Another user's referral code, if any" })

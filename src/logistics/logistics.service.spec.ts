@@ -496,3 +496,63 @@ describe('LogisticsService — courier matching via the shared pipeline', () => 
     });
   });
 });
+
+/**
+ * Security-critical: GET /deliveries/:id previously called findById()
+ * directly with only a "logged in" check - any authenticated user on
+ * any account could view any OTHER customer's full delivery details
+ * (name, phone, both addresses, item value, COD amount) just by
+ * knowing the order id. Zero test coverage existed for this before -
+ * these tests exist specifically so the gap can't reopen silently.
+ */
+describe('LogisticsService.findByIdForParticipant() - access control', () => {
+  it("rejects a stranger with no relationship to the order at all", async () => {
+    const { service } = buildService({
+      ordersRepo: { findOne: jest.fn().mockResolvedValue(fakeOrder({ customerId: 'customer-1', driverId: 'driver-1' })) },
+    });
+
+    await expect(service.findByIdForParticipant('order-1', 'some-other-user', 'passenger' as any)).rejects.toThrow(
+      ForbiddenException,
+    );
+  });
+
+  it('allows the order\'s own customer', async () => {
+    const { service } = buildService({
+      ordersRepo: { findOne: jest.fn().mockResolvedValue(fakeOrder({ customerId: 'customer-1', driverId: 'driver-1' })) },
+    });
+
+    const result = await service.findByIdForParticipant('order-1', 'customer-1', 'passenger' as any);
+    expect(result.id).toBe('order-1');
+  });
+
+  it('allows the assigned driver', async () => {
+    const { service } = buildService({
+      ordersRepo: { findOne: jest.fn().mockResolvedValue(fakeOrder({ customerId: 'customer-1', driverId: 'driver-1' })) },
+    });
+
+    const result = await service.findByIdForParticipant('order-1', 'driver-1', 'driver' as any);
+    expect(result.id).toBe('order-1');
+  });
+
+  it.each(['admin', 'super_admin', 'dispatcher', 'support_agent'])(
+    'allows staff role "%s" to view any order even as a non-participant',
+    async (staffRole) => {
+      const { service } = buildService({
+        ordersRepo: { findOne: jest.fn().mockResolvedValue(fakeOrder({ customerId: 'customer-1', driverId: 'driver-1' })) },
+      });
+
+      const result = await service.findByIdForParticipant('order-1', 'staff-user', staffRole as any);
+      expect(result.id).toBe('order-1');
+    },
+  );
+
+  it('rejects a driver who is not the one actually assigned to this order', async () => {
+    const { service } = buildService({
+      ordersRepo: { findOne: jest.fn().mockResolvedValue(fakeOrder({ customerId: 'customer-1', driverId: 'driver-1' })) },
+    });
+
+    await expect(service.findByIdForParticipant('order-1', 'a-different-driver', 'driver' as any)).rejects.toThrow(
+      ForbiddenException,
+    );
+  });
+});

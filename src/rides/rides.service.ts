@@ -130,12 +130,31 @@ export class RidesService {
 
   async estimateFare(dto: FareEstimateDto) {
     const surge = await this.pricingService.calculateSurge(dto.city);
-    return this.fareService.estimate(
+    const breakdown = await this.fareService.estimate(
       dto.category,
       { lat: dto.pickupLat, lng: dto.pickupLng },
       { lat: dto.dropoffLat, lng: dto.dropoffLng },
       { isAirportTrip: dto.isAirportTrip, surgeMultiplier: surge.multiplier, stops: dto.stops },
     );
+
+    if (!dto.isPooled) return breakdown;
+
+    // Shown as a separate potential saving, not baked into totalFare
+    // itself - matching is never guaranteed (see PoolMatchingService's
+    // own match-window/fallback design), so the headline price a
+    // passenger sees here must stay the honest "what you'll actually
+    // pay if this never gets matched" figure. Same discountFraction
+    // PoolMatchingService itself applies at actual match time - if
+    // that config value ever changes, this preview and the real
+    // discount move together automatically rather than needing to
+    // stay in sync by hand.
+    const discountFraction = this.config.get<number>('pooling.discountFraction') ?? 0;
+    const estimatedPoolDiscount = Math.round(breakdown.totalFare * discountFraction * 100) / 100;
+    return {
+      ...breakdown,
+      estimatedPoolDiscount,
+      estimatedPooledTotalFare: Math.round((breakdown.totalFare - estimatedPoolDiscount) * 100) / 100,
+    };
   }
 
   async requestRide(passengerId: string, dto: RequestRideDto): Promise<Ride> {
@@ -1390,6 +1409,18 @@ export class RidesService {
         // too, in the same transaction — the driver goes right back to
         // ONLINE from PostgreSQL's perspective, exactly as if this whole
         // call had never happened.
+        //
+        // The WHERE clause above only tells us the claim didn't land -
+        // not why. It could genuinely be another driver's accept that
+        // won the race, but it could just as easily be the passenger
+        // cancelling in the same instant (see cancelRide()'s own
+        // compare-and-swap on the same row) or the ride expiring.
+        // Re-reading the row's actual current status gives the driver
+        // the real reason instead of a guess that's sometimes wrong.
+        const current = await manager.findOne(Ride, { where: { id: rideId } });
+        if (current?.status === RideStatus.CANCELLED) {
+          throw new BadRequestException('This ride was just cancelled by the passenger.');
+        }
         throw new BadRequestException('This ride was just accepted by another driver.');
       }
 

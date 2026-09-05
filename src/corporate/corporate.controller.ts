@@ -89,6 +89,20 @@ export class CorporateController {
     return this.corporateService.listApprovals(account.id);
   }
 
+  @Get('accounts/mine/invoices')
+  @Roles(UserRole.CORPORATE)
+  async listInvoices(@CurrentUser() user: User) {
+    const account = await this.corporateService.findByOwner(user.id);
+    return this.corporateService.listInvoices(account.id);
+  }
+
+  @Get('accounts/mine/invoices/:id')
+  @Roles(UserRole.CORPORATE)
+  async getInvoice(@CurrentUser() user: User, @Param('id') id: string) {
+    const account = await this.corporateService.findByOwner(user.id);
+    return this.corporateService.getInvoiceDetail(account.id, id);
+  }
+
   @Patch('accounts/mine/approvals/:id')
   @Roles(UserRole.CORPORATE)
   async reviewApproval(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: ReviewApprovalDto) {

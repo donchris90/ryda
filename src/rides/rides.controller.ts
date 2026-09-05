@@ -205,6 +205,12 @@ export class RidesController {
     return this.ridesService.getRoute(id, user.id, user.role);
   }
 
+  @Get(':id/pool-manifest')
+  @UseGuards(JwtAuthGuard)
+  getPoolManifest(@Param('id') id: string, @CurrentUser() user: User) {
+    return this.ridesService.getPoolManifest(id, user.id, user.role);
+  }
+
   @Post(':id/share')
   @UseGuards(JwtAuthGuard)
   share(@Param('id') id: string, @CurrentUser() user: User) {

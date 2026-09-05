@@ -198,7 +198,7 @@ describe('LogisticsService.markDelivered() - COD collection tracking', () => {
     await service.markDelivered('order-1', 'driver-1', { ...validProof, codCollectedAmount: 3000 });
 
     expect(ordersRepo.save).toHaveBeenCalledWith(expect.objectContaining({ codCollectionStatus: 'partial' }));
-    expect(reconciliationService.recordDebt).toHaveBeenCalledWith('driver-1', null, 'order-1', 2000);
+    expect(reconciliationService.recordDebt).toHaveBeenCalledWith('driver-1', null, 'order-1', 2000, 'delivery');
   });
 
   it('marks FAILED (not PARTIAL) when nothing at all was collected', async () => {
@@ -209,7 +209,7 @@ describe('LogisticsService.markDelivered() - COD collection tracking', () => {
     await service.markDelivered('order-1', 'driver-1', { ...validProof, codCollectedAmount: 0 });
 
     expect(ordersRepo.save).toHaveBeenCalledWith(expect.objectContaining({ codCollectionStatus: 'failed' }));
-    expect(reconciliationService.recordDebt).toHaveBeenCalledWith('driver-1', null, 'order-1', 5000);
+    expect(reconciliationService.recordDebt).toHaveBeenCalledWith('driver-1', null, 'order-1', 5000, 'delivery');
   });
 
   it('attributes the debt to the fleet company, not the individual driver, when the driver belongs to one', async () => {
@@ -222,7 +222,7 @@ describe('LogisticsService.markDelivered() - COD collection tracking', () => {
 
     await service.markDelivered('order-1', 'driver-1', { ...validProof, codCollectedAmount: 3000 });
 
-    expect(reconciliationService.recordDebt).toHaveBeenCalledWith('driver-1', 'fleet-9', 'order-1', 2000);
+    expect(reconciliationService.recordDebt).toHaveBeenCalledWith('driver-1', 'fleet-9', 'order-1', 2000, 'delivery');
   });
 
   it('never touches COD fields or records any debt at all for a non-COD order', async () => {

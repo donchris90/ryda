@@ -35,3 +35,21 @@ export const ADMIN_LIKE_ROLES = [
  * un-notified, and nobody who's notified is unable to act.
  */
 export const SAFETY_OPS_ROLES = [...ADMIN_LIKE_ROLES, UserRole.DISPATCHER, UserRole.SUPPORT_AGENT];
+
+/**
+ * The only roles a public, unauthenticated POST /auth/register call
+ * may ever create - everything else (ADMIN, SUPER_ADMIN, DISPATCHER,
+ * COUNTRY_ADMIN, CITY_MANAGER, SUPPORT_AGENT, FINANCE, MARKETING,
+ * AUDITOR) is staff access and must only ever be provisioned by an
+ * existing admin or the seed-admin CLI script (see src/scripts/) -
+ * never by whoever happens to POST a role value in a public signup
+ * form. FLEET_OWNER and CORPORATE are both legitimate public
+ * self-signups (a business registering itself), same as PASSENGER
+ * and DRIVER.
+ */
+export const SELF_REGISTERABLE_ROLES = [
+  UserRole.PASSENGER,
+  UserRole.DRIVER,
+  UserRole.CORPORATE,
+  UserRole.FLEET_OWNER,
+];

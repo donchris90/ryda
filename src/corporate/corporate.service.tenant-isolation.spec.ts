@@ -26,7 +26,7 @@ function build(overrides: Record<string, any> = {}) {
   const txRepo = { find: jest.fn().mockResolvedValue([]) };
   const usersService = { findById: jest.fn().mockResolvedValue({ id: 'some-user' }) };
 
-  const service = new CorporateService(accountsRepo as any, employeesRepo as any, txRepo as any, usersService as any, {} as any, {} as any);
+  const service = new CorporateService(accountsRepo as any, employeesRepo as any, txRepo as any, usersService as any, {} as any, {} as any, {} as any);
   return { service, accountsRepo, employeesRepo };
 }
 

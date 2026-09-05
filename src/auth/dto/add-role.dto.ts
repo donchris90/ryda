@@ -1,13 +1,13 @@
-import { IsEnum } from 'class-validator';
+import { IsIn } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
-import { UserRole } from '../../common/enums/user-role.enum';
+import { UserRole, SELF_REGISTERABLE_ROLES } from '../../common/enums/user-role.enum';
 
 export class AddRoleDto {
   @ApiProperty({
-    enum: [UserRole.PASSENGER, UserRole.DRIVER, UserRole.CORPORATE],
+    enum: SELF_REGISTERABLE_ROLES,
     example: UserRole.DRIVER,
     description: 'Role to add to the currently-authenticated account. Staff/admin roles cannot be self-added.',
   })
-  @IsEnum(UserRole)
+  @IsIn(SELF_REGISTERABLE_ROLES, { message: 'role must be one of: passenger, driver, corporate, fleet_owner' })
   role: UserRole;
 }

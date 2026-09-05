@@ -8,6 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
+import { UserRole, SAFETY_OPS_ROLES } from '../common/enums/user-role.enum';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
   DeliveryOrder,
@@ -41,6 +42,7 @@ import { UsersService } from '../users/users.service';
 import { PaymentsService } from '../payments/payments.service';
 import { PaymentStatus } from '../payments/entities/payment-record.entity';
 import { ReconciliationService } from '../reconciliation/reconciliation.service';
+import { ReconciliationSourceType } from '../reconciliation/entities/cash-reconciliation.entity';
 import {
   SystemSettingsService,
   SETTING_KEYS,
@@ -495,6 +497,29 @@ export class LogisticsService {
   async findById(id: string): Promise<DeliveryOrder> {
     const order = await this.ordersRepo.findOne({ where: { id } });
     if (!order) throw new NotFoundException('Delivery order not found');
+    return order;
+  }
+
+  /**
+   * Real gap this closes: the controller's GET /:id previously called
+   * findById() directly with only a "logged in" check (JwtAuthGuard) -
+   * any authenticated user, on any account, could view any OTHER
+   * customer's full delivery details (name, phone, both addresses,
+   * item description/value, COD amount) just by knowing the order's
+   * id. findById() itself deliberately stays unrestricted, since it's
+   * also used internally by methods that apply their own different
+   * ownership check for a different actor (e.g. findSelectableCouriers
+   * checks customerId specifically) - this wraps it with the same
+   * participant-or-staff check the equivalent single-ride lookup in
+   * RidesService already uses.
+   */
+  async findByIdForParticipant(id: string, requesterId: string, requesterRole: UserRole): Promise<DeliveryOrder> {
+    const order = await this.findById(id);
+    const isParticipant = order.customerId === requesterId || order.driverId === requesterId;
+    const isStaff = SAFETY_OPS_ROLES.includes(requesterRole);
+    if (!isParticipant && !isStaff) {
+      throw new ForbiddenException("You don't have access to this delivery");
+    }
     return order;
   }
 
@@ -962,7 +987,7 @@ export class LogisticsService {
       // gap between what was expected and what actually came back.
       const shortfall = this.round(expected - collected);
       if (shortfall > 0) {
-        await this.reconciliationService.recordDebt(driverUserId, driverProfile.fleetCompanyId, order.id, shortfall);
+        await this.reconciliationService.recordDebt(driverUserId, driverProfile.fleetCompanyId, order.id, shortfall, ReconciliationSourceType.DELIVERY);
       }
     }
     order.commissionPercent = commissionPercent.toFixed(2);
@@ -1007,6 +1032,7 @@ export class LogisticsService {
             driverProfile.fleetCompanyId,
             order.id,
             commissionAmount,
+            ReconciliationSourceType.DELIVERY,
           );
         }
       } else {
@@ -1026,6 +1052,7 @@ export class LogisticsService {
             null,
             order.id,
             commissionAmount,
+            ReconciliationSourceType.DELIVERY,
           );
         }
       }

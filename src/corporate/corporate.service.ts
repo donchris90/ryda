@@ -10,7 +10,9 @@ import { CorporateAccount } from './entities/corporate-account.entity';
 import { CorporateEmployee } from './entities/corporate-employee.entity';
 import { CorporateTransaction } from './entities/corporate-transaction.entity';
 import { CorporateRideApproval, CorporateApprovalStatus } from './entities/corporate-ride-approval.entity';
+import { CorporateInvoice } from './entities/corporate-invoice.entity';
 import { EventEmitter2 } from '@nestjs/event-emitter';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { TransactionDirection } from '../common/enums/transaction.enum';
 import { RideCategory } from '../common/enums/ride.enum';
 import { UsersService } from '../users/users.service';
@@ -27,6 +29,8 @@ export class CorporateService {
     private readonly usersService: UsersService,
     @InjectRepository(CorporateRideApproval)
     private readonly approvalsRepo: Repository<CorporateRideApproval>,
+    @InjectRepository(CorporateInvoice)
+    private readonly invoicesRepo: Repository<CorporateInvoice>,
     private readonly events: EventEmitter2,
   ) {}
 
@@ -209,6 +213,142 @@ export class CorporateService {
       .groupBy('tx.department')
       .orderBy('"totalSpent"', 'DESC')
       .getRawMany();
+  }
+
+  /**
+   * The balance the account was actually sitting at just before a
+   * given instant - not looked up on the account row itself (which
+   * only ever holds the CURRENT balance), but derived from the most
+   * recent transaction's own balanceAfter strictly before that point.
+   * Falls back to '0.00' for an instant before the account's very
+   * first transaction ever landed (a brand-new, never-yet-funded
+   * account), which is the only case with no transaction to derive it
+   * from. Invoice generation is a low-volume, scheduled operation, not
+   * a hot path, so a straightforward query here is the right call
+   * over anything cleverer.
+   */
+  private async balanceAsOf(accountId: string, instant: Date): Promise<string> {
+    const priorTx = await this.txRepo
+      .createQueryBuilder('tx')
+      .where('tx.corporateAccountId = :accountId', { accountId })
+      .andWhere('tx.createdAt < :instant', { instant })
+      .orderBy('tx.createdAt', 'DESC')
+      .getOne();
+    return priorTx?.balanceAfter ?? '0.00';
+  }
+
+  /**
+   * Generates (or returns the already-generated) statement for one
+   * exact period on one account. Idempotent by design - both the
+   * monthly cron below and a manual admin re-trigger can call this
+   * freely for the same account+period without ever producing a
+   * second row for the same month, since corporate_invoices has a
+   * real unique index on (corporateAccountId, periodStart, periodEnd)
+   * backing this, not just an application-level check that a race
+   * could slip past.
+   */
+  async generateInvoiceForPeriod(accountId: string, periodStart: Date, periodEnd: Date): Promise<CorporateInvoice> {
+    const existing = await this.invoicesRepo.findOne({ where: { corporateAccountId: accountId, periodStart, periodEnd } });
+    if (existing) return existing;
+
+    const account = await this.accountsRepo.findOne({ where: { id: accountId } });
+    if (!account) throw new NotFoundException('Corporate account not found');
+
+    const [openingBalance, closingBalance, totals] = await Promise.all([
+      this.balanceAsOf(accountId, periodStart),
+      this.balanceAsOf(accountId, periodEnd),
+      this.txRepo
+        .createQueryBuilder('tx')
+        .select('tx.direction', 'direction')
+        .addSelect('COUNT(*)', 'count')
+        .addSelect('COALESCE(SUM(tx.amount), 0)', 'total')
+        .where('tx.corporateAccountId = :accountId', { accountId })
+        .andWhere('tx.createdAt >= :periodStart AND tx.createdAt < :periodEnd', { periodStart, periodEnd })
+        .groupBy('tx.direction')
+        .getRawMany(),
+    ]);
+
+    const debitRow = totals.find((t) => t.direction === TransactionDirection.DEBIT);
+    const creditRow = totals.find((t) => t.direction === TransactionDirection.CREDIT);
+    const transactionCount = totals.reduce((sum, t) => sum + parseInt(t.count, 10), 0);
+
+    try {
+      return await this.invoicesRepo.save(
+        this.invoicesRepo.create({
+          corporateAccountId: accountId,
+          periodStart,
+          periodEnd,
+          openingBalance,
+          closingBalance,
+          totalDebits: debitRow?.total ?? '0.00',
+          totalCredits: creditRow?.total ?? '0.00',
+          transactionCount,
+          currency: account.currency,
+        }),
+      );
+    } catch {
+      // Lost a race with another concurrent generation attempt for
+      // this exact period (the unique index rejected the insert) -
+      // the other one already produced the correct statement, so
+      // return that instead of surfacing a confusing failure for
+      // what is, from the caller's point of view, a successful
+      // "make sure this period's invoice exists" request.
+      const winner = await this.invoicesRepo.findOne({ where: { corporateAccountId: accountId, periodStart, periodEnd } });
+      if (winner) return winner;
+      throw new ConflictException('Could not generate invoice for this period');
+    }
+  }
+
+  /**
+   * Runs at the start of every month and closes out the previous
+   * calendar month for every currently-active account - including
+   * one that had zero activity all month (still a valid, real
+   * statement: "nothing moved, balance stayed at X"). An account that
+   * was deactivated mid-month still gets its final month's statement
+   * generated on the next run, since isActive only gates which
+   * accounts this cron considers going forward, not which past
+   * periods are eligible.
+   */
+  @Cron(CronExpression.EVERY_1ST_DAY_OF_MONTH_AT_MIDNIGHT)
+  async generateMonthlyInvoices(): Promise<void> {
+    const now = new Date();
+    // The month that just ended, in UTC calendar terms - e.g. running
+    // on Feb 1st closes out January 1st (00:00) through February 1st
+    // (00:00), exclusive.
+    const periodEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const periodStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+
+    const accounts = await this.accountsRepo.find({ where: { isActive: true } });
+    for (const account of accounts) {
+      await this.generateInvoiceForPeriod(account.id, periodStart, periodEnd);
+    }
+  }
+
+  /** Every past statement for this account, most recent first - the account owner's own "Statements" list. */
+  async listInvoices(accountId: string): Promise<CorporateInvoice[]> {
+    return this.invoicesRepo.find({ where: { corporateAccountId: accountId }, order: { periodStart: 'DESC' } });
+  }
+
+  /**
+   * One statement's full detail: the stored summary plus the actual
+   * itemized transactions for that exact period, queried live from
+   * CorporateTransaction rather than duplicated onto the invoice row
+   * itself - see CorporateInvoice's own class comment for why.
+   */
+  async getInvoiceDetail(
+    accountId: string,
+    invoiceId: string,
+  ): Promise<{ invoice: CorporateInvoice; lineItems: CorporateTransaction[] }> {
+    const invoice = await this.invoicesRepo.findOne({ where: { id: invoiceId, corporateAccountId: accountId } });
+    if (!invoice) throw new NotFoundException('Invoice not found');
+
+    const lineItems = await this.txRepo.find({
+      where: { corporateAccountId: accountId },
+      order: { createdAt: 'ASC' },
+    });
+    const filtered = lineItems.filter((tx) => tx.createdAt >= invoice.periodStart && tx.createdAt < invoice.periodEnd);
+
+    return { invoice, lineItems: filtered };
   }
 
   /**
