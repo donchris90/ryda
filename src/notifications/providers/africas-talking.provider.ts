@@ -6,16 +6,16 @@ import { ProviderSendResult } from './provider-result';
  * Thin client over Africa's Talking' SMS API
  * (https://developers.africastalking.com/docs/sms/overview).
  *
- * Used by:
- * - OtpService, for OTP delivery (kept as a direct dependency rather than
- *   routing through NotificationsService - OTP has different urgency/
- *   retry requirements than general notifications).
- * - NotificationsService, specifically for SOS escalation SMS (staff
- *   alerts, reporter confirmation, and emergency-contact texts). General
- *   app notifications (ride updates, support tickets, etc.) still go
- *   through TwilioProvider - this project has working Africa's Talking
- *   credentials but not Twilio ones, so SOS was switched over
- *   deliberately rather than as a full provider migration.
+ * This project's actual SMS provider - used by NotificationsService
+ * for all general-purpose SMS (ride updates, receipts, etc.) and SOS
+ * emergency-contact alerts. OTP delivery uses its own separate copy
+ * of this same provider (src/otp/providers/africas-talking.provider.ts)
+ * rather than this one, kept independent by design since OTP has
+ * different urgency/retry requirements than general notifications and
+ * doesn't route through NotificationsModule at all.
+ *
+ * Twilio remains registered alongside this in NotificationsModule
+ * only for WhatsApp, which this provider doesn't support.
  *
  * Same graceful-fallback pattern as every other external integration in
  * this project (Paystack, Maps, Twilio, ...): falls back to a clearly

@@ -233,7 +233,7 @@ export class DriversService {
    * (raw query builder joining User directly) rather than adding a new
    * service dependency just for this.
    */
-  async listForAdmin(filter?: { approvalStatus?: DriverApprovalStatus }) {
+  async listForAdmin(filter?: { approvalStatus?: DriverApprovalStatus; driverId?: string }) {
     const qb = this.driversRepo
       .createQueryBuilder('driver')
       .leftJoin(User, 'user', 'user.id = driver.userId')
@@ -258,6 +258,9 @@ export class DriversService {
 
     if (filter?.approvalStatus) {
       qb.where('driver.approvalStatus = :status', { status: filter.approvalStatus });
+    }
+    if (filter?.driverId) {
+      qb.andWhere('driver.id = :driverId', { driverId: filter.driverId });
     }
 
     const rows = await qb.getRawMany();
@@ -284,6 +287,18 @@ export class DriversService {
         rejectionReason: c.rejectionReason,
       })),
     }));
+  }
+
+  /**
+   * The single-driver equivalent of listForAdmin() above - same
+   * joined shape (user identity + capabilities), just filtered to one
+   * driver instead of a page of them. Reuses listForAdmin() rather
+   * than duplicating its join/capability-batching logic for one row.
+   */
+  async getDetailForAdmin(id: string) {
+    const rows = await this.listForAdmin({ driverId: id });
+    if (rows.length === 0) throw new NotFoundException('Driver profile not found');
+    return rows[0];
   }
 
   async setAvailability(

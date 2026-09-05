@@ -61,7 +61,7 @@ export class VehiclesService {
    * id directly (registerForDriver is called with user.id, not a
    * DriverProfile id), so this is a single-hop join, not two.
    */
-  async listForAdmin(filter?: { status?: VehicleStatus }, page = 1, limit = 25) {
+  async listForAdmin(filter?: { status?: VehicleStatus; driverId?: string }, page = 1, limit = 25) {
     const qb = this.vehiclesRepo
       .createQueryBuilder('vehicle')
       .leftJoin(User, 'driver', 'driver.id::text = vehicle.driverId')
@@ -83,6 +83,7 @@ export class VehiclesService {
       .orderBy('vehicle.createdAt', 'DESC');
 
     if (filter?.status) qb.andWhere('vehicle.status = :status', { status: filter.status });
+    if (filter?.driverId) qb.andWhere('vehicle.driverId = :driverId', { driverId: filter.driverId });
 
     const total = await qb.getCount();
     const rawItems = await qb

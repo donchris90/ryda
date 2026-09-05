@@ -78,11 +78,13 @@ export class RidesController {
   listForAdmin(
     @Query('status') status?: RideStatus,
     @Query('search') search?: string,
+    @Query('driverId') driverId?: string,
+    @Query('passengerId') passengerId?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
     return this.ridesService.listForAdmin(
-      { status, search },
+      { status, search, driverId, passengerId },
       page ? parseInt(page, 10) : undefined,
       limit ? parseInt(limit, 10) : undefined,
     );

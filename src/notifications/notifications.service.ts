@@ -7,6 +7,7 @@ import { Queue } from 'bullmq';
 import { Notification, NotificationChannel, NotificationCategory, NotificationStatus } from './entities/notification.entity';
 import { DeviceToken, DevicePlatform } from './entities/device-token.entity';
 import { TwilioProvider } from './providers/twilio.provider';
+import { AfricasTalkingProvider } from './providers/africas-talking.provider';
 import { SendGridProvider } from './providers/sendgrid.provider';
 import { FcmProvider } from './providers/fcm.provider';
 import { ExpoPushProvider } from './providers/expo-push.provider';
@@ -24,6 +25,7 @@ export class NotificationsService {
     @InjectRepository(DeviceToken)
     private readonly deviceTokensRepo: Repository<DeviceToken>,
     private readonly twilio: TwilioProvider,
+    private readonly africasTalking: AfricasTalkingProvider,
     private readonly sendgrid: SendGridProvider,
     private readonly fcm: FcmProvider,
     private readonly expoPush: ExpoPushProvider,
@@ -54,9 +56,9 @@ export class NotificationsService {
   async sendSms(userId: string, phone: string, title: string, body: string, category?: NotificationCategory, idempotencyKey?: string): Promise<Notification> {
     const { record, alreadySent } = await this.createRecord(userId, NotificationChannel.SMS, title, body, undefined, category, idempotencyKey);
     if (alreadySent) return record;
-    if (!this.twilio.isSmsConfigured()) return this.markSimulated(record);
+    if (!this.africasTalking.isConfigured()) return this.markSimulated(record);
 
-    const result = await this.twilio.sendSms(phone, body);
+    const result = await this.africasTalking.sendSms(phone, body);
     return this.applyResult(record, result);
   }
 
@@ -545,16 +547,19 @@ export class NotificationsService {
     // Real fix: emergency contacts are genuinely SMS'd now, not just
     // recorded and never acted on. These aren't tied to a User
     // account, so they can't go through the normal userId-keyed
-    // Notification/safeNotify model - a direct Twilio send is correct
-    // here, not a workaround.
-    if (this.twilio.isSmsConfigured()) {
+    // Notification/safeNotify model - a direct provider send is
+    // correct here, not a workaround. Uses Africa's Talking, not
+    // Twilio - this project's actually-configured SMS provider (see
+    // AfricasTalkingProvider's own comment on the two credentials
+    // this project genuinely has).
+    if (this.africasTalking.isConfigured()) {
       const contactBody = `Ryda Safety Alert: ${payload.reporterName} has triggered an SOS and listed you as an emergency contact. If you're concerned, please try to reach them directly.`;
       await Promise.allSettled(
-        payload.emergencyContacts.map((contact) => this.twilio.sendSms(contact.phone, contactBody)),
+        payload.emergencyContacts.map((contact) => this.africasTalking.sendSms(contact.phone, contactBody)),
       );
     } else {
       this.logger.warn(
-        `SOS incident ${payload.incidentId}: Twilio not configured — ${payload.emergencyContacts.length} emergency contact(s) not actually notified`,
+        `SOS incident ${payload.incidentId}: SMS provider not configured — ${payload.emergencyContacts.length} emergency contact(s) not actually notified`,
       );
     }
   }

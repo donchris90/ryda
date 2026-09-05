@@ -28,6 +28,11 @@ function build(overrides: Record<string, any> = {}) {
     sendWhatsapp: jest.fn().mockResolvedValue({ success: true }),
     ...overrides.twilio,
   };
+  const africasTalking = {
+    isConfigured: jest.fn().mockReturnValue(true),
+    sendSms: jest.fn().mockResolvedValue({ success: true }),
+    ...overrides.africasTalking,
+  };
   const sendgrid = {
     isConfigured: jest.fn().mockReturnValue(true),
     sendEmail: jest.fn().mockResolvedValue({ success: true }),
@@ -50,6 +55,7 @@ function build(overrides: Record<string, any> = {}) {
     notificationsRepo as any,
     deviceTokensRepo as any,
     twilio as any,
+    africasTalking as any,
     sendgrid as any,
     fcm as any,
     expoPush as any,
@@ -58,12 +64,12 @@ function build(overrides: Record<string, any> = {}) {
     notificationsQueue as any,
   );
 
-  return { service, notificationsRepo, twilio, sendgrid, mailerService, usersService, notificationsQueue };
+  return { service, notificationsRepo, twilio, africasTalking, sendgrid, mailerService, usersService, notificationsQueue };
 }
 
 describe('NotificationsService - idempotency (retry-safety)', () => {
   it('does not re-send SMS when a SENT record already exists under the same idempotency key', async () => {
-    const { service, notificationsRepo, twilio } = build({
+    const { service, notificationsRepo, africasTalking } = build({
       notificationsRepo: {
         findOne: jest.fn().mockResolvedValue(fakeNotification({ status: NotificationStatus.SENT, idempotencyKey: 'job-1' })),
       },
@@ -71,7 +77,7 @@ describe('NotificationsService - idempotency (retry-safety)', () => {
 
     await service.sendSms('user-1', '+2340000000', 'Title', 'Body', undefined, 'job-1');
 
-    expect(twilio.sendSms).not.toHaveBeenCalled();
+    expect(africasTalking.sendSms).not.toHaveBeenCalled();
     expect(notificationsRepo.save).not.toHaveBeenCalled(); // no new record created either
   });
 
@@ -88,7 +94,7 @@ describe('NotificationsService - idempotency (retry-safety)', () => {
   });
 
   it('DOES retry the actual send when the prior record under the same key FAILED - a failure is not terminal', async () => {
-    const { service, twilio } = build({
+    const { service, africasTalking } = build({
       notificationsRepo: {
         findOne: jest.fn().mockResolvedValue(fakeNotification({ status: NotificationStatus.FAILED, idempotencyKey: 'job-3' })),
       },
@@ -96,20 +102,20 @@ describe('NotificationsService - idempotency (retry-safety)', () => {
 
     await service.sendSms('user-1', '+2340000000', 'Title', 'Body', undefined, 'job-3');
 
-    expect(twilio.sendSms).toHaveBeenCalled();
+    expect(africasTalking.sendSms).toHaveBeenCalled();
   });
 
   it('sends normally (no dedupe lookup at all) when no idempotency key is given - a direct, non-queued send', async () => {
-    const { service, notificationsRepo, twilio } = build();
+    const { service, notificationsRepo, africasTalking } = build();
 
     await service.sendSms('user-1', '+2340000000', 'Title', 'Body');
 
     expect(notificationsRepo.findOne).not.toHaveBeenCalled();
-    expect(twilio.sendSms).toHaveBeenCalled();
+    expect(africasTalking.sendSms).toHaveBeenCalled();
   });
 
   it('a different idempotency key is treated as a genuinely new notification, not a duplicate', async () => {
-    const { service, twilio, notificationsRepo } = build({
+    const { service, africasTalking, notificationsRepo } = build({
       notificationsRepo: {
         // No record matches THIS key - findOne simulates a fresh key with nothing on file
         findOne: jest.fn().mockResolvedValue(null),
@@ -118,7 +124,7 @@ describe('NotificationsService - idempotency (retry-safety)', () => {
 
     await service.sendSms('user-1', '+2340000000', 'Title', 'Body', undefined, 'job-new');
 
-    expect(twilio.sendSms).toHaveBeenCalled();
+    expect(africasTalking.sendSms).toHaveBeenCalled();
     expect(notificationsRepo.create).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: 'job-new' }));
   });
 

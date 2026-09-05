@@ -38,11 +38,12 @@ export class VehiclesController {
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.COUNTRY_ADMIN, UserRole.CITY_MANAGER, UserRole.SUPPORT_AGENT)
   listForAdmin(
     @Query('status') status?: VehicleStatus,
+    @Query('driverId') driverId?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
     return this.vehiclesService.listForAdmin(
-      { status },
+      { status, driverId },
       page ? parseInt(page, 10) : undefined,
       limit ? parseInt(limit, 10) : undefined,
     );

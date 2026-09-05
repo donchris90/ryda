@@ -552,7 +552,7 @@ export class RidesService {
    * dependencies just for names.
    */
   async listForAdmin(
-    filter?: { status?: RideStatus; search?: string },
+    filter?: { status?: RideStatus; search?: string; driverId?: string; passengerId?: string },
     page = 1,
     limit = 25,
   ) {
@@ -578,6 +578,12 @@ export class RidesService {
 
     if (filter?.status) {
       qb.andWhere('ride.status = :status', { status: filter.status });
+    }
+    if (filter?.driverId) {
+      qb.andWhere('ride.driverId = :driverId', { driverId: filter.driverId });
+    }
+    if (filter?.passengerId) {
+      qb.andWhere('ride.passengerId = :passengerId', { passengerId: filter.passengerId });
     }
     if (filter?.search) {
       // Matches a ride ID prefix, or either party's name/phone — covers

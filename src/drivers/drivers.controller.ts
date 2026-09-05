@@ -153,6 +153,13 @@ export class DriversController {
     return this.driversService.listForAdmin(approvalStatus ? { approvalStatus } : undefined);
   }
 
+  @Get('admin/:id/detail')
+  @UseGuards(RolesGuard)
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.COUNTRY_ADMIN, UserRole.CITY_MANAGER, UserRole.SUPPORT_AGENT)
+  getDetailForAdmin(@Param('id') id: string) {
+    return this.driversService.getDetailForAdmin(id);
+  }
+
   // ---- Documents ----
 
   /**

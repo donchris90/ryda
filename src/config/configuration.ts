@@ -132,6 +132,18 @@ export default () => ({
     fromNumber: process.env.TWILIO_FROM_NUMBER ?? '',
     whatsappFromNumber: process.env.TWILIO_WHATSAPP_FROM ?? '', // e.g. whatsapp:+14155238886
   },
+  // This project's actual SMS provider (OTP, general notifications,
+  // and SOS emergency-contact alerts all send through this) - was
+  // read via ConfigService.get() with no registration anywhere at
+  // all, meaning isConfigured() always resolved false no matter what
+  // env vars were actually set, and every SMS silently fell through
+  // to a "simulated" record instead of ever really sending.
+  africasTalking: {
+    apiKey: process.env.AFRICAS_TALKING_API_KEY ?? '',
+    username: process.env.AFRICAS_TALKING_USERNAME ?? '',
+    senderId: process.env.AFRICAS_TALKING_SENDER_ID ?? '',
+    baseUrl: process.env.AFRICAS_TALKING_BASE_URL ?? 'https://api.africastalking.com/version1',
+  },
   sendgrid: {
     apiKey: process.env.SENDGRID_API_KEY ?? '',
     fromEmail: process.env.SENDGRID_FROM_EMAIL ?? 'no-reply@ryda.example',

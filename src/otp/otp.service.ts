@@ -3,7 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { OtpCode, OtpPurpose } from './otp-code.entity';
-import { TwilioProvider } from '../notifications/providers/twilio.provider';
+import { AfricasTalkingProvider } from './providers/africas-talking.provider';
 
 const MAX_ATTEMPTS = 5;
 
@@ -15,7 +15,7 @@ export class OtpService {
     @InjectRepository(OtpCode)
     private readonly otpRepo: Repository<OtpCode>,
     private readonly config: ConfigService,
-    private readonly twilio: TwilioProvider,
+    private readonly africasTalking: AfricasTalkingProvider,
   ) {}
 
   async send(destination: string, purpose: OtpPurpose): Promise<{ devOnlyCode: string | null; expiresInSeconds: number; delivered: boolean }> {
@@ -34,18 +34,19 @@ export class OtpService {
 
     // destination is always a phone number for every current caller
     // (PHONE_VERIFICATION, WALLET_TRANSFER, WALLET_WITHDRAWAL all pass
-    // dto.phone/user.phone) - attempt real SMS delivery via the same
-    // Twilio account notifications already use, rather than silently
+    // dto.phone/user.phone) - attempt real SMS delivery via Africa's
+    // Talking, this project's actually-configured SMS provider (see
+    // AfricasTalkingProvider's own comment), rather than silently
     // never sending anything.
     let delivered = false;
-    if (this.twilio.isSmsConfigured()) {
-      const result = await this.twilio.sendSms(destination, `Your Ryda verification code is ${code}. It expires in ${Math.round(ttlSeconds / 60)} minutes. Never share this code with anyone.`);
+    if (this.africasTalking.isConfigured()) {
+      const result = await this.africasTalking.sendSms(destination, `Your Ryda verification code is ${code}. It expires in ${Math.round(ttlSeconds / 60)} minutes. Never share this code with anyone.`);
       delivered = result.success;
       if (!result.success) {
         this.logger.warn(`OTP SMS delivery failed for purpose=${purpose}: ${result.error}`);
       }
     } else {
-      this.logger.warn('TWILIO not configured — OTP SMS not actually sent (see devOnlyCode fallback in README)');
+      this.logger.warn('Africa\'s Talking not configured — OTP SMS not actually sent (see devOnlyCode fallback in README)');
     }
 
     // Only ever surface the real code here when it genuinely wasn't
