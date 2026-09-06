@@ -24,28 +24,58 @@ export class AddRemainingMissingColumnsAndEnumValues1790300000000 implements Mig
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     // --- notifications.category ---
-    await queryRunner.query(
-      `CREATE TYPE "public"."notifications_category_enum" AS ENUM('ride', 'wallet', 'promotion', 'support', 'security', 'general')`,
-    );
-    await queryRunner.query(
-      `ALTER TABLE "notifications" ADD "category" "public"."notifications_category_enum" NOT NULL DEFAULT 'general'`,
-    );
+    await queryRunner.query(`
+      DO $$ BEGIN
+        CREATE TYPE "public"."notifications_category_enum" AS ENUM('ride', 'wallet', 'promotion', 'support', 'security', 'general');
+      EXCEPTION WHEN duplicate_object THEN NULL;
+      END $$;
+    `);
+    await queryRunner.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'notifications' AND column_name = 'category'
+        ) THEN
+          ALTER TABLE "notifications" ADD "category" "public"."notifications_category_enum" NOT NULL DEFAULT 'general';
+        END IF;
+      END $$;
+    `);
 
     // --- incidents.severity ---
-    await queryRunner.query(
-      `CREATE TYPE "public"."incidents_severity_enum" AS ENUM('low', 'medium', 'high', 'critical')`,
-    );
-    await queryRunner.query(
-      `ALTER TABLE "incidents" ADD "severity" "public"."incidents_severity_enum" NOT NULL DEFAULT 'medium'`,
-    );
+    await queryRunner.query(`
+      DO $$ BEGIN
+        CREATE TYPE "public"."incidents_severity_enum" AS ENUM('low', 'medium', 'high', 'critical');
+      EXCEPTION WHEN duplicate_object THEN NULL;
+      END $$;
+    `);
+    await queryRunner.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'incidents' AND column_name = 'severity'
+        ) THEN
+          ALTER TABLE "incidents" ADD "severity" "public"."incidents_severity_enum" NOT NULL DEFAULT 'medium';
+        END IF;
+      END $$;
+    `);
 
     // --- delivery_orders.vehicleType ---
-    await queryRunner.query(
-      `CREATE TYPE "public"."delivery_orders_vehicletype_enum" AS ENUM('bike', 'keke', 'car', 'van', 'pickup', 'truck')`,
-    );
-    await queryRunner.query(
-      `ALTER TABLE "delivery_orders" ADD "vehicleType" "public"."delivery_orders_vehicletype_enum" NOT NULL DEFAULT 'car'`,
-    );
+    await queryRunner.query(`
+      DO $$ BEGIN
+        CREATE TYPE "public"."delivery_orders_vehicletype_enum" AS ENUM('bike', 'keke', 'car', 'van', 'pickup', 'truck');
+      EXCEPTION WHEN duplicate_object THEN NULL;
+      END $$;
+    `);
+    await queryRunner.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'delivery_orders' AND column_name = 'vehicleType'
+        ) THEN
+          ALTER TABLE "delivery_orders" ADD "vehicleType" "public"."delivery_orders_vehicletype_enum" NOT NULL DEFAULT 'car';
+        END IF;
+      END $$;
+    `);
 
     // --- wallet_transactions.category: add every value used by TransactionCategory ---
     for (const value of [
