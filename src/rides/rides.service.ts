@@ -1068,6 +1068,7 @@ export class RidesService {
       passengerId: ride.passengerId,
       pickupAddress: ride.pickupAddress,
       scheduledAt: ride.scheduledAt,
+      rideId: ride.id,
     });
   }
 
@@ -1452,6 +1453,7 @@ export class RidesService {
     this.events.emit('ride.accepted', {
       passengerId: saved.passengerId,
       driverName: driver.firstName,
+      rideId: saved.id,
     });
     this.emitStatusChanged(saved);
 
@@ -1495,7 +1497,7 @@ export class RidesService {
     // all. The passenger's own 5s status poll would eventually show
     // this, but a push notification matters specifically for a
     // backgrounded app.
-    this.events.emit('ride.arrived', { passengerId: ride.passengerId });
+    this.events.emit('ride.arrived', { passengerId: ride.passengerId, rideId: saved.id });
     this.emitStatusChanged(saved);
     return saved;
   }
@@ -1665,6 +1667,7 @@ export class RidesService {
           this.events.emit('payment.failed', {
             userId: ride.passengerId,
             reason,
+            rideId: ride.id,
           });
           throw new BadRequestException(reason);
         }
@@ -1765,6 +1768,7 @@ export class RidesService {
       passengerId: ride.passengerId,
       driverId: driverUserId,
       totalFare: ride.totalFare,
+      rideId: ride.id,
     });
     this.metricsService.rideCompletionsTotal.inc({
       paymentMethod: ride.paymentMethod,
@@ -2052,6 +2056,7 @@ export class RidesService {
       this.events.emit('ride.cancelled', {
         notifyUserId,
         reason: ride.cancelReason,
+        rideId: ride.id,
       });
     }
     this.emitStatusChanged(ride);

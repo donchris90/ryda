@@ -133,3 +133,59 @@ export function assertProductionPaymentsAreConfigured(
     );
   }
 }
+
+/**
+ * `DB_SYNCHRONIZE` defaults to `true` (see configuration.ts) purely for
+ * local-dev convenience — TypeORM auto-generates and applies schema
+ * changes from the entities on every boot, so a fresh clone works
+ * without ever running a migration by hand. In production that same
+ * behaviour is exactly the "synchronize: true as a workaround" pattern
+ * this project's own rules forbid: it can silently alter or drop real
+ * columns/tables to match whatever the entities currently look like,
+ * with no review and no rollback. Same "refuse to boot" pattern as the
+ * other checks here, rather than trusting every deploy to remember to
+ * set DB_SYNCHRONIZE=false.
+ */
+export function assertProductionDoesNotAutoSynchronizeSchema(
+  nodeEnv: string,
+  synchronize: boolean,
+): void {
+  if (nodeEnv !== 'production') return;
+
+  if (synchronize) {
+    throw new Error(
+      'Refusing to start with NODE_ENV=production while DB_SYNCHRONIZE=true (or unset — it ' +
+        'defaults to true for local dev). TypeORM would auto-alter the production schema to ' +
+        "match the current entities on every boot, with no review and no rollback. Run this " +
+        'project\'s migrations instead and set DB_SYNCHRONIZE=false.',
+    );
+  }
+}
+
+/**
+ * otp.forceDevOnlyCode (OTP_FORCE_DEV_CODE=true) is a documented,
+ * temporary escape hatch — see its comment in configuration.ts — for
+ * while the SMS Sender ID registration is pending. While it's on, the
+ * valid OTP for ANY phone number is returned directly in the API
+ * response, including on the public, unauthenticated verification
+ * endpoint — no possession of that phone required. Fine as a short-term
+ * workaround; a genuine account-takeover hole if it's ever left on in a
+ * real production deploy. Same "refuse to boot" pattern as the checks
+ * above, since a config flag meant to be temporary is exactly the kind
+ * of thing that survives accidentally past its intended window.
+ */
+export function assertProductionDoesNotForceDevOtp(
+  nodeEnv: string,
+  forceDevOnlyCode: boolean,
+): void {
+  if (nodeEnv !== 'production') return;
+
+  if (forceDevOnlyCode) {
+    throw new Error(
+      'Refusing to start with NODE_ENV=production while OTP_FORCE_DEV_CODE=true. This returns ' +
+        'a valid OTP for any phone number directly in the API response - a real account-takeover ' +
+        'hole in production. Set OTP_FORCE_DEV_CODE=false (or unset it) once the SMS Sender ID ' +
+        'is approved.',
+    );
+  }
+}

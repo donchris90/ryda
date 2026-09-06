@@ -52,6 +52,19 @@ export class OtpService {
     // Only ever surface the real code here when it genuinely wasn't
     // delivered anywhere else - once SMS delivery succeeds, the code
     // must not also be readable straight from this response.
+    //
+    // TEMPORARY: forceDevOnlyCode overrides that when set (see
+    // configuration.ts otp.forceDevOnlyCode comment) - Africa's Talking
+    // currently reports every send as "delivered" while the carrier
+    // silently drops it (unregistered Sender ID in Nigeria), so trusting
+    // `delivered` alone would hide the code from every real user with no
+    // way to get it. This flag is meant to come out again once the
+    // Sender ID is approved.
+    if (this.config.get<boolean>('otp.forceDevOnlyCode')) {
+      this.logger.warn(`OTP_FORCE_DEV_CODE is active — returning real code in API response for purpose=${purpose} (SMS delivery bypassed for verification)`);
+      return { devOnlyCode: code, expiresInSeconds: ttlSeconds, delivered };
+    }
+
     return { devOnlyCode: delivered ? null : code, expiresInSeconds: ttlSeconds, delivered };
   }
 

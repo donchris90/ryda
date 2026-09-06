@@ -13,7 +13,7 @@ import { PaymentRecord, PaymentStatus } from './entities/payment-record.entity';
 import { SavedCard } from './entities/saved-card.entity';
 import { PaymentDispute, DisputeStatus, DisputeResolution } from './entities/payment-dispute.entity';
 import { PaymentMethod } from '../common/enums/ride.enum';
-import { PaystackService } from './paystack/paystack.service';
+import { PaystackService, PaystackVerifyResult } from './paystack/paystack.service';
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { WalletsService } from '../wallets/wallets.service';
@@ -706,6 +706,104 @@ export class PaymentsService {
     record.status = PaymentStatus.FAILED;
     record.failureReason = reason;
     return this.paymentsRepo.save(record);
+  }
+
+  /**
+   * Purpose-specific side effects of a fresh charge.success — wallet
+   * credit for a top-up, or card tokenization (+ silent refund) for a
+   * card-verification charge. Extracted so both the webhook path
+   * (PaymentsController.paystackWebhook) and the on-demand verify path
+   * below (verifyAndSyncByReference, used when a webhook hasn't landed
+   * yet) trigger identical effects instead of two copies drifting apart.
+   * Must only ever be called once per payment — callers are responsible
+   * for checking `alreadyProcessed` first.
+   */
+  async applyChargeSuccessEffects(
+    record: PaymentRecord,
+    metadataPurpose: string | undefined,
+    authorization: {
+      authorizationCode: string | null;
+      last4: string | null;
+      cardType: string | null;
+      bank: string | null;
+    } | null,
+  ): Promise<void> {
+    if (metadataPurpose === 'wallet_topup') {
+      await this.creditWalletFromTopUp(record);
+    } else if (record.rideId === null && authorization?.authorizationCode) {
+      await this.saveCardFromVerification(
+        record.userId,
+        authorization.authorizationCode,
+        authorization.last4,
+        authorization.cardType,
+        authorization.bank,
+      );
+      await this.paystack
+        .refund({ transactionReference: record.reference })
+        .catch(() => undefined);
+    }
+  }
+
+  /**
+   * On-demand status check for a reference the client is polling after
+   * returning from Paystack's hosted checkout. The webhook remains the
+   * primary, authoritative path — this exists only to cover the gap
+   * where the client returns before the webhook has arrived (or, more
+   * rarely, a webhook delivery is missed entirely): if our own record
+   * is still PENDING, ask Paystack directly rather than leaving the
+   * user staring at a spinner indefinitely. Ownership-checked so a
+   * reference can only be queried by the user it belongs to.
+   */
+  async verifyAndSyncByReference(
+    userId: string,
+    reference: string,
+  ): Promise<PaymentRecord | null> {
+    const record = await this.findByReference(reference);
+    if (!record || record.userId !== userId) return null;
+    if (record.status !== PaymentStatus.PENDING) return record;
+    if (!this.paystack.isConfigured()) return record;
+
+    let verification: PaystackVerifyResult;
+    try {
+      verification = await this.paystack.verifyTransaction(reference);
+    } catch {
+      // Paystack unreachable right now - report what we know (pending)
+      // rather than failing the request; the client can retry.
+      return record;
+    }
+
+    if (verification.status === 'success') {
+      const gatewayReference =
+        verification.raw &&
+        typeof verification.raw === 'object' &&
+        'id' in (verification.raw as Record<string, unknown>)
+          ? String((verification.raw as Record<string, unknown>).id)
+          : reference;
+      const result = await this.markSuccessFromWebhook(reference, gatewayReference);
+      if (result && !result.alreadyProcessed) {
+        const purpose =
+          verification.raw &&
+          typeof verification.raw === 'object' &&
+          'metadata' in (verification.raw as Record<string, unknown>)
+            ? ((verification.raw as Record<string, unknown>).metadata as
+                | Record<string, unknown>
+                | undefined)?.purpose as string | undefined
+            : undefined;
+        await this.applyChargeSuccessEffects(result.record, purpose, verification.authorization);
+      }
+      return result?.record ?? record;
+    }
+
+    if (verification.status === 'failed' || verification.status === 'abandoned') {
+      return this.markFailedFromWebhook(
+        reference,
+        `Paystack reported status: ${verification.status}`,
+      );
+    }
+
+    // Still pending on Paystack's side too (e.g. bank transfer/USSD
+    // awaiting settlement) - nothing to sync yet.
+    return record;
   }
 
   async saveCardFromVerification(

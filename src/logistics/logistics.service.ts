@@ -1106,6 +1106,7 @@ export class LogisticsService {
       customerId: order.customerId,
       driverId: driverUserId,
       totalFare: order.totalFare,
+      deliveryId: order.id,
     });
 
     return order;
@@ -1192,6 +1193,7 @@ export class LogisticsService {
       this.events.emit('delivery.cancelled', {
         notifyUserId,
         reason: order.cancelReason,
+        deliveryId: order.id,
       });
     }
     this.emitDeliveryStatusChanged(order);

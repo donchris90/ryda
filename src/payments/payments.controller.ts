@@ -6,6 +6,7 @@ import {
   Get,
   HttpCode,
   Inject,
+  NotFoundException,
   Param,
   Post,
   Query,
@@ -81,6 +82,40 @@ export class PaymentsController {
   @UseGuards(JwtAuthGuard)
   mine(@CurrentUser() user: User) {
     return this.paymentsService.findForUser(user.id);
+  }
+
+  /**
+   * On-demand status check for the client to poll right after returning
+   * from Paystack's hosted checkout (card-add-complete /
+   * wallet-topup-complete). The webhook remains authoritative for
+   * actually crediting/tokenizing anything — this only reads current
+   * status, actively re-checking with Paystack if our own record is
+   * still PENDING (covers the case where the client returns before the
+   * webhook lands, or a delivery is missed). Ownership-checked: a
+   * reference only resolves for the user it belongs to.
+   */
+  @Get('reference/:reference')
+  @UseGuards(JwtAuthGuard)
+  async verifyByReference(
+    @CurrentUser() user: User,
+    @Param('reference') reference: string,
+  ) {
+    const record = await this.paymentsService.verifyAndSyncByReference(
+      user.id,
+      reference,
+    );
+    if (!record) {
+      throw new NotFoundException('Payment not found');
+    }
+    return {
+      reference: record.reference,
+      status: record.status,
+      amount: record.amount,
+      method: record.method,
+      simulated: record.simulated,
+      failureReason: record.failureReason,
+      createdAt: record.createdAt,
+    };
   }
 
   @Get()
@@ -227,26 +262,24 @@ export class PaymentsController {
       const record = result?.record ?? null;
       const purpose = event.data.metadata?.purpose;
 
-      if (record && purpose === 'wallet_topup') {
-        await this.paymentsService.creditWalletFromTopUp(record);
-      } else if (
-        record &&
-        record.rideId === null &&
-        event.data.authorization?.authorization_code
-      ) {
-        // Card-verification charges (not tied to a ride) tokenize the card
-        // and get silently refunded — the point was only to capture the
-        // reusable authorization_code.
-        await this.paymentsService.saveCardFromVerification(
-          record.userId,
-          event.data.authorization.authorization_code,
-          event.data.authorization.last4 ?? null,
-          event.data.authorization.card_type ?? null,
-          event.data.authorization.bank ?? null,
+      // Card-verification charges (not tied to a ride) tokenize the card
+      // and get silently refunded — the point was only to capture the
+      // reusable authorization_code. Shared with the on-demand verify
+      // path (PaymentsService.verifyAndSyncByReference) so both trigger
+      // identical side effects.
+      if (record) {
+        await this.paymentsService.applyChargeSuccessEffects(
+          record,
+          purpose,
+          event.data.authorization
+            ? {
+                authorizationCode: event.data.authorization.authorization_code ?? null,
+                last4: event.data.authorization.last4 ?? null,
+                cardType: event.data.authorization.card_type ?? null,
+                bank: event.data.authorization.bank ?? null,
+              }
+            : null,
         );
-        await this.paystack
-          .refund({ transactionReference: reference })
-          .catch(() => undefined);
       }
     } else if (event.event === 'charge.failed') {
       await this.paymentsService.markFailedFromWebhook(

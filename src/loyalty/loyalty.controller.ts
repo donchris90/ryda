@@ -15,6 +15,17 @@ export class LoyaltyController {
     return this.loyaltyService.getAccount(user.id);
   }
 
+  /**
+   * Everything the passenger loyalty screen needs beyond the bare
+   * account row (next-tier distance, current earn/redeem rates) -
+   * kept separate from GET /me rather than changing that response
+   * shape, since /me is a plain entity read and this is a derived view.
+   */
+  @Get('me/summary')
+  getAccountSummary(@CurrentUser() user: User) {
+    return this.loyaltyService.getAccountSummary(user.id);
+  }
+
   @Get('me/transactions')
   getTransactions(@CurrentUser() user: User) {
     return this.loyaltyService.getTransactions(user.id);

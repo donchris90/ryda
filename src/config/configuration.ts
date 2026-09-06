@@ -65,6 +65,20 @@ export default () => ({
   otp: {
     ttlSeconds: parseInt(process.env.OTP_TTL_SECONDS ?? '300', 10),
     length: parseInt(process.env.OTP_LENGTH ?? '6', 10),
+    // TEMPORARY escape hatch: SMS provider (Africa's Talking) reports
+    // "Success" on every send right now, but the underlying carrier is
+    // silently dropping messages because our Sender ID isn't yet
+    // registered on the transactional bind in Nigeria (2-week telco
+    // approval process, in progress). Until that's approved, real users
+    // have no way to receive a code at all, so - deliberately, and only
+    // for now - devOnlyCode is always returned in the send response
+    // regardless of what the SMS provider reports, everywhere OTPs are
+    // sent (including the public, unauthenticated phone-verification
+    // endpoint). REMOVE / set OTP_FORCE_DEV_CODE=false the moment the
+    // Sender ID is approved - leaving this on returns a valid OTP to
+    // anyone who knows a phone number, no possession of that phone
+    // required.
+    forceDevOnlyCode: process.env.OTP_FORCE_DEV_CODE === 'true',
   },
   mail: {
     // Brevo's transactional email API, not Gmail SMTP - see

@@ -207,6 +207,7 @@ describe('NotificationsService.onScheduledRideReminder()', () => {
       passengerId: 'passenger-1',
       pickupAddress: '12 Marina Road',
       scheduledAt: new Date('2026-06-01T14:30:00Z'),
+      rideId: 'ride-1',
     });
 
     expect(notificationsQueue.add).toHaveBeenCalledWith(
@@ -224,7 +225,7 @@ describe('NotificationsService.onScheduledRideReminder()', () => {
     const { service, notificationsQueue } = build();
 
     await expect(
-      service.onScheduledRideReminder({ passengerId: 'passenger-1', pickupAddress: '12 Marina Road', scheduledAt: null }),
+      service.onScheduledRideReminder({ passengerId: 'passenger-1', pickupAddress: '12 Marina Road', scheduledAt: null, rideId: 'ride-1' }),
     ).resolves.toBeUndefined();
     expect(notificationsQueue.add).toHaveBeenCalled();
   });
@@ -244,5 +245,113 @@ describe('NotificationsService.onSplitFareExpired()', () => {
       }),
       expect.anything(),
     );
+  });
+});
+
+/**
+ * These handlers previously passed `undefined` for metadata on every
+ * passenger-facing event - the notification would show in the list,
+ * but tapping it (in-app or via the OS push) had nothing to route on.
+ * Locking in that each one now carries enough for the client to
+ * navigate somewhere specific.
+ */
+describe('NotificationsService - notification metadata for tap routing', () => {
+  it('ride.accepted carries {type: ride, rideId}', async () => {
+    const { service, notificationsQueue } = build();
+    await service.onRideAccepted({ passengerId: 'passenger-1', driverName: 'Tunde', rideId: 'ride-1' });
+    expect(notificationsQueue.add).toHaveBeenCalledWith(
+      'send',
+      expect.objectContaining({ metadata: { type: 'ride', rideId: 'ride-1' } }),
+      expect.anything(),
+    );
+  });
+
+  it('ride.arrived carries {type: ride, rideId}', async () => {
+    const { service, notificationsQueue } = build();
+    await service.onRideArrived({ passengerId: 'passenger-1', rideId: 'ride-2' });
+    expect(notificationsQueue.add).toHaveBeenCalledWith(
+      'send',
+      expect.objectContaining({ metadata: { type: 'ride', rideId: 'ride-2' } }),
+      expect.anything(),
+    );
+  });
+
+  it('ride.completed carries {type: ride, rideId} for both passenger and driver', async () => {
+    const { service, notificationsQueue } = build();
+    await service.onRideCompleted({ passengerId: 'p-1', driverId: 'd-1', totalFare: '2500.00', rideId: 'ride-3' });
+    const calls = notificationsQueue.add.mock.calls;
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call[1]).toEqual(expect.objectContaining({ metadata: { type: 'ride', rideId: 'ride-3' } }));
+    }
+  });
+
+  it('ride.cancelled carries {type: ride, rideId}', async () => {
+    const { service, notificationsQueue } = build();
+    await service.onRideCancelled({ notifyUserId: 'passenger-1', reason: 'Driver unavailable', rideId: 'ride-4' });
+    expect(notificationsQueue.add).toHaveBeenCalledWith(
+      'send',
+      expect.objectContaining({ metadata: { type: 'ride', rideId: 'ride-4' } }),
+      expect.anything(),
+    );
+  });
+
+  it('payment.failed carries {type: ride, rideId} when tied to a ride', async () => {
+    const { service, notificationsQueue } = build();
+    await service.onPaymentFailed({ userId: 'passenger-1', reason: 'Card declined', rideId: 'ride-5' });
+    expect(notificationsQueue.add).toHaveBeenCalledWith(
+      'send',
+      expect.objectContaining({ metadata: { type: 'ride', rideId: 'ride-5' } }),
+      expect.anything(),
+    );
+  });
+
+  it('payment.failed falls back to {type: wallet} when not tied to any ride', async () => {
+    const { service, notificationsQueue } = build();
+    await service.onPaymentFailed({ userId: 'passenger-1', reason: 'Card declined' });
+    expect(notificationsQueue.add).toHaveBeenCalledWith(
+      'send',
+      expect.objectContaining({ metadata: { type: 'wallet' } }),
+      expect.anything(),
+    );
+  });
+
+  it('delivery.delivered carries {type: delivery, deliveryId} for both customer and driver', async () => {
+    const { service, notificationsQueue } = build();
+    await service.onDeliveryDelivered({ customerId: 'c-1', driverId: 'd-1', totalFare: '1500.00', deliveryId: 'delivery-1' });
+    const calls = notificationsQueue.add.mock.calls;
+    expect(calls).toHaveLength(2);
+    for (const call of calls) {
+      expect(call[1]).toEqual(expect.objectContaining({ metadata: { type: 'delivery', deliveryId: 'delivery-1' } }));
+    }
+  });
+
+  it('delivery.cancelled carries {type: delivery, deliveryId}', async () => {
+    const { service, notificationsQueue } = build();
+    await service.onDeliveryCancelled({ notifyUserId: 'c-1', reason: 'No courier found', deliveryId: 'delivery-2' });
+    expect(notificationsQueue.add).toHaveBeenCalledWith(
+      'send',
+      expect.objectContaining({ metadata: { type: 'delivery', deliveryId: 'delivery-2' } }),
+      expect.anything(),
+    );
+  });
+
+  it('referral.bonus_granted carries {type: wallet}', async () => {
+    const { service, notificationsQueue } = build();
+    await service.onReferralBonusGranted({ userId: 'user-1', amount: '500.00' });
+    expect(notificationsQueue.add).toHaveBeenCalledWith(
+      'send',
+      expect.objectContaining({ metadata: { type: 'wallet' } }),
+      expect.anything(),
+    );
+  });
+
+  it('support.ticket.created and support.ticket.status_changed carry {type: support, ticketId}', async () => {
+    const { service, notificationsQueue } = build();
+    await service.onTicketCreated({ userId: 'user-1', ticketId: 'ticket-1', subject: 'App crashed' });
+    await service.onTicketStatusChanged({ userId: 'user-1', ticketId: 'ticket-1', status: 'resolved' });
+    for (const call of notificationsQueue.add.mock.calls) {
+      expect(call[1]).toEqual(expect.objectContaining({ metadata: { type: 'support', ticketId: 'ticket-1' } }));
+    }
   });
 });

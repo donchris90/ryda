@@ -60,6 +60,41 @@ export class LoyaltyService {
     return this.getOrCreateAccount(userId);
   }
 
+  /**
+   * Everything the passenger-facing loyalty screen needs beyond the bare
+   * account row: how far to the next tier, and the actual earn/redeem
+   * rates - all derived from the same constants the rest of this
+   * service already enforces (POINTS_PER_NAIRA_SPENT, TIER_THRESHOLDS,
+   * etc.), never hardcoded a second time on the client. tier/pointsToNextTier
+   * are null once at the top tier - there's nothing further to reach.
+   */
+  async getAccountSummary(userId: string): Promise<{
+    pointsBalance: number;
+    lifetimePoints: number;
+    tier: LoyaltyTier;
+    nextTier: LoyaltyTier | null;
+    pointsToNextTier: number | null;
+    pointsPerNairaSpent: number;
+    nairaPerPointRedeemed: number;
+    minRedemptionPoints: number;
+  }> {
+    const account = await this.getOrCreateAccount(userId);
+    const tierOrder = [LoyaltyTier.BRONZE, LoyaltyTier.SILVER, LoyaltyTier.GOLD, LoyaltyTier.PLATINUM];
+    const currentIndex = tierOrder.indexOf(account.tier);
+    const nextTier = currentIndex < tierOrder.length - 1 ? tierOrder[currentIndex + 1] : null;
+
+    return {
+      pointsBalance: account.pointsBalance,
+      lifetimePoints: account.lifetimePoints,
+      tier: account.tier,
+      nextTier,
+      pointsToNextTier: nextTier ? TIER_THRESHOLDS[nextTier] - account.lifetimePoints : null,
+      pointsPerNairaSpent: POINTS_PER_NAIRA_SPENT,
+      nairaPerPointRedeemed: NAIRA_PER_POINT_REDEEMED,
+      minRedemptionPoints: MIN_REDEMPTION_POINTS,
+    };
+  }
+
   async getTransactions(userId: string): Promise<LoyaltyTransaction[]> {
     return this.transactionsRepo.find({ where: { userId }, order: { createdAt: 'DESC' }, take: 50 });
   }

@@ -250,31 +250,31 @@ export class NotificationsService {
   // -----------------------------------------------------------------------
 
   @OnEvent('ride.accepted')
-  async onRideAccepted(payload: { passengerId: string; driverName: string }) {
+  async onRideAccepted(payload: { passengerId: string; driverName: string; rideId: string }) {
     await this.safeNotify(
       payload.passengerId,
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
       'Driver on the way',
       `${payload.driverName} accepted your ride and is heading your way.`,
-      undefined,
+      { type: 'ride', rideId: payload.rideId },
       NotificationCategory.RIDE,
     );
   }
 
   @OnEvent('ride.arrived')
-  async onRideArrived(payload: { passengerId: string }) {
+  async onRideArrived(payload: { passengerId: string; rideId: string }) {
     await this.safeNotify(
       payload.passengerId,
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
       'Your driver has arrived',
       "Your driver is waiting at the pickup point.",
-      undefined,
+      { type: 'ride', rideId: payload.rideId },
       NotificationCategory.RIDE,
     );
   }
 
   @OnEvent('ride.scheduled_reminder')
-  async onScheduledRideReminder(payload: { passengerId: string; pickupAddress: string; scheduledAt: Date | null }) {
+  async onScheduledRideReminder(payload: { passengerId: string; pickupAddress: string; scheduledAt: Date | null; rideId: string }) {
     const timeLabel = payload.scheduledAt
       ? new Date(payload.scheduledAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
       : 'soon';
@@ -283,7 +283,7 @@ export class NotificationsService {
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
       'Upcoming ride reminder',
       `Your ride from ${payload.pickupAddress} is scheduled for ${timeLabel}.`,
-      undefined,
+      { type: 'ride', rideId: payload.rideId },
       NotificationCategory.RIDE,
     );
   }
@@ -295,7 +295,7 @@ export class NotificationsService {
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
       'Split fare request expired',
       "Not everyone paid their share in time. You'll need to cover the rest, or ask them to pay you directly.",
-      undefined,
+      { type: 'ride', rideId: payload.rideId },
       NotificationCategory.RIDE,
     );
   }
@@ -313,13 +313,13 @@ export class NotificationsService {
   }
 
   @OnEvent('ride.started')
-  async onRideStarted(payload: { passengerId: string }) {
+  async onRideStarted(payload: { passengerId: string; rideId: string }) {
     await this.safeNotify(
       payload.passengerId,
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
       'Trip started',
       "You're on your way — have a safe trip.",
-      undefined,
+      { type: 'ride', rideId: payload.rideId },
       NotificationCategory.RIDE,
     );
   }
@@ -343,14 +343,14 @@ export class NotificationsService {
   }
 
   @OnEvent('ride.completed')
-  async onRideCompleted(payload: { passengerId: string; driverId: string; totalFare: string }) {
+  async onRideCompleted(payload: { passengerId: string; driverId: string; totalFare: string; rideId: string }) {
     await Promise.all([
       this.safeNotify(
         payload.passengerId,
         [NotificationChannel.IN_APP, NotificationChannel.PUSH],
         'Trip completed',
         `Your trip is complete. Total fare: ${payload.totalFare}.`,
-        undefined,
+        { type: 'ride', rideId: payload.rideId },
         NotificationCategory.RIDE,
       ),
       this.safeNotify(
@@ -358,20 +358,20 @@ export class NotificationsService {
         [NotificationChannel.IN_APP, NotificationChannel.PUSH],
         'Trip completed',
         `Trip completed. Check your wallet for earnings.`,
-        undefined,
+        { type: 'ride', rideId: payload.rideId },
         NotificationCategory.RIDE,
       ),
     ]);
   }
 
   @OnEvent('ride.cancelled')
-  async onRideCancelled(payload: { notifyUserId: string; reason: string | null }) {
+  async onRideCancelled(payload: { notifyUserId: string; reason: string | null; rideId: string }) {
     await this.safeNotify(
       payload.notifyUserId,
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
       'Ride cancelled',
       payload.reason ? `Your ride was cancelled: ${payload.reason}` : 'Your ride was cancelled.',
-      undefined,
+      { type: 'ride', rideId: payload.rideId },
       NotificationCategory.RIDE,
     );
   }
@@ -410,19 +410,19 @@ export class NotificationsService {
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
       'Referral bonus credited',
       `₦${payload.amount} referral bonus has been added to your wallet.`,
-      undefined,
+      { type: 'wallet' },
       NotificationCategory.WALLET,
     );
   }
 
   @OnEvent('payment.failed')
-  async onPaymentFailed(payload: { userId: string; reason: string }) {
+  async onPaymentFailed(payload: { userId: string; reason: string; rideId?: string }) {
     await this.safeNotify(
       payload.userId,
       [NotificationChannel.IN_APP, NotificationChannel.SMS],
       'Payment failed',
       `We couldn't process your payment: ${payload.reason}`,
-      undefined,
+      payload.rideId ? { type: 'ride', rideId: payload.rideId } : { type: 'wallet' },
       NotificationCategory.WALLET,
     );
   }
@@ -444,14 +444,14 @@ export class NotificationsService {
   }
 
   @OnEvent('delivery.delivered')
-  async onDeliveryDelivered(payload: { customerId: string; driverId: string; totalFare: string }) {
+  async onDeliveryDelivered(payload: { customerId: string; driverId: string; totalFare: string; deliveryId: string }) {
     await Promise.all([
       this.safeNotify(
         payload.customerId,
         [NotificationChannel.IN_APP, NotificationChannel.PUSH],
         'Delivery completed',
         `Your delivery has arrived. Total: ${payload.totalFare}.`,
-        undefined,
+        { type: 'delivery', deliveryId: payload.deliveryId },
         NotificationCategory.RIDE,
       ),
       this.safeNotify(
@@ -459,20 +459,20 @@ export class NotificationsService {
         [NotificationChannel.IN_APP, NotificationChannel.PUSH],
         'Delivery completed',
         'Delivery completed. Check your wallet for earnings.',
-        undefined,
+        { type: 'delivery', deliveryId: payload.deliveryId },
         NotificationCategory.RIDE,
       ),
     ]);
   }
 
   @OnEvent('delivery.cancelled')
-  async onDeliveryCancelled(payload: { notifyUserId: string; reason: string | null }) {
+  async onDeliveryCancelled(payload: { notifyUserId: string; reason: string | null; deliveryId: string }) {
     await this.safeNotify(
       payload.notifyUserId,
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
       'Delivery cancelled',
       payload.reason ? `Delivery cancelled: ${payload.reason}` : 'Delivery cancelled.',
-      undefined,
+      { type: 'delivery', deliveryId: payload.deliveryId },
       NotificationCategory.RIDE,
     );
   }
@@ -484,7 +484,7 @@ export class NotificationsService {
       [NotificationChannel.IN_APP],
       'Support ticket received',
       `We've received your ticket "${payload.subject}" and will get back to you soon.`,
-      undefined,
+      { type: 'support', ticketId: payload.ticketId },
       NotificationCategory.SUPPORT,
     );
   }
@@ -496,7 +496,7 @@ export class NotificationsService {
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
       'Support ticket update',
       `Your support ticket status changed to: ${payload.status}.`,
-      undefined,
+      { type: 'support', ticketId: payload.ticketId },
       NotificationCategory.SUPPORT,
     );
   }

@@ -8,6 +8,8 @@ import {
   assertProductionSecretsAreSet,
   assertProductionStorageIsConfigured,
   assertProductionPaymentsAreConfigured,
+  assertProductionDoesNotAutoSynchronizeSchema,
+  assertProductionDoesNotForceDevOtp,
 } from './config/env.validation';
 import { StorageService } from './storage/storage.service';
 import { PaystackService } from './payments/paystack/paystack.service';
@@ -40,6 +42,16 @@ async function bootstrap() {
 
   const paystack = app.get(PaystackService);
   assertProductionPaymentsAreConfigured(config.get('nodeEnv')!, paystack.isConfigured());
+
+  assertProductionDoesNotAutoSynchronizeSchema(
+    config.get('nodeEnv')!,
+    config.get('database.synchronize')!,
+  );
+
+  assertProductionDoesNotForceDevOtp(
+    config.get('nodeEnv')!,
+    config.get('otp.forceDevOnlyCode')!,
+  );
 
   const corsOrigins = config.get<string[]>('corsOrigins')!;
   if (config.get('nodeEnv') === 'production') {
