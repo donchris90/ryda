@@ -16,6 +16,20 @@ export class HealthController {
     private readonly redis: RedisHealthIndicator,
   ) {}
 
+  // Bare liveness check: "is this process up and able to answer HTTP
+  // requests at all", with zero dependency checks. Deliberately separate
+  // from checkAll() below, which is a readiness/deep-health check that
+  // returns 503 if ANY dependency (Paystack, Google Maps, Redis, the
+  // dispatch queue) is unhealthy - correct for an ops dashboard, wrong for
+  // anything that wants to know "is the network path to this server up",
+  // like Render's own health check (render.yaml's healthCheckPath points
+  // at plain /health, which never had a route to match it) and the
+  // passenger/driver apps' connectivity probe.
+  @Get()
+  ping() {
+    return { status: 'ok' };
+  }
+
   @Get('db')
   @HealthCheck()
   checkDb() {
