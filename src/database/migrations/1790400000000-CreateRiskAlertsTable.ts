@@ -13,14 +13,20 @@ export class CreateRiskAlertsTable1790400000000 implements MigrationInterface {
   name = 'CreateRiskAlertsTable1790400000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(
-      `CREATE TYPE "public"."risk_alerts_type_enum" AS ENUM('gps_stale', 'excessive_speed', 'unusual_stop', 'route_deviation', 'trip_duration_anomaly', 'unexpected_termination')`,
-    );
-    await queryRunner.query(
-      `CREATE TYPE "public"."risk_alerts_status_enum" AS ENUM('open', 'reviewed', 'dismissed')`,
-    );
     await queryRunner.query(`
-      CREATE TABLE "risk_alerts" (
+      DO $$ BEGIN
+        CREATE TYPE "public"."risk_alerts_type_enum" AS ENUM('gps_stale', 'excessive_speed', 'unusual_stop', 'route_deviation', 'trip_duration_anomaly', 'unexpected_termination');
+      EXCEPTION WHEN duplicate_object THEN NULL;
+      END $$;
+    `);
+    await queryRunner.query(`
+      DO $$ BEGIN
+        CREATE TYPE "public"."risk_alerts_status_enum" AS ENUM('open', 'reviewed', 'dismissed');
+      EXCEPTION WHEN duplicate_object THEN NULL;
+      END $$;
+    `);
+    await queryRunner.query(`
+      CREATE TABLE IF NOT EXISTS "risk_alerts" (
         "id" uuid NOT NULL DEFAULT uuid_generate_v4(),
         "type" "public"."risk_alerts_type_enum" NOT NULL,
         "rideId" character varying,
@@ -38,9 +44,9 @@ export class CreateRiskAlertsTable1790400000000 implements MigrationInterface {
         CONSTRAINT "PK_risk_alerts_id" PRIMARY KEY ("id")
       )
     `);
-    await queryRunner.query(`CREATE INDEX "IDX_risk_alerts_rideId" ON "risk_alerts" ("rideId")`);
-    await queryRunner.query(`CREATE INDEX "IDX_risk_alerts_driverUserId" ON "risk_alerts" ("driverUserId")`);
-    await queryRunner.query(`CREATE INDEX "IDX_risk_alerts_status" ON "risk_alerts" ("status")`);
+    await queryRunner.query(`CREATE INDEX IF NOT EXISTS "IDX_risk_alerts_rideId" ON "risk_alerts" ("rideId")`);
+    await queryRunner.query(`CREATE INDEX IF NOT EXISTS "IDX_risk_alerts_driverUserId" ON "risk_alerts" ("driverUserId")`);
+    await queryRunner.query(`CREATE INDEX IF NOT EXISTS "IDX_risk_alerts_status" ON "risk_alerts" ("status")`);
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {

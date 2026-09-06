@@ -23,12 +23,22 @@ export class AddSeverityToIncidents1790500000000 implements MigrationInterface {
   name = 'AddSeverityToIncidents1790500000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(
-      `CREATE TYPE "public"."incidents_severity_enum" AS ENUM('low', 'medium', 'high', 'critical')`,
-    );
-    await queryRunner.query(
-      `ALTER TABLE "incidents" ADD "severity" "public"."incidents_severity_enum" NOT NULL DEFAULT 'medium'`,
-    );
+    await queryRunner.query(`
+      DO $$ BEGIN
+        CREATE TYPE "public"."incidents_severity_enum" AS ENUM('low', 'medium', 'high', 'critical');
+      EXCEPTION WHEN duplicate_object THEN NULL;
+      END $$;
+    `);
+    await queryRunner.query(`
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'incidents' AND column_name = 'severity'
+        ) THEN
+          ALTER TABLE "incidents" ADD "severity" "public"."incidents_severity_enum" NOT NULL DEFAULT 'medium';
+        END IF;
+      END $$;
+    `);
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
