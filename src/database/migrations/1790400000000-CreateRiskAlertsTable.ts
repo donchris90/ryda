@@ -56,7 +56,7 @@ export class CreateRiskAlertsTable1790400000000 implements MigrationInterface {
     await queryRunner.query(`DROP TYPE "public"."risk_alerts_type_enum"`);
   }
 }
-=======
+
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
