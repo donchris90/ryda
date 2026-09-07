@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { Between, In, MoreThan, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import {
   LiveDriverIndexService,
@@ -11,6 +11,7 @@ import { DriverServiceCapability } from '../drivers/entities/driver-service-capa
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import {
   DriverApprovalStatus,
+  DriverAvailability,
 } from '../common/enums/driver-status.enum';
 import { VehicleStatus } from '../common/enums/vehicle.enum';
 import { DriverService, ServiceApprovalStatus, isOnlineForService } from '../common/enums/driver-service.enum';
@@ -113,11 +114,39 @@ export class CandidateSearchService {
       roundsAttempted += 1;
       radiusUsedKm = radiusKm;
 
-      const raw = await this.liveDriverIndex.searchNearby(
+      let raw = await this.liveDriverIndex.searchNearby(
         input.pickup,
         radiusKm,
         fetchLimit,
       );
+
+      // Redis is a disposable geospatial cache, not the source of truth.
+      // If the driver's location was successfully written to PostgreSQL
+      // but the Redis event was missed/delayed (or Redis was restarted),
+      // the old implementation returned an empty passenger list even
+      // though an eligible driver was genuinely online. Recover only when
+      // Redis gives us too few candidates, using a bounded lat/lng window
+      // and the same freshness rules. Successful fallbacks are immediately
+      // re-indexed so subsequent searches go back to the fast Redis path.
+      if (raw.length < Math.min(minCandidates, fetchLimit)) {
+        const recovered = await this.recoverCandidatesFromPostgres(
+          input.pickup,
+          radiusKm,
+          fetchLimit,
+          excludeSet,
+        );
+
+        if (recovered.length > 0) {
+          const byDriver = new Map(raw.map((candidate) => [candidate.driverUserId, candidate]));
+          for (const candidate of recovered) {
+            if (!byDriver.has(candidate.driverUserId)) {
+              byDriver.set(candidate.driverUserId, candidate);
+            }
+          }
+          raw = Array.from(byDriver.values()).sort((a, b) => a.distanceKm - b.distanceKm).slice(0, fetchLimit);
+        }
+      }
+
       const filtered = raw.filter((c) => !excludeSet.has(c.driverUserId));
 
       if (filtered.length > 0) {
@@ -191,6 +220,96 @@ export class CandidateSearchService {
       radiusUsedKm,
       roundsAttempted,
     };
+  }
+
+  /**
+   * Redis recovery path. PostgreSQL remains the durable source of truth
+   * for driver state/location, so a missing Redis event must not make an
+   * otherwise eligible driver invisible to a passenger. This is deliberately
+   * used only when the Redis result is below the requested minimum, keeping
+   * the normal dispatch path Redis-first and bounded.
+   */
+  private async recoverCandidatesFromPostgres(
+    pickup: { lat: number; lng: number },
+    radiusKm: number,
+    limit: number,
+    excludeSet: Set<string>,
+  ): Promise<LiveDriverCandidate[]> {
+    const latDelta = radiusKm / 111.32;
+    const cosLat = Math.max(Math.cos((pickup.lat * Math.PI) / 180), 0.15);
+    const lngDelta = radiusKm / (111.32 * cosLat);
+    const staleSeconds = this.config.get<number>('driverLocation.staleSeconds') ?? 120;
+    const freshSince = new Date(Date.now() - staleSeconds * 1000);
+
+    try {
+      const profiles = await this.driversRepo.find({
+        where: {
+          approvalStatus: DriverApprovalStatus.APPROVED,
+          availability: In([DriverAvailability.ONLINE_FOR_RIDES, DriverAvailability.ONLINE_FOR_BOTH]),
+          currentLat: Between(pickup.lat - latDelta, pickup.lat + latDelta),
+          currentLng: Between(pickup.lng - lngDelta, pickup.lng + lngDelta),
+          locationUpdatedAt: MoreThan(freshSince),
+        },
+        take: Math.max(limit * 3, 50),
+      });
+
+      const candidates: LiveDriverCandidate[] = [];
+      for (const profile of profiles) {
+        if (excludeSet.has(profile.userId) || profile.currentLat == null || profile.currentLng == null) continue;
+
+        const distanceKm = this.haversineKm(
+          pickup.lat,
+          pickup.lng,
+          profile.currentLat,
+          profile.currentLng,
+        );
+        if (distanceKm > radiusKm) continue;
+
+        const updatedAtMs = profile.locationUpdatedAt?.getTime() ?? 0;
+        const candidate: LiveDriverCandidate = {
+          driverUserId: profile.userId,
+          driverProfileId: profile.id,
+          vehicleId: profile.activeVehicleId,
+          lat: profile.currentLat,
+          lng: profile.currentLng,
+          updatedAtMs,
+          distanceKm,
+        };
+        candidates.push(candidate);
+
+        // Best effort: repair the disposable cache immediately.
+        void this.liveDriverIndex.upsert({
+          driverUserId: profile.userId,
+          driverProfileId: profile.id,
+          lat: profile.currentLat,
+          lng: profile.currentLng,
+          vehicleId: profile.activeVehicleId,
+          updatedAt: updatedAtMs,
+        });
+      }
+
+      return candidates.sort((a, b) => a.distanceKm - b.distanceKm).slice(0, limit);
+    } catch (err) {
+      this.logger.error(
+        `PostgreSQL live-driver recovery failed: ${(err as Error).message}`,
+      );
+      return [];
+    }
+  }
+
+  private haversineKm(
+    lat1: number,
+    lng1: number,
+    lat2: number,
+    lng2: number,
+  ): number {
+    const toRad = (value: number) => (value * Math.PI) / 180;
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+    return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
   /**
