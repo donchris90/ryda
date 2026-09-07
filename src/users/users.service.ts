@@ -166,13 +166,26 @@ export class UsersService {
     const qb = this.usersRepo
       .createQueryBuilder('user')
       .select([
-        'user.id', 'user.phone', 'user.email', 'user.role', 'user.firstName', 'user.lastName',
+        // roles (the array) added alongside the legacy role column -
+        // the admin dashboard's user list needs it to show every role an
+        // account actually holds, not just whichever one it was created
+        // with (see the User entity's own comment on why those can
+        // diverge). Previously missing entirely, meaning the frontend
+        // had no way to display this even if it wanted to.
+        'user.id', 'user.phone', 'user.email', 'user.role', 'user.roles', 'user.firstName', 'user.lastName',
         'user.isPhoneVerified', 'user.isEmailVerified', 'user.isActive', 'user.rating', 'user.ratingCount',
         'user.referralCode', 'user.createdAt',
       ])
       .orderBy('user.createdAt', 'DESC');
 
-    if (filter?.role) qb.andWhere('user.role = :role', { role: filter.role });
+    // Array-overlap against roles, not an equality check against the
+    // legacy singular field (see listByRoles()'s `user.roles && :roles`
+    // above for the established correct pattern in this same file) -
+    // filtering by role = :role would silently miss any account that
+    // holds that role but was created with a different one, which is
+    // exactly backwards for an admin search whose purpose is finding
+    // everyone who currently has a given role.
+    if (filter?.role) qb.andWhere('user.roles && :roles', { roles: [filter.role] });
     if (filter?.isActive !== undefined) qb.andWhere('user.isActive = :isActive', { isActive: filter.isActive });
     if (filter?.search) {
       qb.andWhere(

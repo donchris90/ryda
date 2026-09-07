@@ -33,7 +33,14 @@ export class AdminWalletsController {
       firstName: user.firstName,
       lastName: user.lastName,
       email: user.email,
-      role: user.role,
+      // roles (the real array), not just the legacy singular `role` -
+      // this lookup exists specifically so an admin can visually
+      // confirm they've found the right person before real money
+      // moves (see this endpoint's own comment above), and an account
+      // holding a role beyond whichever one it was created with is
+      // exactly the kind of detail that confirmation should show, not
+      // silently drop.
+      roles: user.roles,
       currentBalance: wallet.balance,
     };
   }
