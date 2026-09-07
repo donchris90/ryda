@@ -17,6 +17,7 @@ import { CancelledBy, RideStatus } from '../common/enums/ride.enum';
 import { SAFETY_OPS_ROLES, ADMIN_LIKE_ROLES } from '../common/enums/user-role.enum';
 import { AddTipDto, VerifyPinDto } from './dto/tip-and-pin.dto';
 import { Audit } from '../audit/decorators/audit.decorator';
+import { UsersService } from '../users/users.service';
 
 @ApiTags('rides')
 @ApiBearerAuth('access-token')
@@ -25,6 +26,7 @@ export class RidesController {
   constructor(
     private readonly ridesService: RidesService,
     private readonly dispatchService: DispatchService,
+    private readonly usersService: UsersService,
   ) {}
 
   @ApiOperation({
@@ -39,9 +41,21 @@ export class RidesController {
   }
 
   @Post()
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(UserRole.PASSENGER)
-  request(@CurrentUser() user: User, @Body() dto: RequestRideDto) {
+  @UseGuards(JwtAuthGuard)
+  // Deliberately NOT @Roles(PASSENGER) + RolesGuard here (unlike the other
+  // passenger-only endpoints below) - this is the one place a role gap
+  // actually blocks someone doing something reasonable: an account that
+  // registered as a driver (or any other role) logging in here and trying
+  // to book a ride as a passenger too, same as an account can drive and
+  // ride on one login. Rather than 403 and depend on every client build
+  // remembering to call POST /auth/add-role first (the passenger app now
+  // does, on login/boot, but older/other clients might not), grant the
+  // role here if it's missing, then proceed. addRole() is a no-op if the
+  // role's already present, so this costs one cheap lookup for the common
+  // case (an account that's already a passenger) and self-heals every
+  // other case with no client changes required.
+  async request(@CurrentUser() user: User, @Body() dto: RequestRideDto) {
+    await this.usersService.addRole(user.id, UserRole.PASSENGER);
     return this.ridesService.requestRide(user.id, dto);
   }
 
