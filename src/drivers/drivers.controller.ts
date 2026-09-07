@@ -231,6 +231,6 @@ export class DriversController {
   @RequirePermission(Permission.DRIVER_DOCUMENTS_REVIEW)
   @Audit('driver_document.reject')
   rejectDocument(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: ReviewDocumentDto) {
-    return this.documentsService.reject(id, user.id, dto.rejectionReason ?? 'No reason provided');
+    return this.documentsService.reject(id, user.id, dto.rejectionReason);
   }
 }
