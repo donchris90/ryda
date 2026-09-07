@@ -68,6 +68,25 @@ export enum DeliveryDispatchMode {
   MANUAL = 'manual',
 }
 
+/**
+ * EXPRESS is the default and matches this system's only behavior before
+ * this enum existed - dispatch immediately, no discount, exactly
+ * today's fare formula unchanged. STANDARD is the new option: cheaper
+ * (see SETTING_KEYS.LOGISTICS_STANDARD_DISCOUNT), no urgency guarantee,
+ * fulfilled sometime within the stated window rather than immediately.
+ * Deliberately NOT wired into any scheduled-dispatch/delay queue yet -
+ * a STANDARD order is still dispatched (auto or manual) exactly like an
+ * EXPRESS one today, just at a lower price. There's no enforcement of
+ * the 24h window (no auto-cancel, no "must be delivered by" deadline) -
+ * this is a pricing tier a courier can see and choose to deprioritize
+ * against an EXPRESS job, not a scheduling system. Documented here so
+ * that isn't mistaken for an oversight later.
+ */
+export enum DeliverySpeedTier {
+  EXPRESS = 'express',
+  STANDARD = 'standard',
+}
+
 @Entity('delivery_orders')
 export class DeliveryOrder {
   @PrimaryGeneratedColumn('uuid')
@@ -80,6 +99,19 @@ export class DeliveryOrder {
   @Index()
   @Column({ type: 'varchar', nullable: true })
   driverId: string | null;
+
+  // Set when a customer manually selects a specific courier (see
+  // LogisticsService.selectCourier()) - that courier has a real,
+  // targeted offer pending, but hasn't accepted yet, so driverId is
+  // still null and status is still SEARCHING/REQUESTED. Cleared back
+  // to null the moment they (or anyone) actually accepts, at which
+  // point driverId takes over as the source of truth. Exists purely so
+  // the app can tell "nobody invited yet" apart from "someone specific
+  // was invited and we're waiting on them" - both looked identical
+  // before this column existed, which sent passengers straight back to
+  // re-pick a courier the instant they'd already picked one.
+  @Column({ type: 'varchar', nullable: true })
+  pendingCourierUserId: string | null;
 
   @Column({ type: 'varchar', nullable: true })
   vehicleId: string | null;
@@ -107,6 +139,13 @@ export class DeliveryOrder {
     default: DeliveryDispatchMode.AUTO,
   })
   dispatchMode: DeliveryDispatchMode;
+
+  @Column({
+    type: 'enum',
+    enum: DeliverySpeedTier,
+    default: DeliverySpeedTier.EXPRESS,
+  })
+  speedTier: DeliverySpeedTier;
 
   @Index()
   @Column({

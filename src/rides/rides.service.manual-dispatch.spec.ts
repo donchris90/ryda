@@ -165,7 +165,9 @@ describe('RidesService — manual driver selection', () => {
         model: 'Corolla',
         color: 'Black',
         plateNumber: 'ABC-123',
+        photoUrl: 'https://example.com/vehicle.jpg',
       });
+      deps.driversService.findByUserId.mockResolvedValue({ completedTrips: 42 });
 
       const result = await service.findSelectableDrivers('ride-1');
 
@@ -174,7 +176,9 @@ describe('RidesService — manual driver selection', () => {
           driverUserId: 'driver-1',
           firstName: 'Ada',
           lastName: 'Okoye',
+          profilePhotoUrl: null,
           rating: 4.8,
+          completedTrips: 42,
           level: DriverLevel.STANDARD,
           distanceKm: 2,
           etaMinutes: 6,
@@ -182,6 +186,7 @@ describe('RidesService — manual driver selection', () => {
           vehicleModel: 'Corolla',
           vehicleColor: 'Black',
           vehiclePlateNumber: 'ABC-123',
+          vehiclePhotoUrl: 'https://example.com/vehicle.jpg',
         },
       ]);
 

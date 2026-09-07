@@ -34,6 +34,15 @@ export class ApiKey {
   @Column({ type: 'timestamp', nullable: true })
   lastUsedAt: Date | null;
 
+  // Optional - a key with no expiry is valid indefinitely (until
+  // revoked). Enforced in ApiKeysService.validate(), not just displayed:
+  // the admin dashboard already shows an "Expired" badge computed from
+  // this field (api-keys.tsx), which only makes sense as a real,
+  // enforced expiry - a badge that says "Expired" on a key that still
+  // works would be actively misleading.
+  @Column({ type: 'timestamp', nullable: true })
+  expiresAt: Date | null;
+
   @CreateDateColumn()
   createdAt: Date;
 }

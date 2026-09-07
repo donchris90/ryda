@@ -11,6 +11,7 @@ import {
   DeliveryCategory,
   DeliveryVehicleType,
   DeliveryDispatchMode,
+  DeliverySpeedTier,
 } from '../entities/delivery-order.entity';
 import { PaymentMethod } from '../../common/enums/ride.enum';
 
@@ -38,6 +39,17 @@ export class EstimateDeliveryDto {
   @IsNumber()
   @Min(0)
   weightKg?: number;
+
+  // Optional here (and inherited by the request DTO below) purely for
+  // backward compatibility - an existing caller that never sends this
+  // keeps getting exactly today's EXPRESS fare, unchanged. The service
+  // layer defaults a missing value to EXPRESS explicitly rather than
+  // relying on the entity column default alone, so the estimate and the
+  // eventually-created order can never disagree about which tier "no
+  // value" means.
+  @IsOptional()
+  @IsEnum(DeliverySpeedTier)
+  speedTier?: DeliverySpeedTier;
 }
 
 export class RequestDeliveryDto extends EstimateDeliveryDto {

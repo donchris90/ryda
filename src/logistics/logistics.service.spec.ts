@@ -281,6 +281,13 @@ describe('LogisticsService — courier matching via the shared pipeline', () => 
       expect(deps.driversService.reserveOnlineDriverForTrip).toHaveBeenCalledWith(manager, 'driver-1', DriverService.DELIVERY);
       expect(deps.driversService.emitReservedForTrip).toHaveBeenCalledTimes(1);
       expect(result.status).toBe(DeliveryStatus.ACCEPTED);
+      // Whether this driver was invited via selectCourier() or just won
+      // a broadcast, pendingCourierUserId must not survive acceptance -
+      // driverId (already asserted via the update call below) is the
+      // real source of truth for who's on the delivery from here on.
+      expect(manager.__queryBuilder.set).toHaveBeenCalledWith(
+        expect.objectContaining({ pendingCourierUserId: null }),
+      );
     });
 
     it('rejects an incompatible vehicle before ever opening a transaction', async () => {

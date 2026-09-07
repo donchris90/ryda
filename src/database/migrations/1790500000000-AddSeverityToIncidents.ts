@@ -1,4 +1,3 @@
-
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
@@ -47,4 +46,3 @@ export class AddSeverityToIncidents1790500000000 implements MigrationInterface {
     await queryRunner.query(`DROP TYPE "public"."incidents_severity_enum"`);
   }
 }
-

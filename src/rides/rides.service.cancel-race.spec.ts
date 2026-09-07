@@ -263,3 +263,61 @@ describe('RidesService.cancelRide() - repeated-cancellation detection', () => {
     );
   });
 });
+
+describe('RidesService.cancelRide() - deriving who is cancelling from the ride itself, not the caller\'s account role', () => {
+  it('lets a passenger cancel their own ride when cancelledBy is not passed (the real self-service call shape)', async () => {
+    const { service, deps } = buildService();
+    deps.ridesRepo.findOne.mockResolvedValue(fakeRide({ status: RideStatus.SEARCHING, passengerId: 'user-1' }));
+
+    // This is the actual bug: a multi-role account (this app auto-adds
+    // the `passenger` role to any account, including a driver's own -
+    // see auth-context.tsx's ensurePassengerRole) could have its legacy
+    // `role` field set to 'driver' while genuinely being the PASSENGER
+    // of this specific ride. The old rides.controller.ts derived
+    // cancelledBy from that legacy role and got it wrong, so this test
+    // exercises the exact call shape the fixed controller now makes:
+    // no cancelledBy guess at all, letting the service look at
+    // ride.passengerId/driverId instead.
+    const result = await service.cancelRide('ride-1', 'user-1', undefined, {});
+
+    expect(result).toBeDefined();
+  });
+
+  it('lets a driver cancel their own ride when cancelledBy is not passed', async () => {
+    const { service, deps } = buildService();
+    deps.ridesRepo.findOne.mockResolvedValue(
+      fakeRide({ status: RideStatus.ACCEPTED, driverId: 'user-1', passengerId: 'passenger-1' }),
+    );
+
+    const result = await service.cancelRide('ride-1', 'user-1', undefined, {});
+
+    expect(result).toBeDefined();
+  });
+
+  it('rejects someone who is neither this ride\'s passenger nor its driver, even with no cancelledBy override', async () => {
+    const { service, deps } = buildService();
+    deps.ridesRepo.findOne.mockResolvedValue(
+      fakeRide({ status: RideStatus.SEARCHING, passengerId: 'passenger-1', driverId: 'driver-1' }),
+    );
+
+    await expect(service.cancelRide('ride-1', 'stranger-1', undefined, {})).rejects.toThrow('Not your ride');
+  });
+
+  it('still rejects a passenger-role account trying to cancel a ride that is not actually theirs, even undisguised', async () => {
+    const { service, deps } = buildService();
+    deps.ridesRepo.findOne.mockResolvedValue(fakeRide({ status: RideStatus.SEARCHING, passengerId: 'someone-else' }));
+
+    await expect(service.cancelRide('ride-1', 'user-1', undefined, {})).rejects.toThrow('Not your ride');
+  });
+
+  it('an explicit CancelledBy.ADMIN is passed straight through with no derivation, since an admin is neither the passenger nor the driver', async () => {
+    const { service, deps } = buildService();
+    deps.ridesRepo.findOne.mockResolvedValue(
+      fakeRide({ status: RideStatus.SEARCHING, passengerId: 'passenger-1', driverId: null }),
+    );
+
+    const result = await service.cancelRide('ride-1', 'admin-1', CancelledBy.ADMIN, { reason: 'ops override' });
+
+    expect(result).toBeDefined();
+  });
+});

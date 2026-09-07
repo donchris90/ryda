@@ -6,7 +6,7 @@ import { Promotion, PromotionType } from './entities/promotion.entity';
 import { PromotionRedemption } from './entities/promotion-redemption.entity';
 import { Campaign } from './entities/campaign.entity';
 import { ReferralGrant } from './entities/referral-grant.entity';
-import { CreateCampaignDto, CreatePromotionDto } from './dto/promotions.dto';
+import { CreateCampaignDto, CreatePromotionDto, UpdatePromotionDto } from './dto/promotions.dto';
 import { UsersService } from '../users/users.service';
 import { WalletsService } from '../wallets/wallets.service';
 import { TransactionCategory } from '../common/enums/transaction.enum';
@@ -65,6 +65,46 @@ export class PromotionsService {
     if (!promotion) throw new NotFoundException('Promotion not found');
     promotion.isActive = isActive;
     return this.promotionsRepo.save(promotion);
+  }
+
+  // code/type/campaignId are not accepted here - see UpdatePromotionDto's
+  // own comment on why they're excluded from what's editable.
+  async updatePromotion(id: string, dto: UpdatePromotionDto): Promise<Promotion> {
+    const promotion = await this.promotionsRepo.findOne({ where: { id } });
+    if (!promotion) throw new NotFoundException('Promotion not found');
+
+    if (dto.description !== undefined) promotion.description = dto.description;
+    if (dto.value !== undefined) promotion.value = dto.value.toFixed(2);
+    if (dto.maxDiscountAmount !== undefined) promotion.maxDiscountAmount = dto.maxDiscountAmount.toFixed(2);
+    if (dto.minFareAmount !== undefined) promotion.minFareAmount = dto.minFareAmount.toFixed(2);
+    if (dto.usageLimitTotal !== undefined) promotion.usageLimitTotal = dto.usageLimitTotal;
+    if (dto.usageLimitPerUser !== undefined) promotion.usageLimitPerUser = dto.usageLimitPerUser;
+    if (dto.validFrom !== undefined) promotion.validFrom = new Date(dto.validFrom);
+    if (dto.validUntil !== undefined) promotion.validUntil = new Date(dto.validUntil);
+
+    return this.promotionsRepo.save(promotion);
+  }
+
+  /**
+   * redemptionCount/totalDiscountGiven are computed from
+   * PromotionRedemption rows, not read off Promotion.timesRedeemed -
+   * timesRedeemed is a running counter with no matching running total
+   * for the actual ₦ discounted (which varies per redemption for
+   * PERCENTAGE-type promos, since it depends on each ride's own fare),
+   * so summing the redemption log is the only accurate source for that
+   * second number.
+   */
+  async getPromotionStats(id: string): Promise<{ redemptionCount: number; totalDiscountGiven: string }> {
+    const promotion = await this.promotionsRepo.findOne({ where: { id } });
+    if (!promotion) throw new NotFoundException('Promotion not found');
+
+    const redemptions = await this.redemptionsRepo.find({ where: { promotionId: id } });
+    const totalDiscountGiven = redemptions.reduce((sum, r) => sum + parseFloat(r.discountAmount), 0);
+
+    return {
+      redemptionCount: redemptions.length,
+      totalDiscountGiven: totalDiscountGiven.toFixed(2),
+    };
   }
 
   /** Validates a code for a user/fare without redeeming it — safe to call for a UI preview. */
@@ -186,6 +226,13 @@ export class PromotionsService {
 
   async listCampaigns(): Promise<Campaign[]> {
     return this.campaignsRepo.find({ order: { createdAt: 'DESC' } });
+  }
+
+  async setCampaignActive(id: string, isActive: boolean): Promise<Campaign> {
+    const campaign = await this.campaignsRepo.findOne({ where: { id } });
+    if (!campaign) throw new NotFoundException('Campaign not found');
+    campaign.isActive = isActive;
+    return this.campaignsRepo.save(campaign);
   }
 
   // ---- Referral bonuses ----

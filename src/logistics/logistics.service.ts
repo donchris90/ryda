@@ -16,6 +16,7 @@ import {
   DeliveryStatus,
   DeliveryVehicleType,
   DeliveryDispatchMode,
+  DeliverySpeedTier,
   CodCollectionStatus,
 } from './entities/delivery-order.entity';
 import {
@@ -66,6 +67,7 @@ export interface DeliveryFareBreakdown {
   totalFare: number;
   estimatedDistanceKm: number;
   currency: string;
+  speedTier: DeliverySpeedTier;
 }
 
 /**
@@ -84,6 +86,7 @@ export interface CourierCandidateResult {
     make: string | null;
     model: string | null;
     color: string | null;
+    photoUrl: string | null;
   };
   etaMinutes: number;
   distanceKm: number;
@@ -180,10 +183,27 @@ export class LogisticsService {
     const currency = this.config.get<string>('pricing.currency')!;
     const distanceFare = distanceKm * perKm;
     const weightFare = (dto.weightKg ?? 0) * perKg;
-    const totalFare = Math.max(
+    let totalFare = Math.max(
       baseFare + distanceFare + weightFare,
       minimumFare,
     );
+
+    // Defaults to EXPRESS - see DeliverySpeedTier's own doc comment for
+    // why that's the unchanged baseline (today's exact fare, no
+    // surprise for any existing caller) rather than STANDARD.
+    const speedTier = dto.speedTier ?? DeliverySpeedTier.EXPRESS;
+    if (speedTier === DeliverySpeedTier.STANDARD) {
+      // Applied AFTER the minimum-fare floor, not before - discounting
+      // the inputs first could let a short/light STANDARD delivery fall
+      // back under the floor and end up costing the same as EXPRESS
+      // anyway, silently defeating the discount on exactly the orders
+      // small enough for it to matter most to the customer.
+      const standardDiscount = await this.settingsService.getNumber(
+        SETTING_KEYS.LOGISTICS_STANDARD_DISCOUNT,
+        this.config.get<number>('logistics.standardDiscount')!,
+      );
+      totalFare *= standardDiscount;
+    }
 
     return {
       baseFare: this.round(baseFare),
@@ -192,6 +212,7 @@ export class LogisticsService {
       totalFare: this.round(totalFare),
       estimatedDistanceKm: this.round(distanceKm),
       currency,
+      speedTier,
     };
   }
 
@@ -237,6 +258,12 @@ export class LogisticsService {
       category: dto.category,
       vehicleType: dto.vehicleType ?? DeliveryVehicleType.CAR,
       dispatchMode,
+      // Reuses breakdown.speedTier (already resolved/defaulted inside
+      // estimateFare) rather than re-deriving `dto.speedTier ?? EXPRESS`
+      // separately here - one place decides what a missing value means,
+      // so the fare that was actually charged and the tier recorded on
+      // the order can never disagree.
+      speedTier: breakdown.speedTier,
       status: DeliveryStatus.SEARCHING,
       pickupLat: dto.pickupLat,
       pickupLng: dto.pickupLng,
@@ -420,6 +447,7 @@ export class LogisticsService {
           make: vehicle?.make ?? null,
           model: vehicle?.model ?? null,
           color: vehicle?.color ?? null,
+          photoUrl: vehicle?.photoUrl ?? null,
         },
         etaMinutes: c.etaMinutes,
         distanceKm: c.distanceKm,
@@ -481,7 +509,36 @@ export class LogisticsService {
       );
     }
 
-    return this.acceptDelivery(orderId, driverUserId);
+    // Previously called acceptDelivery() directly here — auto-assigning
+    // the delivery to whichever courier the customer picked, with NO
+    // notification or confirmation step for that courier at all. From
+    // the courier's side, an order they never saw or agreed to simply
+    // appeared already assigned to them; from the customer's side, it
+    // looked "accepted" instantly, which was never actually true - no
+    // human on the other end had confirmed anything.
+    //
+    // Mirrors rides.service.ts's selectDriver(), which correctly calls
+    // dispatchService.offerToSpecificDriver() instead of auto-accepting
+    // on the driver's behalf. There's no per-courier reserved-offer
+    // concept for deliveries the way rides have RideOffer, so this
+    // reuses the SAME broadcast mechanism requestDelivery() already
+    // uses for automatic dispatch (delivery.requested, driven by
+    // NotificationsService.onDeliveryRequested — real push notification,
+    // opens the same accept/decline screen on the driver app) - just
+    // scoped to this one specific courier instead of every eligible one.
+    // The order stays SEARCHING; acceptDelivery()'s own atomic
+    // reservation and full eligibility re-check (still online, still
+    // approved, vehicle still active, etc.) is what actually assigns it,
+    // exactly as if the courier had accepted a broadcast offer -
+    // deliberately not skipped or duplicated here.
+    this.events.emit('delivery.requested', {
+      driverUserIds: [driverUserId],
+      deliveryId: order.id,
+      pickupAddress: order.pickupAddress,
+    });
+
+    order.pendingCourierUserId = driverUserId;
+    return this.ordersRepo.save(order);
   }
 
   /** Delivery equivalent of RidesService.emitStatusChanged() - see that method's doc comment for why this is a separate, new event rather than reusing the existing delivery.* ones. */
@@ -813,6 +870,13 @@ export class LogisticsService {
             vehicleId: reservedProfile.activeVehicleId,
             status: DeliveryStatus.ACCEPTED,
             acceptedAt: new Date(),
+            // Cleared here too, in the same atomic update - driverId is
+            // now the source of truth for who's on this delivery, and
+            // leaving a stale pendingCourierUserId around (e.g. a
+            // DIFFERENT courier than the one who ended up accepting,
+            // in the multi-invite/broadcast case) would be actively
+            // misleading to anything that reads it later.
+            pendingCourierUserId: null,
           })
           .where('id = :id', { id: orderId })
           .andWhere('status IN (:...statuses)', {

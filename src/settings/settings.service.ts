@@ -26,6 +26,12 @@ export const SETTING_KEYS = {
   LOGISTICS_PER_KM: 'logistics.perKm',
   LOGISTICS_PER_KG: 'logistics.perKg',
   LOGISTICS_MINIMUM_FARE: 'logistics.minimumFare',
+  // Applied as a straight multiplier to the fully-computed EXPRESS fare
+  // (after the minimum-fare floor) when a customer picks STANDARD
+  // instead - see DeliverySpeedTier's own doc comment for why EXPRESS
+  // is the unchanged baseline and STANDARD is the new discounted tier,
+  // not the other way around.
+  LOGISTICS_STANDARD_DISCOUNT: 'logistics.standardDiscount',
   WALLET_TRANSFER_MIN: 'wallet.transferMin',
   WALLET_TRANSFER_MAX_PER_TRANSACTION: 'wallet.transferMaxPerTransaction',
   WALLET_TRANSFER_MAX_DAILY: 'wallet.transferMaxDaily',

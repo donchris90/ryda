@@ -81,7 +81,9 @@ export interface SelectableDriverResult {
   driverUserId: string;
   firstName: string;
   lastName: string;
+  profilePhotoUrl: string | null;
   rating: number;
+  completedTrips: number;
   level: DriverProfile['level'];
   distanceKm: number;
   etaMinutes: number;
@@ -89,6 +91,7 @@ export interface SelectableDriverResult {
   vehicleModel: string | null;
   vehicleColor: string | null;
   vehiclePlateNumber: string | null;
+  vehiclePhotoUrl: string | null;
 }
 
 @Injectable()
@@ -718,6 +721,7 @@ export class RidesService {
             model: vehicle.model,
             color: vehicle.color,
             plateNumber: vehicle.plateNumber,
+            photoUrl: vehicle.photoUrl,
           }
         : null,
     };
@@ -1158,13 +1162,22 @@ export class RidesService {
 
     const userIds = rankingOutcome.ranked.map((c) => c.driverUserId);
     const vehicleIds = rankingOutcome.ranked.map((c) => c.vehicleId);
-    const [users, vehicles] = await Promise.all([
+    const [users, vehicles, profiles] = await Promise.all([
       this.usersService.findByIds(userIds),
       Promise.all(vehicleIds.map((id) => this.vehiclesService.findById(id).catch(() => null))),
+      // completedTrips lives on the driver profile, not the user or
+      // vehicle records already being fetched here — a small extra
+      // lookup per candidate, same pattern as everything else on this
+      // list (there's no bulk findByUserIds() on DriversService, and
+      // the candidate list is capped at 20 anyway).
+      Promise.all(userIds.map((id) => this.driversService.findByUserId(id).catch(() => null))),
     ]);
     const userById = new Map(users.map((u) => [u.id, u]));
     const vehicleById = new Map(
       vehicles.filter((v): v is NonNullable<typeof v> => !!v).map((v) => [v.id, v]),
+    );
+    const profileByUserId = new Map(
+      rankingOutcome.ranked.map((c, i) => [c.driverUserId, profiles[i]]),
     );
 
     return rankingOutcome.ranked.map((c) => {
@@ -1174,7 +1187,9 @@ export class RidesService {
         driverUserId: c.driverUserId,
         firstName: user?.firstName ?? 'Driver',
         lastName: user?.lastName ?? '',
+        profilePhotoUrl: user?.profilePhotoUrl ?? null,
         rating: c.rating,
+        completedTrips: profileByUserId.get(c.driverUserId)?.completedTrips ?? 0,
         level: c.level,
         distanceKm: c.distanceKm,
         etaMinutes: c.etaMinutes,
@@ -1182,6 +1197,7 @@ export class RidesService {
         vehicleModel: vehicle?.model ?? null,
         vehicleColor: vehicle?.color ?? null,
         vehiclePlateNumber: vehicle?.plateNumber ?? null,
+        vehiclePhotoUrl: vehicle?.photoUrl ?? null,
       };
     });
   }
@@ -1865,10 +1881,28 @@ export class RidesService {
   async cancelRide(
     rideId: string,
     actorUserId: string,
-    cancelledBy: CancelledBy,
+    cancelledBy: CancelledBy | undefined,
     dto: CancelRideDto,
   ): Promise<Ride> {
     const ride = await this.findById(rideId);
+
+    // undefined means "derive it from the ride itself" - the path used
+    // by the passenger/driver self-service endpoint (rides.controller.ts
+    // no longer guesses this from the caller's account-level role, which
+    // could be wrong for a multi-role account - see that controller's
+    // own comment). Explicit ADMIN (or any other future explicit value)
+    // is passed straight through unchanged: an admin isn't the ride's
+    // passenger or driver, so there's nothing to derive from ride
+    // participant ids for that case.
+    if (cancelledBy === undefined) {
+      if (ride.passengerId === actorUserId) {
+        cancelledBy = CancelledBy.PASSENGER;
+      } else if (ride.driverId === actorUserId) {
+        cancelledBy = CancelledBy.DRIVER;
+      } else {
+        throw new ForbiddenException('Not your ride');
+      }
+    }
 
     if (
       cancelledBy === CancelledBy.PASSENGER &&

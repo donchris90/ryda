@@ -320,6 +320,11 @@ export default () => ({
     perKm: parseFloat(process.env.LOGISTICS_PER_KM_RATE ?? '100'),
     perKg: parseFloat(process.env.LOGISTICS_PER_KG_RATE ?? '50'),
     minimumFare: parseFloat(process.env.LOGISTICS_MINIMUM_FARE ?? '500'),
+    // 0.85 = Standard costs 15% less than Express for the same
+    // pickup/dropoff/weight - admin-adjustable at runtime via
+    // SETTING_KEYS.LOGISTICS_STANDARD_DISCOUNT, same as every other
+    // logistics pricing constant here.
+    standardDiscount: parseFloat(process.env.LOGISTICS_STANDARD_DISCOUNT ?? '0.85'),
   },
   storage: {
     driver: process.env.STORAGE_DRIVER ?? 'local', // 'local' | 's3' | 'r2'
