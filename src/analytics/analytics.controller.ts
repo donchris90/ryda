@@ -70,4 +70,14 @@ export class AnalyticsController {
   activeUsers(@Query('groupBy') groupBy?: 'day' | 'week' | 'month') {
     return this.analyticsService.getActiveUsers(groupBy ?? 'day');
   }
+
+  @Get('pooling-overview')
+  poolingOverview() {
+    return this.analyticsService.getPoolingOverview();
+  }
+
+  @Get('pooling-trend')
+  poolingTrend(@Query('groupBy') groupBy?: 'day' | 'week' | 'month') {
+    return this.analyticsService.getPoolingTrend(groupBy ?? 'day');
+  }
 }

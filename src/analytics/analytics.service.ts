@@ -4,6 +4,7 @@ import { In, Repository } from 'typeorm';
 import { Ride } from '../rides/entities/ride.entity';
 import { User } from '../users/entities/user.entity';
 import { DriverProfile } from '../drivers/entities/driver-profile.entity';
+import { PoolGroup, PoolGroupStatus } from '../pooling/entities/pool-group.entity';
 import { UserRole } from '../common/enums/user-role.enum';
 import { RideStatus } from '../common/enums/ride.enum';
 import { ONLINE_AVAILABILITIES } from '../common/enums/driver-status.enum';
@@ -33,6 +34,7 @@ export class AnalyticsService {
     @InjectRepository(Ride) private readonly ridesRepo: Repository<Ride>,
     @InjectRepository(User) private readonly usersRepo: Repository<User>,
     @InjectRepository(DriverProfile) private readonly driversRepo: Repository<DriverProfile>,
+    @InjectRepository(PoolGroup) private readonly poolGroupsRepo: Repository<PoolGroup>,
   ) {}
 
   async getOverview(): Promise<DashboardOverview> {
@@ -285,5 +287,96 @@ export class AnalyticsService {
       activePassengers: parseInt(r.activePassengers, 10),
       activeDrivers: parseInt(r.activeDrivers, 10),
     }));
+  }
+
+  /**
+   * matchedCount comes from PoolGroup, not Ride.poolGroupId/isPooled -
+   * both of those get reset to null/0 the moment a match unwinds (see
+   * PoolMatchingService's unwind path), so they can only ever answer
+   * "is this ride matched right now," not "was it ever matched." A
+   * PoolGroup row, once created, is never reused or deleted even after
+   * UNWOUND - its mere existence is the permanent record that a match
+   * happened, which is what an admin actually wants to know here (how
+   * often does matching succeed at all), not a live snapshot that
+   * quietly loses history every time a match falls through.
+   *
+   * completedPooledRides is completed-group-count * 2 (each group is
+   * exactly two rides sharing a trip) - reported as a ride count, not a
+   * group count, to match what the field name actually says.
+   */
+  async getPoolingOverview(): Promise<{
+    totalPoolRequests: number;
+    matchedCount: number;
+    completedPooledRides: number;
+    matchRatePercent: number;
+    totalDiscountGivenNaira: string;
+  }> {
+    const [totalPoolRequests, matchedCount, completedGroups, discountResult] = await Promise.all([
+      this.ridesRepo.count({ where: { isPooled: true } }),
+      this.poolGroupsRepo.count(),
+      this.poolGroupsRepo.count({ where: { status: PoolGroupStatus.COMPLETED } }),
+      this.ridesRepo
+        .createQueryBuilder('ride')
+        .select('COALESCE(SUM(ride.poolDiscountAmount), 0)', 'total')
+        .where('ride.isPooled = true')
+        .getRawOne<{ total: string }>(),
+    ]);
+
+    return {
+      totalPoolRequests,
+      matchedCount,
+      completedPooledRides: completedGroups * 2,
+      matchRatePercent:
+        totalPoolRequests > 0 ? Math.round((matchedCount / totalPoolRequests) * 10000) / 100 : 0,
+      totalDiscountGivenNaira: parseFloat(discountResult?.total ?? '0').toFixed(2),
+    };
+  }
+
+  /**
+   * Two independent queries merged by period rather than one join -
+   * "requested" comes from Ride.createdAt, "matched" comes from
+   * PoolGroup.matchedAt, and those are genuinely different moments in
+   * time for the same request (a request made late in one period can
+   * match early in the next), so there's no single row that carries
+   * both timestamps to group by at once. This is an approximation at
+   * the day/week/month boundary for that reason - acceptable for a
+   * trend chart, not something that needs to reconcile to the exact
+   * request-to-match latency.
+   */
+  async getPoolingTrend(groupBy: 'day' | 'week' | 'month' = 'day') {
+    const [requestRows, matchRows] = await Promise.all([
+      this.ridesRepo
+        .createQueryBuilder('ride')
+        .select(`to_char(date_trunc('${groupBy}', ride.createdAt), 'YYYY-MM-DD')`, 'period')
+        .addSelect('COUNT(*)', 'requested')
+        .where('ride.isPooled = true')
+        .groupBy('period')
+        .getRawMany<{ period: string; requested: string }>(),
+      this.poolGroupsRepo
+        .createQueryBuilder('group')
+        .select(`to_char(date_trunc('${groupBy}', COALESCE(group.matchedAt, group.createdAt)), 'YYYY-MM-DD')`, 'period')
+        .addSelect('COUNT(*)', 'groups')
+        .groupBy('period')
+        .getRawMany<{ period: string; groups: string }>(),
+    ]);
+
+    const requestedByPeriod = new Map(requestRows.map((r) => [r.period, parseInt(r.requested, 10)]));
+    const matchedByPeriod = new Map(matchRows.map((r) => [r.period, parseInt(r.groups, 10) * 2]));
+
+    const periods = Array.from(new Set([...requestedByPeriod.keys(), ...matchedByPeriod.keys()])).sort();
+
+    return periods.map((period) => {
+      const requested = requestedByPeriod.get(period) ?? 0;
+      const matched = matchedByPeriod.get(period) ?? 0;
+      return {
+        period,
+        matched,
+        // Never negative - a period can show more "matched" than
+        // "requested" if requests made near the end of one period
+        // matched early in the next (see this method's own doc
+        // comment on why these come from two different timestamps).
+        unmatched: Math.max(requested - matched, 0),
+      };
+    });
   }
 }

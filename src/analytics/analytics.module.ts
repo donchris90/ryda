@@ -3,11 +3,12 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { Ride } from '../rides/entities/ride.entity';
 import { User } from '../users/entities/user.entity';
 import { DriverProfile } from '../drivers/entities/driver-profile.entity';
+import { PoolGroup } from '../pooling/entities/pool-group.entity';
 import { AnalyticsService } from './analytics.service';
 import { AnalyticsController } from './analytics.controller';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Ride, User, DriverProfile])],
+  imports: [TypeOrmModule.forFeature([Ride, User, DriverProfile, PoolGroup])],
   providers: [AnalyticsService],
   controllers: [AnalyticsController],
 })

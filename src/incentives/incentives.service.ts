@@ -55,6 +55,36 @@ export class IncentivesService {
     return this.progressRepo.find({ where: { driverId: profile.id }, order: { updatedAt: 'DESC' } });
   }
 
+  /**
+   * The admin-facing counterpart to getDriverProgress() above - that one
+   * answers "how is this driver doing across their incentives," this
+   * answers "how is this incentive doing across every driver in it."
+   * participantCount/completedCount/rewardedCount are derived from the
+   * same rows returned in `items`, not tracked as separate running
+   * counters, so they can never drift out of sync with the detail list
+   * an admin is looking at right below them.
+   */
+  async getProgressSummary(incentiveId: string): Promise<{
+    participantCount: number;
+    completedCount: number;
+    rewardedCount: number;
+    items: DriverIncentiveProgress[];
+  }> {
+    const items = await this.progressRepo.find({
+      where: { incentiveId },
+      order: { updatedAt: 'DESC' },
+    });
+
+    return {
+      participantCount: items.length,
+      completedCount: items.filter(
+        (p) => p.status === IncentiveProgressStatus.COMPLETED || p.status === IncentiveProgressStatus.REWARDED,
+      ).length,
+      rewardedCount: items.filter((p) => p.status === IncentiveProgressStatus.REWARDED).length,
+      items,
+    };
+  }
+
   // ---- Event-driven processing ----
 
   @OnEvent('ride.completed')

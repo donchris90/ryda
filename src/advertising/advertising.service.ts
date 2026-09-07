@@ -46,6 +46,46 @@ export class AdvertisingService {
     return this.campaignsRepo.save(campaign);
   }
 
+  /**
+   * Rolls up every banner and sponsored location tagged with this
+   * campaign - both entities carry their own running impressions/clicks
+   * counters (bumped where they're actually shown - see
+   * findNearbySponsoredLocations() and wherever banners are served),
+   * so this aggregates existing data rather than tracking anything new.
+   * CTR is 0 rather than NaN/Infinity when there have been no
+   * impressions yet, since a brand-new campaign with nothing served yet
+   * is a real, valid state this needs to render sensibly for.
+   */
+  async getCampaignAnalytics(campaignId: string): Promise<{
+    campaign: AdCampaign;
+    banners: { total: number; impressions: number; clicks: number; ctr: number };
+    sponsoredLocations: { total: number; impressions: number };
+  }> {
+    const campaign = await this.campaignsRepo.findOne({ where: { id: campaignId } });
+    if (!campaign) throw new NotFoundException('Campaign not found');
+
+    const banners = await this.bannersRepo.find({ where: { campaignId } });
+    const bannerImpressions = banners.reduce((sum, b) => sum + b.impressions, 0);
+    const bannerClicks = banners.reduce((sum, b) => sum + b.clicks, 0);
+
+    const locations = await this.locationsRepo.find({ where: { campaignId } });
+    const locationImpressions = locations.reduce((sum, l) => sum + l.impressions, 0);
+
+    return {
+      campaign,
+      banners: {
+        total: banners.length,
+        impressions: bannerImpressions,
+        clicks: bannerClicks,
+        ctr: bannerImpressions > 0 ? bannerClicks / bannerImpressions : 0,
+      },
+      sponsoredLocations: {
+        total: locations.length,
+        impressions: locationImpressions,
+      },
+    };
+  }
+
   // ---- Banner ads ----
 
   async createBanner(dto: CreateBannerAdDto): Promise<BannerAd> {
@@ -101,6 +141,13 @@ export class AdvertisingService {
 
   async listAllSponsoredLocations(): Promise<SponsoredLocation[]> {
     return this.locationsRepo.find({ order: { createdAt: 'DESC' } });
+  }
+
+  async setSponsoredLocationActive(id: string, isActive: boolean): Promise<SponsoredLocation> {
+    const location = await this.locationsRepo.findOne({ where: { id } });
+    if (!location) throw new NotFoundException('Sponsored location not found');
+    location.isActive = isActive;
+    return this.locationsRepo.save(location);
   }
 
   /** Sponsored pins within their own radius of the given map point — verified with real distance math, not a bounding box. */
