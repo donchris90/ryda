@@ -385,7 +385,7 @@ export class NotificationsService {
       payload.approved
         ? 'Congratulations — your driver application was approved. You can go online now.'
         : 'There was an update to your driver application. Please check the app for details.',
-      undefined,
+      { type: 'documents' },
       NotificationCategory.SECURITY,
     );
   }
@@ -398,7 +398,7 @@ export class NotificationsService {
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
       'Document expiring soon',
       `Your ${label} expires in ${payload.daysLeft} day${payload.daysLeft === 1 ? '' : 's'} — renew it to keep driving without interruption.`,
-      undefined,
+      { type: 'documents' },
       NotificationCategory.SECURITY,
     );
   }
@@ -571,7 +571,7 @@ export class NotificationsService {
       [NotificationChannel.IN_APP, NotificationChannel.PUSH],
       'Bonus earned!',
       `You earned ₦${payload.amount} for: ${payload.incentiveName}`,
-      undefined,
+      { type: 'wallet' },
       NotificationCategory.WALLET,
     );
   }

@@ -355,3 +355,35 @@ describe('NotificationsService - notification metadata for tap routing', () => {
     }
   });
 });
+
+describe('NotificationsService - driver-facing notification metadata for tap routing', () => {
+  it('driver.approval.changed carries {type: documents}', async () => {
+    const { service, notificationsQueue } = build();
+    await service.onDriverApprovalChanged({ userId: 'driver-1', approved: true });
+    expect(notificationsQueue.add).toHaveBeenCalledWith(
+      'send',
+      expect.objectContaining({ metadata: { type: 'documents' } }),
+      expect.anything(),
+    );
+  });
+
+  it('driver.document.expiring carries {type: documents}', async () => {
+    const { service, notificationsQueue } = build();
+    await service.onDriverDocumentExpiring({ userId: 'driver-1', documentType: 'insurance', daysLeft: 5 });
+    expect(notificationsQueue.add).toHaveBeenCalledWith(
+      'send',
+      expect.objectContaining({ metadata: { type: 'documents' } }),
+      expect.anything(),
+    );
+  });
+
+  it('incentive.rewarded carries {type: wallet}', async () => {
+    const { service, notificationsQueue } = build();
+    await service.onIncentiveRewarded({ driverUserId: 'driver-1', incentiveName: 'Weekend push', amount: '2000.00' });
+    expect(notificationsQueue.add).toHaveBeenCalledWith(
+      'send',
+      expect.objectContaining({ metadata: { type: 'wallet' } }),
+      expect.anything(),
+    );
+  });
+});
