@@ -205,6 +205,32 @@ describe('EmergencyService', () => {
     });
   });
 
+  describe('startAudioRecording()', () => {
+    it('creates an already-RESOLVED, LOW-severity incident with no notification and no timeline "note" mismatch', async () => {
+      const { service, incidentsRepo, timelineRepo, events } = build({ existingIncident: null });
+
+      const incident = await service.startAudioRecording('user-1', 'ride-1', 6.6, 3.3);
+
+      expect(incidentsRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: IncidentType.AUDIO_RECORDING,
+          severity: IncidentSeverity.LOW,
+          reportedByUserId: 'user-1',
+          rideId: 'ride-1',
+          status: IncidentStatus.RESOLVED,
+        }),
+      );
+      expect(timelineRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ action: 'audio_recording_started' }),
+      );
+      // Unlike triggerSos, this must never notify support/trusted contacts -
+      // it's a precautionary rider-initiated recording, not an emergency.
+      expect(events.emit).not.toHaveBeenCalled();
+      expect(incident.type).toBe(IncidentType.AUDIO_RECORDING);
+      expect(incident.status).toBe(IncidentStatus.RESOLVED);
+    });
+  });
+
   describe('findById()', () => {
     it('throws for an incident that does not exist', async () => {
       const { service, incidentsRepo } = build();

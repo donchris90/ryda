@@ -12,6 +12,14 @@ export enum IncidentType {
   SAFETY_CONCERN = 'safety_concern',
   ACCIDENT = 'accident',
   OTHER = 'other',
+  // Rider manually turned on in-trip audio recording from the ride
+  // tracking screen - NOT an emergency of its own (no notifications,
+  // no admin escalation), just a peg to hang the recording off using
+  // the same incident-scoped upload/download/expiry machinery SOS
+  // recordings already use. Always created RESOLVED (see
+  // EmergencyService.startAudioRecording()) so it never shows up
+  // alongside genuine open incidents on the admin command center.
+  AUDIO_RECORDING = 'audio_recording',
 }
 
 export enum IncidentStatus {

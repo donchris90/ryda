@@ -56,6 +56,22 @@ export class EmergencyController {
     return this.emergencyService.triggerSos(user.id, body.rideId, body.lat, body.lng);
   }
 
+  /**
+   * Distinct from POST /emergency/sos - this is the rider choosing to
+   * record an ordinary trip up front, not reporting an emergency, so
+   * it deliberately does not run triggerSos's notification/escalation
+   * path. Returns an incident purely so the client has an id to attach
+   * the recording upload to via the existing
+   * POST /emergency/incidents/:id/recording endpoint below.
+   */
+  @Post('emergency/audio-recording/start')
+  startAudioRecording(
+    @CurrentUser() user: User,
+    @Body() body: { rideId?: string; lat?: number; lng?: number },
+  ) {
+    return this.emergencyService.startAudioRecording(user.id, body.rideId, body.lat, body.lng);
+  }
+
   @Get('emergency/incidents/mine')
   listMine(@CurrentUser() user: User) {
     return this.emergencyService.listMine(user.id);

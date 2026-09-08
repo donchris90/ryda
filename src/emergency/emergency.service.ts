@@ -117,6 +117,40 @@ export class EmergencyService {
     return incident;
   }
 
+  /**
+   * Backs the passenger app's manual "Record audio" toggle on the ride
+   * tracking screen - a precautionary recording the rider turns on
+   * themselves for an ordinary trip, not an SOS. Reuses the incident
+   * table purely as a peg for the recording (same upload/download/
+   * expiry path as an SOS recording, see SafetyRecordingsService),
+   * which is why it's created already RESOLVED: there's nothing for a
+   * responder to act on, no trusted-contact notification, and no event
+   * emitted - it simply must not show up next to real open incidents
+   * on the admin command center's "active" list.
+   */
+  async startAudioRecording(
+    userId: string,
+    rideId: string | undefined,
+    lat: number | undefined,
+    lng: number | undefined,
+  ): Promise<Incident> {
+    const incident = await this.incidentsRepo.save(
+      this.incidentsRepo.create({
+        type: IncidentType.AUDIO_RECORDING,
+        severity: IncidentSeverity.LOW,
+        reportedByUserId: userId,
+        rideId: rideId ?? null,
+        description: 'Rider-initiated audio recording',
+        lat: lat ?? null,
+        lng: lng ?? null,
+        status: IncidentStatus.RESOLVED,
+        resolvedAt: new Date(),
+      }),
+    );
+    await this.addTimelineEntry(incident.id, userId, 'audio_recording_started', 'Rider turned on audio recording for this trip');
+    return incident;
+  }
+
   /** A user's own incidents, most recent first - what the "past SOS recordings" list on the passenger app's Safety Center reads from. */
   async listMine(userId: string): Promise<Incident[]> {
     return this.incidentsRepo.find({ where: { reportedByUserId: userId }, order: { createdAt: 'DESC' }, take: 50 });
