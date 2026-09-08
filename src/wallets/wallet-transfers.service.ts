@@ -164,7 +164,10 @@ export class WalletTransfersService {
     }
 
     const sender = await this.usersService.findById(senderId);
-    await this.otpService.verify(sender.phone!, dto.otpCode, OtpPurpose.WALLET_TRANSFER);
+    if (!sender.phone) {
+      throw new BadRequestException('Your account no longer has a phone number on file — contact support.');
+    }
+    await this.otpService.verify(sender.phone, dto.otpCode, OtpPurpose.WALLET_TRANSFER);
 
     const senderWallet = await this.walletsService.getByUserId(request.senderId);
     const recipientWallet = await this.walletsService.getByUserId(request.recipientId);

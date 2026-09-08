@@ -232,7 +232,10 @@ export class WithdrawalsService {
     }
 
     const user = await this.usersService.findById(userId);
-    await this.otpService.verify(user.phone!, otpCode, OtpPurpose.WALLET_WITHDRAWAL);
+    if (!user.phone) {
+      throw new BadRequestException('Your account no longer has a phone number on file — contact support.');
+    }
+    await this.otpService.verify(user.phone, otpCode, OtpPurpose.WALLET_WITHDRAWAL);
 
     const bankAccount = await this.bankAccountsRepo.findOne({ where: { id: request.bankAccountId } });
     if (!bankAccount) throw new NotFoundException('Bank account no longer exists');
