@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -38,6 +38,12 @@ export class CorporateController {
   async myTransactions(@CurrentUser() user: User) {
     const account = await this.corporateService.findByOwner(user.id);
     return this.corporateService.listTransactions(account.id);
+  }
+
+  @Get('accounts/mine/employee-search')
+  @Roles(UserRole.CORPORATE)
+  searchEmployees(@Query('query') query: string) {
+    return this.corporateService.searchEmployeeCandidates(query);
   }
 
   @Post('accounts/mine/employees')

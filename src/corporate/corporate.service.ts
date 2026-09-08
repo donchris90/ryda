@@ -121,6 +121,10 @@ export class CorporateService {
     return this.accountsRepo.save(account);
   }
 
+  async searchEmployeeCandidates(query: string) {
+    return this.usersService.searchForCorporateEmployee(query);
+  }
+
   async addEmployee(accountId: string, userId: string): Promise<CorporateEmployee> {
     await this.findById(accountId); // ensures account exists
     await this.usersService.findById(userId); // ensures user exists

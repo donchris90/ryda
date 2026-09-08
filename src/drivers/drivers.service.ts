@@ -183,6 +183,31 @@ export class DriversService {
     return profile;
   }
 
+  /**
+   * Lets a fleet owner find a driver to assign by name/phone/email
+   * instead of needing their raw user ID - previously the only way to
+   * get that ID was for an admin to look it up in the admin dashboard
+   * and copy it out of a URL. Deliberately returns only what's needed
+   * to recognize the right person and know whether they're already
+   * fleet-assigned (fleetCompanyId) - not the full admin-facing driver
+   * profile, since this is reachable by any fleet owner, not staff.
+   */
+  async searchForFleetAssignment(
+    query: string,
+  ): Promise<{ userId: string; firstName: string; lastName: string; phone: string | null; fleetCompanyId: string | null }[]> {
+    if (!query || query.trim().length < 2) return [];
+    const rows = await this.driversRepo
+      .createQueryBuilder('dp')
+      .innerJoin(User, 'u', 'u.id = dp."userId"')
+      .select(['dp."userId" AS "userId"', 'u."firstName" AS "firstName"', 'u."lastName" AS "lastName"', 'u.phone AS phone', 'dp."fleetCompanyId" AS "fleetCompanyId"'])
+      .where('u."firstName" ILIKE :q OR u."lastName" ILIKE :q OR u.phone ILIKE :q OR u.email ILIKE :q', {
+        q: `%${query.trim()}%`,
+      })
+      .limit(10)
+      .getRawMany();
+    return rows;
+  }
+
   async findById(id: string): Promise<DriverProfile> {
     const profile = await this.driversRepo.findOne({ where: { id } });
     if (!profile) throw new NotFoundException('Driver profile not found');

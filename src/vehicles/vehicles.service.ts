@@ -55,6 +55,23 @@ export class VehiclesService {
   }
 
   /**
+   * Lets a fleet owner find a vehicle to assign by plate number, make,
+   * or model instead of needing its raw ID - same reasoning as
+   * DriversService.searchForFleetAssignment().
+   */
+  async searchForFleetAssignment(
+    query: string,
+  ): Promise<{ id: string; make: string; model: string; plateNumber: string; fleetCompanyId: string | null }[]> {
+    if (!query || query.trim().length < 2) return [];
+    return this.vehiclesRepo
+      .createQueryBuilder('v')
+      .select(['v.id AS id', 'v.make AS make', 'v.model AS model', 'v."plateNumber" AS "plateNumber"', 'v."fleetCompanyId" AS "fleetCompanyId"'])
+      .where('v."plateNumber" ILIKE :q OR v.make ILIKE :q OR v.model ILIKE :q', { q: `%${query.trim()}%` })
+      .limit(10)
+      .getRawMany();
+  }
+
+  /**
    * There was no way at all for an admin to see a list of vehicles
    * before this — a real gap alongside the driver/rides/support/users
    * ones already found. `Vehicle.driverId` already stores the raw User

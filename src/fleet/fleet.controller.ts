@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -55,6 +55,22 @@ export class FleetController {
   async listDrivers(@CurrentUser() user: User) {
     const company = await this.fleetService.getCompanyForStaff(user.id);
     return this.fleetService.listDrivers(company.id);
+  }
+
+  // Gated the same way as every other companies/mine/* route -
+  // getCompanyForStaff() throws unless the caller is actually staff on
+  // some fleet company, which is what stops this from being a general
+  // "look up any driver" endpoint open to anyone with a token.
+  @Get('companies/mine/driver-search')
+  async searchDrivers(@CurrentUser() user: User, @Query('query') query: string) {
+    await this.fleetService.getCompanyForStaff(user.id);
+    return this.fleetService.searchDrivers(query);
+  }
+
+  @Get('companies/mine/vehicle-search')
+  async searchVehicles(@CurrentUser() user: User, @Query('query') query: string) {
+    await this.fleetService.getCompanyForStaff(user.id);
+    return this.fleetService.searchVehicles(query);
   }
 
   @Post('companies/mine/vehicles')

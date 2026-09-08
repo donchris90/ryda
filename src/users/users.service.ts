@@ -44,6 +44,40 @@ export class UsersService {
   }
 
   /**
+   * Lets a corporate account owner find a user to add as an employee
+   * by name/email instead of needing their raw user ID - same
+   * reasoning as DriversService.searchForFleetAssignment(). Excludes
+   * staff roles from results - a corporate account has no legitimate
+   * reason to look up an admin/support account this way.
+   */
+  async searchForCorporateEmployee(
+    query: string,
+  ): Promise<{ id: string; firstName: string; lastName: string; email: string }[]> {
+    if (!query || query.trim().length < 2) return [];
+    return this.usersRepo
+      .createQueryBuilder('user')
+      .select(['user.id AS id', 'user."firstName" AS "firstName"', 'user."lastName" AS "lastName"', 'user.email AS email'])
+      .where('user."firstName" ILIKE :q OR user."lastName" ILIKE :q OR user.email ILIKE :q', {
+        q: `%${query.trim()}%`,
+      })
+      .andWhere('NOT (user.roles && :staffRoles)', {
+        staffRoles: [
+          UserRole.ADMIN,
+          UserRole.SUPER_ADMIN,
+          UserRole.COUNTRY_ADMIN,
+          UserRole.CITY_MANAGER,
+          UserRole.SUPPORT_AGENT,
+          UserRole.FINANCE,
+          UserRole.MARKETING,
+          UserRole.AUDITOR,
+          UserRole.DISPATCHER,
+        ],
+      })
+      .limit(10)
+      .getRawMany();
+  }
+
+  /**
    * The first self-service "edit your own name/email/phone" endpoint in
    * the app - previously an account's basic info was fixed at
    * registration with no way to correct it later (a typo'd name, a

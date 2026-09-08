@@ -200,6 +200,14 @@ export class FleetService {
     return this.vehiclesService.listByFleet(fleetCompanyId);
   }
 
+  async searchDrivers(query: string) {
+    return this.driversService.searchForFleetAssignment(query);
+  }
+
+  async searchVehicles(query: string) {
+    return this.vehiclesService.searchForFleetAssignment(query);
+  }
+
   // ---- Wallet ----
 
   async getWallet(fleetCompanyId: string): Promise<FleetWallet> {
