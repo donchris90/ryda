@@ -117,6 +117,11 @@ export class EmergencyService {
     return incident;
   }
 
+  /** A user's own incidents, most recent first - what the "past SOS recordings" list on the passenger app's Safety Center reads from. */
+  async listMine(userId: string): Promise<Incident[]> {
+    return this.incidentsRepo.find({ where: { reportedByUserId: userId }, order: { createdAt: 'DESC' }, take: 50 });
+  }
+
   async reportIncident(userId: string, dto: ReportIncidentDto): Promise<Incident> {
     const incident = await this.incidentsRepo.save(
       this.incidentsRepo.create({

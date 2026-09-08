@@ -1,4 +1,18 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+  Res,
+  UploadedFile,
+  UseGuards,
+  UseInterceptors,
+} from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
 import { ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -8,6 +22,7 @@ import { UserRole, SAFETY_OPS_ROLES } from '../common/enums/user-role.enum';
 import { User } from '../users/entities/user.entity';
 import { EmergencyService } from './emergency.service';
 import { SafetyMonitoringService } from './safety-monitoring.service';
+import { SafetyRecordingsService } from './safety-recordings.service';
 import { RiskAlertStatus } from './entities/risk-alert.entity';
 import {
   AddIncidentNoteDto,
@@ -29,6 +44,7 @@ export class EmergencyController {
   constructor(
     private readonly emergencyService: EmergencyService,
     private readonly safetyMonitoringService: SafetyMonitoringService,
+    private readonly safetyRecordingsService: SafetyRecordingsService,
   ) {}
 
   @Post('emergency/sos')
@@ -40,6 +56,11 @@ export class EmergencyController {
     return this.emergencyService.triggerSos(user.id, body.rideId, body.lat, body.lng);
   }
 
+  @Get('emergency/incidents/mine')
+  listMine(@CurrentUser() user: User) {
+    return this.emergencyService.listMine(user.id);
+  }
+
   @Post('emergency/incidents')
   reportIncident(@CurrentUser() user: User, @Body() dto: ReportIncidentDto) {
     return this.emergencyService.reportIncident(user.id, dto);
@@ -48,6 +69,48 @@ export class EmergencyController {
   @Get('emergency/incidents/:id/timeline')
   timeline(@Param('id') id: string) {
     return this.emergencyService.getTimeline(id);
+  }
+
+  @Post('emergency/incidents/:id/recording')
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: 40 * 1024 * 1024 }, // matches MAX_UPLOAD_BYTES_BY_FOLDER['safety-recordings'] in storage.service.ts
+    }),
+  )
+  uploadRecording(
+    @CurrentUser() user: User,
+    @Param('id') id: string,
+    @UploadedFile() file: Express.Multer.File,
+    @Query('durationSeconds') durationSeconds?: string,
+  ) {
+    return this.safetyRecordingsService.uploadRecording(
+      id,
+      user.id,
+      { buffer: file.buffer, originalname: file.originalname, mimetype: file.mimetype },
+      durationSeconds ? parseInt(durationSeconds, 10) : undefined,
+    );
+  }
+
+  /**
+   * Returns a short-lived signed URL (or, for the local-disk driver in
+   * dev, streams the bytes directly) rather than the recording's own
+   * audioUrl field - that field is a plain, permanently-guessable link
+   * with no access control of its own (see StorageService.getSignedReadUrl's
+   * own comment), so the only place a caller should ever actually
+   * reach the audio is through this endpoint, after canAccess() has
+   * already run.
+   */
+  @Get('emergency/incidents/:id/recording')
+  async getRecording(@CurrentUser() user: User, @Param('id') id: string, @Res() res: Response) {
+    const recording = await this.safetyRecordingsService.getRecording(id, user.id, user.role);
+    const signedUrl = await this.safetyRecordingsService.getSignedUrl(recording);
+    if (signedUrl) {
+      res.redirect(signedUrl);
+      return;
+    }
+    const buffer = await this.safetyRecordingsService.readBytes(recording);
+    res.setHeader('Content-Type', 'audio/mp4');
+    res.send(buffer);
   }
 
   @Post('emergency/incidents/:id/notes')

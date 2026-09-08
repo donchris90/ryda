@@ -38,6 +38,10 @@ export const ALLOWED_MIME_TYPES: Record<string, string[]> = {
   // Delivery photo evidence and signature captures - both images only,
   // nothing needs to be a PDF here the way a driver's license might.
   'delivery-proof': ['image/jpeg', 'image/png', 'image/webp'],
+  // SOS-triggered safety recordings - m4a (iOS/Android's default
+  // expo-audio output) plus mp3/wav as a fallback for whatever the
+  // client actually ends up producing.
+  'safety-recordings': ['audio/m4a', 'audio/mp4', 'audio/mpeg', 'audio/wav', 'audio/x-wav'],
   misc: ['image/jpeg', 'image/png'],
 };
 
@@ -46,9 +50,23 @@ const EXTENSION_BY_MIME: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
   'image/webp': 'webp',
+  'audio/m4a': 'm4a',
+  'audio/mp4': 'm4a',
+  'audio/mpeg': 'mp3',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
 };
 
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10MB
+
+// A full trip's audio easily exceeds the standard 10MB cap above (a
+// modest-bitrate ~60 minute recording lands around 25-28MB) - everything
+// else uploaded through this service is a single photo/document, this
+// is the one folder that's a whole recorded session. Falls back to
+// MAX_UPLOAD_BYTES for every folder not listed here.
+const MAX_UPLOAD_BYTES_BY_FOLDER: Record<string, number> = {
+  'safety-recordings': 40 * 1024 * 1024, // 40MB
+};
 
 @Injectable()
 export class StorageService {
@@ -71,9 +89,10 @@ export class StorageService {
     if (!file.buffer || file.buffer.length === 0) {
       throw new BadRequestException('Uploaded file is empty');
     }
-    if (file.buffer.length > MAX_UPLOAD_BYTES) {
+    const maxBytes = MAX_UPLOAD_BYTES_BY_FOLDER[folder] ?? MAX_UPLOAD_BYTES;
+    if (file.buffer.length > maxBytes) {
       throw new BadRequestException(
-        `File exceeds the maximum upload size of ${MAX_UPLOAD_BYTES / (1024 * 1024)}MB`,
+        `File exceeds the maximum upload size of ${maxBytes / (1024 * 1024)}MB`,
       );
     }
 
@@ -113,6 +132,22 @@ export class StorageService {
 
   async readLocal(key: string): Promise<Buffer> {
     return this.localDisk.read(key);
+  }
+
+  /**
+   * For files that must never be reachable via a bare, guessable URL
+   * (unlike the plain `${baseUrl}/${key}` upload() normally returns,
+   * which every other upload folder is fine with) - a short-lived
+   * signed URL that only exists after the caller has already checked
+   * whatever access control applies to this specific file. Returns
+   * null for the local-disk driver, which has no signing concept at
+   * all; the caller should fall back to readLocal() and stream the
+   * bytes directly in that case.
+   */
+  async getSignedReadUrl(key: string): Promise<string | null> {
+    if (this.driver === 's3' && this.s3.isConfigured()) return this.s3.getSignedReadUrl(key);
+    if (this.driver === 'r2' && this.r2.isConfigured()) return this.r2.getSignedReadUrl(key);
+    return null;
   }
 
   async delete(key: string): Promise<void> {
