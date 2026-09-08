@@ -81,11 +81,13 @@ export interface CourierCandidateResult {
   firstName: string;
   profilePhoto: string | null;
   rating: number;
+  completedTrips: number;
   vehicle: {
     category: string;
     make: string | null;
     model: string | null;
     color: string | null;
+    plateNumber: string | null;
     photoUrl: string | null;
   };
   etaMinutes: number;
@@ -419,19 +421,26 @@ export class LogisticsService {
 
     const userIds = rankingOutcome.ranked.map((c) => c.driverUserId);
     const vehicleIds = rankingOutcome.ranked.map((c) => c.vehicleId);
-    const [users, vehicles] = await Promise.all([
+    const [users, vehicles, profiles] = await Promise.all([
       this.usersService.findByIds(userIds),
       Promise.all(
         vehicleIds.map((id) =>
           this.vehiclesService.findById(id).catch(() => null),
         ),
       ),
+      // completedTrips lives on the driver profile, not the user or
+      // vehicle records already being fetched here - same reasoning
+      // and pattern as rides.service.ts's findSelectableDrivers().
+      Promise.all(userIds.map((id) => this.driversService.findByUserId(id).catch(() => null))),
     ]);
     const userById = new Map(users.map((u) => [u.id, u]));
     const vehicleById = new Map(
       vehicles
         .filter((v): v is NonNullable<typeof v> => !!v)
         .map((v) => [v.id, v]),
+    );
+    const profileByUserId = new Map(
+      rankingOutcome.ranked.map((c, i) => [c.driverUserId, profiles[i]]),
     );
 
     return rankingOutcome.ranked.map((c) => {
@@ -442,11 +451,13 @@ export class LogisticsService {
         firstName: user?.firstName ?? 'Courier',
         profilePhoto: user?.profilePhotoUrl ?? null,
         rating: c.rating,
+        completedTrips: profileByUserId.get(c.driverUserId)?.completedTrips ?? 0,
         vehicle: {
           category: vehicle?.category ?? c.vehicleCategory,
           make: vehicle?.make ?? null,
           model: vehicle?.model ?? null,
           color: vehicle?.color ?? null,
+          plateNumber: vehicle?.plateNumber ?? null,
           photoUrl: vehicle?.photoUrl ?? null,
         },
         etaMinutes: c.etaMinutes,
