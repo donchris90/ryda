@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
 import { randomBytes } from 'crypto';
@@ -41,6 +41,57 @@ export class UsersService {
 
   async findByEmail(email: string): Promise<User | null> {
     return this.usersRepo.findOne({ where: { email } });
+  }
+
+  /**
+   * The first self-service "edit your own name/email/phone" endpoint in
+   * the app - previously an account's basic info was fixed at
+   * registration with no way to correct it later (a typo'd name, a
+   * changed number) short of a direct database edit.
+   *
+   * Email/phone changes reset the corresponding isVerified flag rather
+   * than leaving it true - a verified badge on a value nobody has
+   * actually confirmed yet would be actively misleading (and this
+   * mirrors registration itself, where a fresh email/phone always
+   * starts unverified). The driver/passenger apps already have a
+   * resend-verification flow from onboarding; this doesn't duplicate
+   * that, it just puts the account back into the same "needs
+   * verification" state a first-time signup would be in.
+   *
+   * Uniqueness is checked explicitly (not just left to the DB's unique
+   * constraint) so a genuinely-taken email/phone comes back as a clear
+   * BadRequestException instead of a raw constraint-violation error
+   * leaking through as an unhandled 500.
+   */
+  async updateProfile(
+    userId: string,
+    dto: { firstName?: string; lastName?: string; email?: string; phone?: string },
+  ): Promise<User> {
+    const user = await this.usersRepo.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+
+    if (dto.firstName !== undefined) user.firstName = dto.firstName;
+    if (dto.lastName !== undefined) user.lastName = dto.lastName;
+
+    if (dto.email !== undefined && dto.email !== user.email) {
+      const existing = await this.findByEmail(dto.email);
+      if (existing && existing.id !== userId) {
+        throw new BadRequestException('That email is already in use by another account.');
+      }
+      user.email = dto.email;
+      user.isEmailVerified = false;
+    }
+
+    if (dto.phone !== undefined && dto.phone !== user.phone) {
+      const existing = await this.findByPhone(dto.phone);
+      if (existing && existing.id !== userId) {
+        throw new BadRequestException('That phone number is already in use by another account.');
+      }
+      user.phone = dto.phone;
+      user.isPhoneVerified = false;
+    }
+
+    return this.usersRepo.save(user);
   }
 
   async findByEmailWithPassword(email: string): Promise<User | null> {

@@ -52,6 +52,49 @@ export class WalletsService {
   }
 
   /**
+   * CSV rather than PDF - no new rendering dependency needed, and a
+   * statement is exactly the kind of thing someone wants to open in
+   * Excel/Sheets or hand to an accountant, not just look at on screen.
+   * Unlike getTransactions() above (capped at a small `limit` for a
+   * recent-activity list), a statement needs the actual full range
+   * requested - capped at 5000 rows as a sane upper bound against an
+   * unbounded query, not a small "recent activity" style limit.
+   */
+  async generateStatementCsv(userId: string, from?: Date, to?: Date): Promise<string> {
+    const wallet = await this.getByUserId(userId);
+    const where: any = { walletId: wallet.id };
+    if (from || to) {
+      where.createdAt = Between(from ?? new Date(0), to ?? new Date());
+    }
+    const transactions = await this.txRepo.find({
+      where,
+      order: { createdAt: 'ASC' },
+      take: 5000,
+    });
+
+    const escapeCsv = (value: string) => {
+      // Quoted, with internal quotes doubled - the standard CSV escape,
+      // needed here because description is free text and can contain
+      // commas or quotes of its own.
+      if (/[",\n]/.test(value)) return `"${value.replace(/"/g, '""')}"`;
+      return value;
+    };
+
+    const header = ['Date', 'Direction', 'Category', 'Amount', 'Balance after', 'Reference', 'Description'];
+    const rows = transactions.map((t) => [
+      t.createdAt.toISOString(),
+      t.direction,
+      t.category,
+      t.amount,
+      t.balanceAfter,
+      t.referenceId ?? '',
+      t.description ?? '',
+    ]);
+
+    return [header, ...rows].map((row) => row.map((cell) => escapeCsv(String(cell))).join(',')).join('\n');
+  }
+
+  /**
    * A single transaction's full detail — the list endpoint above never
    * had anything to link a tap-through to. Verifies the transaction
    * genuinely belongs to this user's own wallet, not just that some

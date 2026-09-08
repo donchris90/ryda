@@ -1,4 +1,5 @@
-import { Body, Controller, forwardRef, Get, Inject, Param, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, forwardRef, Get, Inject, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
+import type { Response } from 'express';
 import { Throttle } from '@nestjs/throttler';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -58,6 +59,32 @@ export class WalletsController {
   @Get('transactions/:id')
   async getTransaction(@CurrentUser() user: User, @Param('id') id: string) {
     return this.walletsService.getTransactionById(user.id, id);
+  }
+
+  /**
+   * CSV download rather than a JSON response - the whole point is a
+   * file the driver can save, open in Excel/Sheets, or hand to someone
+   * else, not data for the app itself to render. Content-Disposition
+   * with a real filename (dated, so multiple downloads don't collide
+   * or overwrite each other silently) is what makes the browser/app
+   * treat this as a save-able file instead of displaying raw text.
+   */
+  @Get('statement')
+  async downloadStatement(
+    @CurrentUser() user: User,
+    @Res() res: Response,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    const csv = await this.walletsService.generateStatementCsv(
+      user.id,
+      from ? new Date(from) : undefined,
+      to ? new Date(to) : undefined,
+    );
+    const filename = `ryda-wallet-statement-${new Date().toISOString().slice(0, 10)}.csv`;
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(csv);
   }
 
   /**

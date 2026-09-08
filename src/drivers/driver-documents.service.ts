@@ -1,6 +1,6 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThanOrEqual, MoreThan } from 'typeorm';
+import { Repository, LessThanOrEqual, MoreThan, In } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import {
@@ -9,6 +9,7 @@ import {
   DriverDocumentType,
 } from './entities/driver-document.entity';
 import { DriverProfile } from './entities/driver-profile.entity';
+import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { User } from '../users/entities/user.entity';
 import { UploadDocumentDto } from './dto/driver-document.dto';
 
@@ -23,6 +24,8 @@ export class DriverDocumentsService {
     private readonly docsRepo: Repository<DriverDocument>,
     @InjectRepository(DriverProfile)
     private readonly profilesRepo: Repository<DriverProfile>,
+    @InjectRepository(Vehicle)
+    private readonly vehiclesRepo: Repository<Vehicle>,
     private readonly events: EventEmitter2,
   ) {}
 
@@ -59,12 +62,66 @@ export class DriverDocumentsService {
     return doc;
   }
 
+  /**
+   * INSURANCE and ROAD_WORTHINESS are the two document types whose
+   * approval genuinely means something beyond "reviewed" - a vehicle's
+   * profile screen reads insuranceExpiry/roadWorthinessExpiry directly
+   * off the Vehicle row, not off this document, so without this the
+   * expiry a driver uploaded (and an admin approved) never actually
+   * reaches anywhere the app displays it - it would show "Not on file"
+   * forever regardless of how valid and approved the real document is.
+   *
+   * DriverDocument is scoped to the driver profile, not a specific
+   * vehicle (a driver can register more than one), so this applies to
+   * whichever vehicle is currently active - the only one the concept
+   * of "this vehicle's insurance" unambiguously refers to. A driver
+   * with no active vehicle yet (documents uploaded before ever
+   * registering one) is a real, valid state - silently skipped rather
+   * than treated as an error, since the next vehicle they activate has
+   * its own separate documents to go through this same review anyway.
+   */
+  private async propagateExpiryToActiveVehicle(doc: DriverDocument): Promise<void> {
+    if (doc.type !== DriverDocumentType.INSURANCE && doc.type !== DriverDocumentType.ROAD_WORTHINESS) return;
+
+    const profile = await this.profilesRepo.findOne({ where: { id: doc.driverProfileId } });
+    if (!profile?.activeVehicleId) return;
+
+    const field = doc.type === DriverDocumentType.INSURANCE ? 'insuranceExpiry' : 'roadWorthinessExpiry';
+    await this.vehiclesRepo.update(profile.activeVehicleId, { [field]: doc.expiryDate });
+  }
+
+  /**
+   * Called from DriversService.setActiveVehicle() - documents are
+   * approved once per driver, not once per vehicle (see this file's own
+   * comment on approve() above), so switching which vehicle is active
+   * would otherwise leave an already-approved insurance/roadworthiness
+   * expiry stuck on the vehicle that's no longer in use, with the newly
+   * active one silently reverting to "Not on file" despite nothing
+   * actually being wrong with the driver's real documents.
+   */
+  async propagateApprovedDocumentsToVehicle(driverProfileId: string, vehicleId: string): Promise<void> {
+    const approvedDocs = await this.docsRepo.find({
+      where: {
+        driverProfileId,
+        status: DriverDocumentStatus.APPROVED,
+        type: In([DriverDocumentType.INSURANCE, DriverDocumentType.ROAD_WORTHINESS]),
+      },
+    });
+
+    for (const doc of approvedDocs) {
+      const field = doc.type === DriverDocumentType.INSURANCE ? 'insuranceExpiry' : 'roadWorthinessExpiry';
+      await this.vehiclesRepo.update(vehicleId, { [field]: doc.expiryDate });
+    }
+  }
+
   async approve(id: string, reviewerUserId: string): Promise<DriverDocument> {
     const doc = await this.findById(id);
     doc.status = DriverDocumentStatus.APPROVED;
     doc.reviewedBy = reviewerUserId;
     doc.rejectionReason = null;
-    return this.docsRepo.save(doc);
+    const saved = await this.docsRepo.save(doc);
+    await this.propagateExpiryToActiveVehicle(saved);
+    return saved;
   }
 
   async reject(id: string, reviewerUserId: string, reason: string): Promise<DriverDocument> {

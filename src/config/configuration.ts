@@ -326,6 +326,14 @@ export default () => ({
     // logistics pricing constant here.
     standardDiscount: parseFloat(process.env.LOGISTICS_STANDARD_DISCOUNT ?? '0.85'),
   },
+  loyalty: {
+    // Same defaults as the hardcoded constants this replaced - 1 point
+    // per ₦100 spent, 10 points = ₦1 on redemption, 100-point minimum.
+    // Admin-adjustable at runtime via the SETTING_KEYS.LOYALTY_* keys.
+    pointsPerNairaSpent: parseFloat(process.env.LOYALTY_POINTS_PER_NAIRA_SPENT ?? String(1 / 100)),
+    nairaPerPointRedeemed: parseFloat(process.env.LOYALTY_NAIRA_PER_POINT_REDEEMED ?? '0.1'),
+    minRedemptionPoints: parseInt(process.env.LOYALTY_MIN_REDEMPTION_POINTS ?? '100', 10),
+  },
   storage: {
     driver: process.env.STORAGE_DRIVER ?? 'local', // 'local' | 's3' | 'r2'
     localUploadDir: process.env.STORAGE_LOCAL_DIR ?? 'uploads',

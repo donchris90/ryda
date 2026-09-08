@@ -45,6 +45,7 @@ function buildService(overrides: Record<string, any> = {}) {
   const fraudService = { checkGpsSpoof: jest.fn().mockResolvedValue(undefined), ...overrides.fraudService };
   const documentsService = {
     hasAllRequiredApproved: jest.fn().mockResolvedValue(true),
+    propagateApprovedDocumentsToVehicle: jest.fn().mockResolvedValue(undefined),
     ...overrides.documentsService,
   };
   const locationQualityService = {
@@ -584,5 +585,29 @@ describe('DriversService.updateLocation() - quality-aware position updates', () 
       { lat: 6.5, lng: 3.3, accuracy: 25, fixTimestamp: 1735900000000 },
       expect.any(Date),
     );
+  });
+});
+
+describe('DriversService.setActiveVehicle()', () => {
+  it(
+    "carries over already-approved insurance/roadworthiness documents onto the newly active " +
+      'vehicle - see DriverDocumentsService for why documents are approved per driver, not per vehicle',
+    async () => {
+      const { service, driversRepo, documentsService } = buildService();
+      driversRepo.findOne.mockResolvedValue(baseProfile({ id: 'profile-1' }));
+
+      await service.setActiveVehicle('user-1', 'vehicle-2');
+
+      expect(documentsService.propagateApprovedDocumentsToVehicle).toHaveBeenCalledWith('profile-1', 'vehicle-2');
+    },
+  );
+
+  it('actually sets activeVehicleId on the saved profile', async () => {
+    const { service, driversRepo } = buildService();
+    driversRepo.findOne.mockResolvedValue(baseProfile({ id: 'profile-1' }));
+
+    const result = await service.setActiveVehicle('user-1', 'vehicle-2');
+
+    expect(result.activeVehicleId).toBe('vehicle-2');
   });
 });

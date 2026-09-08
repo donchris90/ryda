@@ -32,6 +32,17 @@ export const SETTING_KEYS = {
   // is the unchanged baseline and STANDARD is the new discounted tier,
   // not the other way around.
   LOGISTICS_STANDARD_DISCOUNT: 'logistics.standardDiscount',
+  // Previously hardcoded module constants in LoyaltyService, unlike
+  // every other pricing concept in this codebase (referral bonuses,
+  // logistics fares, the standard-tier discount above) - meant an
+  // admin genuinely could not adjust the loyalty program's core
+  // economics without an app deploy. The passenger-facing "how points
+  // work" text already reads these numbers dynamically off the
+  // summary response rather than hardcoding its own copy, so making
+  // these settings-backed fixes both problems at once.
+  LOYALTY_POINTS_PER_NAIRA_SPENT: 'loyalty.pointsPerNairaSpent',
+  LOYALTY_NAIRA_PER_POINT_REDEEMED: 'loyalty.nairaPerPointRedeemed',
+  LOYALTY_MIN_REDEMPTION_POINTS: 'loyalty.minRedemptionPoints',
   WALLET_TRANSFER_MIN: 'wallet.transferMin',
   WALLET_TRANSFER_MAX_PER_TRANSACTION: 'wallet.transferMaxPerTransaction',
   WALLET_TRANSFER_MAX_DAILY: 'wallet.transferMaxDaily',

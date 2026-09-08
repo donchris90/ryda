@@ -7,6 +7,7 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from './entities/user.entity';
 import { UserRole } from '../common/enums/user-role.enum';
 import { UsersService } from './users.service';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import { StorageService } from '../storage/storage.service';
 
 @Controller('users')
@@ -20,6 +21,11 @@ export class UsersController {
   @Get('me')
   getProfile(@CurrentUser() user: User) {
     return this.usersService.sanitize(user);
+  }
+
+  @Patch('me')
+  updateProfile(@CurrentUser() user: User, @Body() dto: UpdateProfileDto) {
+    return this.usersService.updateProfile(user.id, dto);
   }
 
   @Post('me/profile-photo')

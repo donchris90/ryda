@@ -21,8 +21,21 @@ function build(account: LoyaltyAccount | null) {
   } as any;
   const transactionsRepo = {} as any;
   const walletsService = {} as any;
-  const service = new LoyaltyService(accountsRepo, transactionsRepo, walletsService);
-  return { service };
+  const config = {
+    get: jest.fn((key: string) => {
+      const defaults: Record<string, number> = {
+        'loyalty.pointsPerNairaSpent': 1 / 100,
+        'loyalty.nairaPerPointRedeemed': 0.1,
+        'loyalty.minRedemptionPoints': 100,
+      };
+      return defaults[key];
+    }),
+  } as any;
+  const settingsService = {
+    getNumber: jest.fn(async (_key: string, fallback: number) => fallback),
+  } as any;
+  const service = new LoyaltyService(accountsRepo, transactionsRepo, walletsService, config, settingsService);
+  return { service, settingsService };
 }
 
 describe('LoyaltyService.getAccountSummary()', () => {
@@ -54,4 +67,23 @@ describe('LoyaltyService.getAccountSummary()', () => {
     expect(summary.nairaPerPointRedeemed).toBeGreaterThan(0);
     expect(summary.minRedemptionPoints).toBeGreaterThan(0);
   });
+
+  it(
+    'reads rates from admin-configurable settings, not hardcoded constants - previously these were ' +
+      'module-level constants that required an app deploy to ever change',
+    async () => {
+      const { service, settingsService } = build(fakeAccount());
+      (settingsService.getNumber as jest.Mock).mockImplementation(async (key: string) => {
+        if (key === 'loyalty.pointsPerNairaSpent') return 0.5; // an admin set a much richer rate
+        if (key === 'loyalty.nairaPerPointRedeemed') return 1;
+        return 250;
+      });
+
+      const summary = await service.getAccountSummary('user-1');
+
+      expect(summary.pointsPerNairaSpent).toBe(0.5);
+      expect(summary.nairaPerPointRedeemed).toBe(1);
+      expect(summary.minRedemptionPoints).toBe(250);
+    },
+  );
 });

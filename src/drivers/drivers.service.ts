@@ -565,7 +565,13 @@ export class DriversService {
   async setActiveVehicle(userId: string, vehicleId: string): Promise<DriverProfile> {
     const profile = await this.findByUserId(userId);
     profile.activeVehicleId = vehicleId;
-    return this.driversRepo.save(profile);
+    const saved = await this.driversRepo.save(profile);
+    // Carries over any already-approved insurance/roadworthiness expiry
+    // onto the newly active vehicle - see DriverDocumentsService's own
+    // comment on why this exists (documents are approved per driver,
+    // not per vehicle).
+    await this.documentsService.propagateApprovedDocumentsToVehicle(profile.id, vehicleId);
+    return saved;
   }
 
   async assignToFleet(driverUserId: string, fleetCompanyId: string | null): Promise<DriverProfile> {

@@ -1,18 +1,13 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { ConfigService } from '@nestjs/config';
 import { OnEvent } from '@nestjs/event-emitter';
 import { LoyaltyAccount, LoyaltyTier, TIER_THRESHOLDS } from './entities/loyalty-account.entity';
 import { LoyaltyTransaction } from './entities/loyalty-transaction.entity';
 import { WalletsService } from '../wallets/wallets.service';
+import { SystemSettingsService, SETTING_KEYS } from '../settings/settings.service';
 import { TransactionCategory } from '../common/enums/transaction.enum';
-
-// 1 point per ₦100 spent on a completed ride — simple, transparent, easy
-// for a passenger to reason about ("spend ₦100, get 1 point").
-const POINTS_PER_NAIRA_SPENT = 1 / 100;
-// 10 points = ₦1 when redeeming back to the wallet.
-const NAIRA_PER_POINT_REDEEMED = 0.1;
-const MIN_REDEMPTION_POINTS = 100;
 
 @Injectable()
 export class LoyaltyService {
@@ -24,7 +19,30 @@ export class LoyaltyService {
     @InjectRepository(LoyaltyTransaction)
     private readonly transactionsRepo: Repository<LoyaltyTransaction>,
     private readonly walletsService: WalletsService,
+    private readonly config: ConfigService,
+    private readonly settingsService: SystemSettingsService,
   ) {}
+
+  private getPointsPerNairaSpent(): Promise<number> {
+    return this.settingsService.getNumber(
+      SETTING_KEYS.LOYALTY_POINTS_PER_NAIRA_SPENT,
+      this.config.get<number>('loyalty.pointsPerNairaSpent')!,
+    );
+  }
+
+  private getNairaPerPointRedeemed(): Promise<number> {
+    return this.settingsService.getNumber(
+      SETTING_KEYS.LOYALTY_NAIRA_PER_POINT_REDEEMED,
+      this.config.get<number>('loyalty.nairaPerPointRedeemed')!,
+    );
+  }
+
+  private getMinRedemptionPoints(): Promise<number> {
+    return this.settingsService.getNumber(
+      SETTING_KEYS.LOYALTY_MIN_REDEMPTION_POINTS,
+      this.config.get<number>('loyalty.minRedemptionPoints')!,
+    );
+  }
 
   /**
    * Genuinely racy in practice — a passenger's own `GET /loyalty/me` can
@@ -63,9 +81,9 @@ export class LoyaltyService {
   /**
    * Everything the passenger-facing loyalty screen needs beyond the bare
    * account row: how far to the next tier, and the actual earn/redeem
-   * rates - all derived from the same constants the rest of this
-   * service already enforces (POINTS_PER_NAIRA_SPENT, TIER_THRESHOLDS,
-   * etc.), never hardcoded a second time on the client. tier/pointsToNextTier
+   * rates - all read from the same admin-adjustable settings the rest of
+   * this service enforces (see getPointsPerNairaSpent() etc. above),
+   * never hardcoded a second time on the client. tier/pointsToNextTier
    * are null once at the top tier - there's nothing further to reach.
    */
   async getAccountSummary(userId: string): Promise<{
@@ -83,15 +101,21 @@ export class LoyaltyService {
     const currentIndex = tierOrder.indexOf(account.tier);
     const nextTier = currentIndex < tierOrder.length - 1 ? tierOrder[currentIndex + 1] : null;
 
+    const [pointsPerNairaSpent, nairaPerPointRedeemed, minRedemptionPoints] = await Promise.all([
+      this.getPointsPerNairaSpent(),
+      this.getNairaPerPointRedeemed(),
+      this.getMinRedemptionPoints(),
+    ]);
+
     return {
       pointsBalance: account.pointsBalance,
       lifetimePoints: account.lifetimePoints,
       tier: account.tier,
       nextTier,
       pointsToNextTier: nextTier ? TIER_THRESHOLDS[nextTier] - account.lifetimePoints : null,
-      pointsPerNairaSpent: POINTS_PER_NAIRA_SPENT,
-      nairaPerPointRedeemed: NAIRA_PER_POINT_REDEEMED,
-      minRedemptionPoints: MIN_REDEMPTION_POINTS,
+      pointsPerNairaSpent,
+      nairaPerPointRedeemed,
+      minRedemptionPoints,
     };
   }
 
@@ -108,7 +132,7 @@ export class LoyaltyService {
   async onRideCompleted(payload: { passengerId: string; driverId: string; totalFare: string | number }): Promise<void> {
     try {
       const fare = typeof payload.totalFare === 'string' ? parseFloat(payload.totalFare) : payload.totalFare;
-      const pointsEarned = Math.floor(fare * POINTS_PER_NAIRA_SPENT);
+      const pointsEarned = Math.floor(fare * (await this.getPointsPerNairaSpent()));
       if (pointsEarned <= 0) return;
 
       const account = await this.getOrCreateAccount(payload.passengerId);
@@ -131,15 +155,16 @@ export class LoyaltyService {
   }
 
   async redeem(userId: string, points: number): Promise<{ pointsRedeemed: number; nairaCredited: number }> {
-    if (points < MIN_REDEMPTION_POINTS) {
-      throw new BadRequestException(`Minimum redemption is ${MIN_REDEMPTION_POINTS} points`);
+    const minRedemptionPoints = await this.getMinRedemptionPoints();
+    if (points < minRedemptionPoints) {
+      throw new BadRequestException(`Minimum redemption is ${minRedemptionPoints} points`);
     }
     const account = await this.getOrCreateAccount(userId);
     if (account.pointsBalance < points) {
       throw new BadRequestException('Not enough points');
     }
 
-    const nairaCredited = Math.round(points * NAIRA_PER_POINT_REDEEMED * 100) / 100;
+    const nairaCredited = Math.round(points * (await this.getNairaPerPointRedeemed()) * 100) / 100;
 
     account.pointsBalance -= points;
     await this.accountsRepo.save(account);
