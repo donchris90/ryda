@@ -583,7 +583,16 @@ export class LogisticsService {
    */
   async findByIdForParticipant(id: string, requesterId: string, requesterRole: UserRole): Promise<DeliveryOrder> {
     const order = await this.findById(id);
-    const isParticipant = order.customerId === requesterId || order.driverId === requesterId;
+    // pendingCourierUserId included, not just driverId - a manually
+    // selected courier hasn't been assigned driverId yet (that only
+    // happens once they actually call accept()), but they still need
+    // to be able to load the order to see what they're being asked to
+    // accept in the first place. Without this, the exact screen that
+    // lets them accept the delivery couldn't even load it.
+    const isParticipant =
+      order.customerId === requesterId ||
+      order.driverId === requesterId ||
+      order.pendingCourierUserId === requesterId;
     const isStaff = SAFETY_OPS_ROLES.includes(requesterRole);
     if (!isParticipant && !isStaff) {
       throw new ForbiddenException("You don't have access to this delivery");

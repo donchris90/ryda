@@ -562,4 +562,36 @@ describe('LogisticsService.findByIdForParticipant() - access control', () => {
       ForbiddenException,
     );
   });
+
+  it(
+    'allows a manually-selected courier to view the order before they have actually accepted - ' +
+      'pendingCourierUserId is set at selection time, driverId only once accept() succeeds, and the ' +
+      'exact screen that lets them accept needs to load the order first',
+    async () => {
+      const { service } = buildService({
+        ordersRepo: {
+          findOne: jest
+            .fn()
+            .mockResolvedValue(fakeOrder({ customerId: 'customer-1', driverId: null, pendingCourierUserId: 'courier-1' })),
+        },
+      });
+
+      const result = await service.findByIdForParticipant('order-1', 'courier-1', 'driver' as any);
+      expect(result.id).toBe('order-1');
+    },
+  );
+
+  it('still rejects a courier who was never selected and is not the assigned driver', async () => {
+    const { service } = buildService({
+      ordersRepo: {
+        findOne: jest
+          .fn()
+          .mockResolvedValue(fakeOrder({ customerId: 'customer-1', driverId: null, pendingCourierUserId: 'courier-1' })),
+      },
+    });
+
+    await expect(service.findByIdForParticipant('order-1', 'some-other-courier', 'driver' as any)).rejects.toThrow(
+      ForbiddenException,
+    );
+  });
 });
