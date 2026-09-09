@@ -85,6 +85,7 @@ export class DispatchService {
               driverLevel: profile.level,
               vehicleCategory,
               city: ride.city ?? undefined,
+              tripType: 'ride',
             });
       const totalFare = parseFloat(ride.totalFare);
       const estimatedDriverEarnings = Math.round(totalFare * (1 - commissionPercent / 100) * 100) / 100;

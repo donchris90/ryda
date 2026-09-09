@@ -1039,6 +1039,7 @@ export class LogisticsService {
             driverLevel: driverProfile.level,
             vehicleCategory,
             city: order.city ?? undefined,
+            tripType: 'delivery',
           });
 
     const totalFare = parseFloat(order.totalFare);

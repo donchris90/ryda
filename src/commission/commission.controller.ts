@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Put, UseGuards } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -7,6 +7,7 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { User } from '../users/entities/user.entity';
 import { CommissionService } from './commission.service';
 import { CommissionRule } from './entities/commission-rule.entity';
+import type { CommissionAppliesTo } from './entities/commission-rule.entity';
 import { DriverLevel } from '../common/enums/driver-level.enum';
 import { Audit } from '../audit/decorators/audit.decorator';
 import { RequirePermission } from '../common/permissions/require-permission.decorator';
@@ -51,14 +52,19 @@ export class CommissionController {
   // driver level was a hardcoded constant with no admin-editable path
   // at all - changing it required a code deploy.
   @Get('defaults/by-level')
-  getDefaults() {
-    return this.commissionService.getDefaultsByLevel();
+  getDefaults(@Query('tripType') tripType?: CommissionAppliesTo) {
+    return this.commissionService.getDefaultsByLevel(tripType ?? 'ride');
   }
 
   @Put('defaults/:level')
   @RequirePermission(Permission.COMMISSION_MANAGE)
   @Audit('commission_default.update')
-  setDefault(@CurrentUser() admin: User, @Param('level') level: DriverLevel, @Body('percent') percent: number) {
-    return this.commissionService.setDefaultForLevel(level, percent, admin.id);
+  setDefault(
+    @CurrentUser() admin: User,
+    @Param('level') level: DriverLevel,
+    @Body('percent') percent: number,
+    @Body('tripType') tripType?: CommissionAppliesTo,
+  ) {
+    return this.commissionService.setDefaultForLevel(level, percent, admin.id, tripType ?? 'ride');
   }
 }

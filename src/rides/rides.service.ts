@@ -1586,6 +1586,7 @@ export class RidesService {
             driverLevel: driverProfile.level,
             vehicleCategory,
             city: ride.city ?? undefined,
+            tripType: 'ride',
           });
 
     const totalFare = parseFloat(ride.totalFare);

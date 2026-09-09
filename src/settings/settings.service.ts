@@ -94,6 +94,17 @@ export const SETTING_KEYS = {
   COMMISSION_DEFAULT_PLATINUM: 'commission.default.platinum',
   COMMISSION_DEFAULT_DIAMOND: 'commission.default.diamond',
   COMMISSION_DEFAULT_ELITE: 'commission.default.elite',
+  // Delivery-specific defaults - the keys above are used for rides.
+  // Falls back to the ride defaults above (not a separate hardcoded
+  // value) when unset, so an admin who's never touched delivery
+  // commission specifically sees no change in behavior until they do.
+  COMMISSION_DEFAULT_DELIVERY_ROOKIE: 'commission.default.delivery.rookie',
+  COMMISSION_DEFAULT_DELIVERY_STANDARD: 'commission.default.delivery.standard',
+  COMMISSION_DEFAULT_DELIVERY_SILVER: 'commission.default.delivery.silver',
+  COMMISSION_DEFAULT_DELIVERY_GOLD: 'commission.default.delivery.gold',
+  COMMISSION_DEFAULT_DELIVERY_PLATINUM: 'commission.default.delivery.platinum',
+  COMMISSION_DEFAULT_DELIVERY_DIAMOND: 'commission.default.delivery.diamond',
+  COMMISSION_DEFAULT_DELIVERY_ELITE: 'commission.default.delivery.elite',
 } as const;
 
 interface CacheEntry {

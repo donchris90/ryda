@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { CommissionRule } from './entities/commission-rule.entity';
+import { CommissionRule, CommissionAppliesTo } from './entities/commission-rule.entity';
 import { DriverLevel, DEFAULT_COMMISSION_BY_LEVEL } from '../common/enums/driver-level.enum';
 import { VehicleCategory } from '../common/enums/vehicle.enum';
 import { Ride } from '../rides/entities/ride.entity';
@@ -13,6 +13,11 @@ interface ResolveInput {
   driverLevel: DriverLevel;
   vehicleCategory?: VehicleCategory;
   city?: string;
+  // Which rules/defaults apply - see CommissionRule.appliesTo's own
+  // comment for why this exists: previously rides and deliveries
+  // shared every rule and every level default uniformly, with no way
+  // to set them independently.
+  tripType: CommissionAppliesTo;
 }
 
 // Maps each level to its setting key, so the admin-configurable value
@@ -25,6 +30,16 @@ const COMMISSION_SETTING_KEY_BY_LEVEL: Record<DriverLevel, string> = {
   [DriverLevel.PLATINUM]: SETTING_KEYS.COMMISSION_DEFAULT_PLATINUM,
   [DriverLevel.DIAMOND]: SETTING_KEYS.COMMISSION_DEFAULT_DIAMOND,
   [DriverLevel.ELITE]: SETTING_KEYS.COMMISSION_DEFAULT_ELITE,
+};
+
+const COMMISSION_SETTING_KEY_BY_LEVEL_DELIVERY: Record<DriverLevel, string> = {
+  [DriverLevel.ROOKIE]: SETTING_KEYS.COMMISSION_DEFAULT_DELIVERY_ROOKIE,
+  [DriverLevel.STANDARD]: SETTING_KEYS.COMMISSION_DEFAULT_DELIVERY_STANDARD,
+  [DriverLevel.SILVER]: SETTING_KEYS.COMMISSION_DEFAULT_DELIVERY_SILVER,
+  [DriverLevel.GOLD]: SETTING_KEYS.COMMISSION_DEFAULT_DELIVERY_GOLD,
+  [DriverLevel.PLATINUM]: SETTING_KEYS.COMMISSION_DEFAULT_DELIVERY_PLATINUM,
+  [DriverLevel.DIAMOND]: SETTING_KEYS.COMMISSION_DEFAULT_DELIVERY_DIAMOND,
+  [DriverLevel.ELITE]: SETTING_KEYS.COMMISSION_DEFAULT_DELIVERY_ELITE,
 };
 
 @Injectable()
@@ -58,26 +73,46 @@ export class CommissionService {
       return parseFloat(scored[0].rule.commissionPercent);
     }
 
-    return this.settingsService.getNumber(
+    const rideDefault = await this.settingsService.getNumber(
       COMMISSION_SETTING_KEY_BY_LEVEL[input.driverLevel],
       DEFAULT_COMMISSION_BY_LEVEL[input.driverLevel],
     );
+    if (input.tripType === 'ride') return rideDefault;
+
+    // Delivery: falls back to the ride default above, not the bare
+    // hardcoded constant - an admin who's already customized the ride
+    // default for this level (but never touched delivery specifically)
+    // should see deliveries keep matching that customized value, the
+    // same unified behavior as before this feature existed, until they
+    // deliberately set a delivery-specific default.
+    return this.settingsService.getNumber(COMMISSION_SETTING_KEY_BY_LEVEL_DELIVERY[input.driverLevel], rideDefault);
   }
 
   /** Admin-facing: the currently configured (or default) commission for every level, for display/editing. */
-  async getDefaultsByLevel(): Promise<Record<DriverLevel, number>> {
+  async getDefaultsByLevel(tripType: CommissionAppliesTo = 'ride'): Promise<Record<DriverLevel, number>> {
     const entries = await Promise.all(
       Object.values(DriverLevel).map(async (level) => [
         level,
-        await this.settingsService.getNumber(COMMISSION_SETTING_KEY_BY_LEVEL[level], DEFAULT_COMMISSION_BY_LEVEL[level]),
+        tripType === 'delivery'
+          ? await this.settingsService.getNumber(
+              COMMISSION_SETTING_KEY_BY_LEVEL_DELIVERY[level],
+              await this.settingsService.getNumber(COMMISSION_SETTING_KEY_BY_LEVEL[level], DEFAULT_COMMISSION_BY_LEVEL[level]),
+            )
+          : await this.settingsService.getNumber(COMMISSION_SETTING_KEY_BY_LEVEL[level], DEFAULT_COMMISSION_BY_LEVEL[level]),
       ]),
     );
     return Object.fromEntries(entries);
   }
 
   /** Admin-facing: set the platform default commission for one driver level. */
-  async setDefaultForLevel(level: DriverLevel, percent: number, updatedBy: string): Promise<void> {
-    await this.settingsService.set(COMMISSION_SETTING_KEY_BY_LEVEL[level], updatedBy, { value: percent.toString() });
+  async setDefaultForLevel(
+    level: DriverLevel,
+    percent: number,
+    updatedBy: string,
+    tripType: CommissionAppliesTo = 'ride',
+  ): Promise<void> {
+    const key = tripType === 'delivery' ? COMMISSION_SETTING_KEY_BY_LEVEL_DELIVERY[level] : COMMISSION_SETTING_KEY_BY_LEVEL[level];
+    await this.settingsService.set(key, updatedBy, { value: percent.toString() });
   }
 
   private matches(rule: CommissionRule, input: ResolveInput): boolean {
@@ -85,6 +120,7 @@ export class CommissionService {
     if (rule.vehicleCategory && rule.vehicleCategory !== input.vehicleCategory) return false;
     if (rule.city && input.city && rule.city.toLowerCase() !== input.city.toLowerCase()) return false;
     if (rule.city && !input.city) return false;
+    if (rule.appliesTo && rule.appliesTo !== input.tripType) return false;
     return true;
   }
 
@@ -93,6 +129,7 @@ export class CommissionService {
     if (rule.driverLevel) score += 1;
     if (rule.vehicleCategory) score += 1;
     if (rule.city) score += 1;
+    if (rule.appliesTo) score += 1;
     return score;
   }
 
