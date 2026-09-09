@@ -1,5 +1,6 @@
 import { RidesService } from './rides.service';
 import { RideStatus, PaymentMethod } from '../common/enums/ride.enum';
+import { TransactionCategory } from '../common/enums/transaction.enum';
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 
 /**
@@ -567,6 +568,7 @@ describe('RidesService.completeRide — CASH payments', () => {
       'fleet-1',
       expect.any(Number),
       'ride-1',
+      expect.stringContaining('cash trip'),
     );
     expect(deps.walletsService.debit).not.toHaveBeenCalled();
   });
@@ -668,6 +670,55 @@ describe('RidesService.completeRide — commission and post-completion side effe
     expect(deps.promotionsService.settleCashbackForRide).toHaveBeenCalledWith(
       'ride-1',
       'passenger-1',
+    );
+  });
+
+  it('records the driver earning credit and commission debit as two separate wallet transactions on a WALLET-paid trip, not one net credit', async () => {
+    const { service, deps } = buildForCompleteRide({
+      paymentMethod: PaymentMethod.WALLET,
+      driverProfile: { commissionOverridePercent: null },
+    });
+
+    await service.completeRide('ride-1', 'driver-1');
+
+    // totalFare 1000, commission 15% -> 150 commission, 850 net earnings.
+    // Gross (1000) credited first, then commission (150) debited back out -
+    // same two-line shape the cash-payment path already produced, so a
+    // driver sees identical transparency regardless of how the trip was paid.
+    expect(deps.walletsService.credit).toHaveBeenCalledWith(
+      'wallet-1',
+      1000,
+      TransactionCategory.RIDE_EARNING,
+      'ride-1',
+      expect.any(String),
+    );
+    expect(deps.walletsService.debit).toHaveBeenCalledWith(
+      'wallet-1',
+      150,
+      TransactionCategory.COMMISSION,
+      'ride-1',
+      expect.any(String),
+    );
+  });
+
+  it('credits the gross fare to the fleet wallet then debits commission separately, not just the net amount', async () => {
+    const { service, deps } = buildForCompleteRide({
+      paymentMethod: PaymentMethod.WALLET,
+      driverProfile: { commissionOverridePercent: null, fleetCompanyId: 'fleet-1' },
+      fleetService: {
+        creditForRideEarning: jest.fn().mockResolvedValue(undefined),
+        debitFleetCommission: jest.fn().mockResolvedValue(undefined),
+      },
+    });
+
+    await service.completeRide('ride-1', 'driver-1');
+
+    expect(deps.fleetService.creditForRideEarning).toHaveBeenCalledWith('fleet-1', 1000, 'ride-1');
+    expect(deps.fleetService.debitFleetCommission).toHaveBeenCalledWith(
+      'fleet-1',
+      150,
+      'ride-1',
+      expect.any(String),
     );
   });
 });

@@ -2,6 +2,7 @@ import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { LogisticsService } from './logistics.service';
 import { DeliveryStatus } from './entities/delivery-order.entity';
 import { PaymentMethod } from '../common/enums/ride.enum';
+import { TransactionCategory } from '../common/enums/transaction.enum';
 
 function fakeOrder(overrides: Record<string, any> = {}) {
   return {
@@ -46,7 +47,7 @@ function build(overrides: Record<string, any> = {}) {
     walletsService,
     commissionService,
     corporateService: {},
-    fleetService: {},
+    fleetService: { ...overrides.fleetService },
     usersService: {},
     paymentsService: {},
     reconciliationService: { recordDebt: jest.fn().mockResolvedValue(undefined) },
@@ -415,3 +416,72 @@ describe('LogisticsService.getCourierPerformance()', () => {
     expect(result.averageRating).toBeNull();
   });
 });
+
+describe(
+  'LogisticsService.markDelivered() - commission transparency on non-cash deliveries: previously only ' +
+    'the net earning was ever recorded, with commission mentioned as plain text in the description but ' +
+    'never as its own auditable transaction',
+  () => {
+    it('records the driver earning credit and commission debit as two separate wallet transactions, not one net credit', async () => {
+      const walletsService = {
+        getByUserId: jest.fn().mockResolvedValue({ id: 'wallet-driver-1' }),
+        credit: jest.fn().mockResolvedValue(undefined),
+        debit: jest.fn().mockResolvedValue(undefined),
+      };
+      const { service } = build({
+        ordersRepo: { findOne: jest.fn().mockResolvedValue(fakeOrder({ paymentMethod: PaymentMethod.WALLET })) },
+        walletsService,
+      });
+
+      await service.markDelivered('order-1', 'driver-1', validProof);
+
+      // totalFare 2000, commission 20% -> 400 commission, 1600 net earnings.
+      expect(walletsService.credit).toHaveBeenCalledWith(
+        'wallet-driver-1',
+        2000,
+        TransactionCategory.DELIVERY_EARNING,
+        'order-1',
+        expect.any(String),
+      );
+      expect(walletsService.debit).toHaveBeenCalledWith(
+        'wallet-driver-1',
+        400,
+        TransactionCategory.COMMISSION,
+        'order-1',
+        expect.any(String),
+      );
+    });
+
+    it('credits the gross fare to the fleet wallet then debits commission separately, not just the net amount', async () => {
+      const fleetService = {
+        creditForRideEarning: jest.fn().mockResolvedValue(undefined),
+        debitFleetCommission: jest.fn().mockResolvedValue(undefined),
+      };
+      const walletsService = {
+        getByUserId: jest.fn().mockResolvedValue({ id: 'wallet-customer-1' }),
+        credit: jest.fn().mockResolvedValue(undefined),
+        debit: jest.fn().mockResolvedValue(undefined),
+      };
+      const { service } = build({
+        ordersRepo: { findOne: jest.fn().mockResolvedValue(fakeOrder({ paymentMethod: PaymentMethod.WALLET })) },
+        driversService: {
+          findByUserId: jest
+            .fn()
+            .mockResolvedValue({ userId: 'driver-1', level: 'standard', activeVehicleId: null, fleetCompanyId: 'fleet-1' }),
+        },
+        fleetService,
+        walletsService,
+      });
+
+      await service.markDelivered('order-1', 'driver-1', validProof);
+
+      expect(fleetService.creditForRideEarning).toHaveBeenCalledWith('fleet-1', 2000, 'order-1');
+      expect(fleetService.debitFleetCommission).toHaveBeenCalledWith(
+        'fleet-1',
+        400,
+        'order-1',
+        expect.any(String),
+      );
+    });
+  },
+);

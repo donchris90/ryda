@@ -238,8 +238,13 @@ export class FleetService {
     );
   }
 
-  /** Debits commission owed on a cash trip completed by a fleet driver. */
-  async debitFleetCommission(fleetCompanyId: string, amount: number, rideId: string): Promise<void> {
+  /** Debits commission owed on a trip completed by a fleet driver. */
+  async debitFleetCommission(
+    fleetCompanyId: string,
+    amount: number,
+    rideId: string,
+    description = `Commission owed on trip ${rideId}`,
+  ): Promise<void> {
     const wallet = await this.getWallet(fleetCompanyId);
     await this.applyLedgerChange(
       wallet.id,
@@ -247,7 +252,7 @@ export class FleetService {
       TransactionDirection.DEBIT,
       FleetTransactionCategory.ADJUSTMENT,
       rideId,
-      `Commission owed on cash trip ${rideId}`,
+      description,
     );
   }
 

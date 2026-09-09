@@ -1633,6 +1633,7 @@ export class RidesService {
               driverProfile.fleetCompanyId,
               commissionAmount,
               ride.id,
+              `Commission owed on cash trip ${ride.id}`,
             );
           } catch {
             await this.reconciliationService.recordDebt(
@@ -1818,24 +1819,53 @@ export class RidesService {
     driverEarnings: number,
     commissionPercent: number,
   ): Promise<void> {
+    // Read back off the ride itself rather than re-deriving from
+    // totalFare/commissionPercent here - completeRide() already
+    // computed and persisted this exact figure before any of this
+    // function's callers run (including the async payment.confirmed
+    // path below, which re-fetches the ride fresh), so this is
+    // guaranteed to match what was actually recorded, not a second
+    // independent calculation that could drift from it.
+    const commissionAmount = parseFloat(ride.commissionAmount ?? '0');
     try {
       if (driverProfile.fleetCompanyId) {
         await this.fleetService.creditForRideEarning(
           driverProfile.fleetCompanyId,
-          driverEarnings,
+          driverEarnings + commissionAmount,
           ride.id,
         );
+        if (commissionAmount > 0) {
+          await this.fleetService.debitFleetCommission(
+            driverProfile.fleetCompanyId,
+            commissionAmount,
+            ride.id,
+            `Commission on trip ${ride.id} (${commissionPercent}%)`,
+          );
+        }
       } else {
         const driverWallet = await this.walletsService.getByUserId(
           driverProfile.userId,
         );
+        // Gross first, then commission back out as its own transaction -
+        // same order the cash-payment path below already uses, so a
+        // driver sees the same two-line shape (an earning, then a
+        // commission) regardless of how the trip was paid for.
         await this.walletsService.credit(
           driverWallet.id,
-          driverEarnings,
+          driverEarnings + commissionAmount,
           TransactionCategory.RIDE_EARNING,
           ride.id,
-          `Earnings for trip ${ride.id} (commission ${commissionPercent}%)`,
+          `Earnings for trip ${ride.id}`,
         );
+        if (commissionAmount > 0) {
+          await this.walletsService.debit(
+            driverWallet.id,
+            commissionAmount,
+            TransactionCategory.COMMISSION,
+            ride.id,
+            `Commission on trip ${ride.id} (${commissionPercent}%)`,
+          );
+        }
       }
     } catch (err) {
       this.logger.error(

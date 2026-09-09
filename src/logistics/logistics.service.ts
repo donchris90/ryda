@@ -1110,6 +1110,7 @@ export class LogisticsService {
             driverProfile.fleetCompanyId,
             commissionAmount,
             order.id,
+            `Commission owed on cash delivery ${order.id}`,
           );
         } catch {
           await this.reconciliationService.recordDebt(
@@ -1292,23 +1293,49 @@ export class LogisticsService {
     driverEarnings: number,
     commissionPercent: number,
   ): Promise<void> {
+    // Read back off the order itself, same reasoning as the identical
+    // fix in rides.service.ts's creditDriverEarnings - guaranteed to
+    // match what was already computed and persisted, not a second
+    // independent calculation.
+    const commissionAmount = parseFloat(order.commissionAmount ?? '0');
     if (driverProfile.fleetCompanyId) {
       await this.fleetService.creditForRideEarning(
         driverProfile.fleetCompanyId,
-        driverEarnings,
+        driverEarnings + commissionAmount,
         order.id,
       );
+      if (commissionAmount > 0) {
+        await this.fleetService.debitFleetCommission(
+          driverProfile.fleetCompanyId,
+          commissionAmount,
+          order.id,
+          `Commission on delivery ${order.id} (${commissionPercent}%)`,
+        );
+      }
     } else {
       const driverWallet = await this.walletsService.getByUserId(
         driverProfile.userId,
       );
+      // Gross first, then commission back out as its own transaction -
+      // same order the cash-payment path above already uses, so a
+      // driver sees the same two-line shape regardless of how the
+      // delivery was paid for.
       await this.walletsService.credit(
         driverWallet.id,
-        driverEarnings,
+        driverEarnings + commissionAmount,
         TransactionCategory.DELIVERY_EARNING,
         order.id,
-        `Earnings for delivery ${order.id} (commission ${commissionPercent}%)`,
+        `Earnings for delivery ${order.id}`,
       );
+      if (commissionAmount > 0) {
+        await this.walletsService.debit(
+          driverWallet.id,
+          commissionAmount,
+          TransactionCategory.COMMISSION,
+          order.id,
+          `Commission on delivery ${order.id} (${commissionPercent}%)`,
+        );
+      }
     }
     order.earningsSettled = true;
     await this.ordersRepo.save(order);
