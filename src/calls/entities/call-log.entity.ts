@@ -1,22 +1,22 @@
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm';
 
 export enum CallStatus {
-  INITIATED = 'initiated',
   RINGING = 'ringing',
-  BRIDGED = 'bridged',
-  COMPLETED = 'completed',
-  FAILED = 'failed',
+  ACCEPTED = 'accepted',
+  REJECTED = 'rejected',
+  ONGOING = 'ongoing',
+  ENDED = 'ended',
+  MISSED = 'missed',
 }
 
 /**
- * One row per masked ride call. The bridgeToPhone column exists solely
- * so CallsController.voiceCallback can resolve "who do we connect this
- * leg to" from the Africa's Talking sessionId alone — AT's voice
- * callback URL is a fixed account-level setting, not something we can
- * parameterize per-call, so the sessionId round-trip is the only
- * correlation handle we get back from initiateCall(). Never exposed
- * through any API response — CallsService only ever returns a bare
- * { status } to client apps.
+ * One row per in-app WebRTC call attempt. Unlike the earlier Africa's
+ * Talking Voice version of this table, no phone number ever appears
+ * here - the whole point of going in-app is that neither party's
+ * number is involved anywhere in the flow. This row exists purely for
+ * call history / support disputes ("the driver says the passenger
+ * never called") and so TrackingGateway can look up a call's current
+ * state when routing signaling messages.
  */
 @Entity('call_logs')
 export class CallLog {
@@ -28,20 +28,19 @@ export class CallLog {
   rideId: string;
 
   @Column()
-  initiatedByUserId: string;
+  callerId: string;
 
   @Column()
-  calleeUserId: string;
+  calleeId: string;
 
-  @Index()
-  @Column({ nullable: true })
-  providerSessionId: string | null;
-
-  @Column()
-  bridgeToPhone: string;
-
-  @Column({ type: 'enum', enum: CallStatus, default: CallStatus.INITIATED })
+  @Column({ type: 'enum', enum: CallStatus, default: CallStatus.RINGING })
   status: CallStatus;
+
+  @Column({ type: 'timestamp', nullable: true })
+  acceptedAt: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  endedAt: Date | null;
 
   @Column({ type: 'int', nullable: true })
   durationSeconds: number | null;

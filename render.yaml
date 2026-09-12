@@ -102,6 +102,14 @@ services:
       # "false" in the Render dashboard only once Chudglo is confirmed
       # live; leaving it unset defaults to false via `=== 'true'`, which
       # is NOT the same as verifying real delivery actually works.
+      # In-app WebRTC ride calling - TURN relay (self-hosted, e.g.
+      # coturn). Optional: calls still connect without it whenever
+      # direct peer-to-peer traversal succeeds, but production traffic
+      # on carrier-grade NAT will need this set to connect reliably.
+      - key: TURN_SERVER_URL
+        sync: false
+      - key: TURN_SHARED_SECRET
+        sync: false
       - key: ADMIN_PHONE
         sync: false
       - key: ADMIN_PASSWORD

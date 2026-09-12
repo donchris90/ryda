@@ -157,13 +157,27 @@ export default () => ({
     username: process.env.AFRICAS_TALKING_USERNAME ?? '',
     senderId: process.env.AFRICAS_TALKING_SENDER_ID ?? '',
     baseUrl: process.env.AFRICAS_TALKING_BASE_URL ?? 'https://api.africastalking.com/version1',
-    // Voice is a separate AT product from SMS: different base URL, and
-    // requires a voice-enabled virtual number (rented in the AT
-    // dashboard) to use as the caller ID for masked ride calls — see
-    // calls/calls.service.ts. Sandbox apps can test with AT's shared
-    // sandbox voice number before renting a real one.
-    voiceNumber: process.env.AFRICAS_TALKING_VOICE_NUMBER ?? '',
-    voiceBaseUrl: process.env.AFRICAS_TALKING_VOICE_BASE_URL ?? 'https://voice.africastalking.com',
+    // Voice (voiceNumber/voiceBaseUrl) intentionally removed — ride
+    // calling moved from Africa's Talking Voice (a proxied cellular
+    // call) to in-app WebRTC (see webrtc config below and
+    // calls/calls.service.ts). Africa's Talking is still this
+    // project's SMS/OTP provider, hence everything else here staying.
+  },
+  webrtc: {
+    // Public, free, no auth needed — Google's STUN server. Comma-
+    // separated since RTCIceServer.urls accepts an array.
+    stunUrls: process.env.WEBRTC_STUN_URLS ?? 'stun:stun.l.google.com:19302',
+    // TURN needs a self-hosted relay (e.g. coturn) — STUN alone can't
+    // relay media, only help two devices discover how to reach each
+    // other directly, which fails on carrier-grade NAT (common enough
+    // on Nigerian mobile networks that this shouldn't be skipped).
+    // Left unconfigured, calls still work whenever direct P2P
+    // traversal succeeds and simply fail to connect when it doesn't -
+    // see CallsService.getIceServers's comment for why credentials
+    // here are short-lived rather than a fixed username/password.
+    turnUrl: process.env.TURN_SERVER_URL ?? '',
+    turnSharedSecret: process.env.TURN_SHARED_SECRET ?? '',
+    turnCredentialTtlSeconds: parseInt(process.env.TURN_CREDENTIAL_TTL_SECONDS ?? '3600', 10),
   },
   sendgrid: {
     apiKey: process.env.SENDGRID_API_KEY ?? '',
