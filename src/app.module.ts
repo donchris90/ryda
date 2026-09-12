@@ -16,6 +16,7 @@ import { UsersModule } from './users/users.module';
 import { DriversModule } from './drivers/drivers.module';
 import { VehiclesModule } from './vehicles/vehicles.module';
 import { RidesModule } from './rides/rides.module';
+import { CallsModule } from './calls/calls.module';
 import { WalletsModule } from './wallets/wallets.module';
 import { CommissionModule } from './commission/commission.module';
 import { PaymentsModule } from './payments/payments.module';

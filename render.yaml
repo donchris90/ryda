@@ -84,6 +84,24 @@ services:
         sync: false
       - key: SENDGRID_API_KEY
         sync: false
+      # Africa's Talking - this project's actual SMS/OTP provider (see
+      # otp/providers/africas-talking.provider.ts). Sender ID "Chudglo"
+      # is applied for but not yet confirmed approved by the Nigerian
+      # telcos as of this deploy — do NOT flip OTP_FORCE_DEV_CODE to
+      # false below until a real end-to-end test confirms delivery,
+      # since Africa's Talking reports "delivered" even when the
+      # carrier silently drops an unregistered Sender ID's messages.
+      - key: AFRICAS_TALKING_API_KEY
+        sync: false
+      - key: AFRICAS_TALKING_USERNAME
+        sync: false
+      - key: AFRICAS_TALKING_SENDER_ID
+        sync: false
+      # OTP_FORCE_DEV_CODE intentionally left out of sync here — see
+      # config/configuration.ts otp.forceDevOnlyCode. Set explicitly to
+      # "false" in the Render dashboard only once Chudglo is confirmed
+      # live; leaving it unset defaults to false via `=== 'true'`, which
+      # is NOT the same as verifying real delivery actually works.
       - key: ADMIN_PHONE
         sync: false
       - key: ADMIN_PASSWORD

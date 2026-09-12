@@ -705,12 +705,10 @@ export class RidesService {
     return {
       firstName: driverUser.firstName,
       lastName: driverUser.lastName,
-      // Exposed plainly, not masked — this deployment has no telephony
-      // proxy (e.g. Twilio Connect) to issue a temporary masked number
-      // for the duration of a ride. A real production rollout in a
-      // market where driver privacy matters would want that; documented
-      // as a known gap rather than silently shipping a fake mask.
-      phone: driverUser.phone,
+      // No phone field: calls now go through CallsService's masked-call
+      // flow (POST /rides/:id/call), which resolves both real numbers
+      // server-side via Africa's Talking Voice and never puts either
+      // one on the wire to a client app. See calls/calls.service.ts.
       profilePhotoUrl: driverUser.profilePhotoUrl,
       rating: driverProfile.rating,
       completedTrips: driverProfile.completedTrips,
@@ -730,8 +728,8 @@ export class RidesService {
   /**
    * The reverse of getDriverInfo — a driver on an accepted ride
    * previously had no way to see who their passenger even was, let alone
-   * call them. Same access pattern, same plain-phone caveat (no
-   * telephony proxy in this deployment).
+   * call them. Same access pattern; phone is likewise omitted now that
+   * calling goes through CallsService's masked-call flow instead.
    */
   async getPassengerInfo(
     rideId: string,
@@ -751,7 +749,6 @@ export class RidesService {
     return {
       firstName: passengerUser.firstName,
       lastName: passengerUser.lastName,
-      phone: passengerUser.phone,
       profilePhotoUrl: passengerUser.profilePhotoUrl,
     };
   }

@@ -157,6 +157,13 @@ export default () => ({
     username: process.env.AFRICAS_TALKING_USERNAME ?? '',
     senderId: process.env.AFRICAS_TALKING_SENDER_ID ?? '',
     baseUrl: process.env.AFRICAS_TALKING_BASE_URL ?? 'https://api.africastalking.com/version1',
+    // Voice is a separate AT product from SMS: different base URL, and
+    // requires a voice-enabled virtual number (rented in the AT
+    // dashboard) to use as the caller ID for masked ride calls — see
+    // calls/calls.service.ts. Sandbox apps can test with AT's shared
+    // sandbox voice number before renting a real one.
+    voiceNumber: process.env.AFRICAS_TALKING_VOICE_NUMBER ?? '',
+    voiceBaseUrl: process.env.AFRICAS_TALKING_VOICE_BASE_URL ?? 'https://voice.africastalking.com',
   },
   sendgrid: {
     apiKey: process.env.SENDGRID_API_KEY ?? '',
