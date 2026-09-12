@@ -13,7 +13,7 @@ export class RideMessage {
   senderId: string;
 
   @Column()
-  senderRole: 'passenger' | 'driver';
+  senderRole: 'passenger' | 'driver' | 'system';
 
   @Column('text')
   message: string;

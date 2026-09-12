@@ -1,124 +1,136 @@
-import { ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Ride } from '../rides/entities/ride.entity';
-import { UsersService } from '../users/users.service';
-import { UserRole } from '../common/enums/user-role.enum';
-import { AfricasTalkingVoiceProvider } from '../notifications/providers/africas-talking-voice.provider';
+import { MoreThan, Repository } from 'typeorm';
+import { ConfigService } from '@nestjs/config';
+import { createHmac } from 'crypto';
 import { CallLog, CallStatus } from './entities/call-log.entity';
 
-// Mirrors the local STAFF_ROLES list in RidesService — not exported from
-// user-role.enum.ts, so redefined here rather than importing something
-// that doesn't exist. Kept in sync manually since both modules need the
-// same "who can act on someone else's ride" definition.
-const STAFF_ROLES = [UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.SUPPORT_AGENT, UserRole.DISPATCHER];
+// How long a ringing call is still considered "reachable" if the callee's
+// socket reconnects after missing the original call:incoming broadcast
+// (e.g. they were on a push-notification-only path and just tapped it).
+// Kept in the same ballpark as how long a caller's UI would realistically
+// still be showing "Calling..." — see call-manager.ts's own ring timeout
+// on the client side. Deliberately NOT the same exact constant shared
+// across a network boundary; a few seconds of slack here is safer than
+// the two ever drifting out of sync and the server expiring a call the
+// caller's screen still shows as ringing.
+const PENDING_CALL_WINDOW_MS = 35_000;
+
+export interface IceServer {
+  urls: string | string[];
+  username?: string;
+  credential?: string;
+}
 
 /**
- * Masked ride calling: a passenger and driver can reach each other
- * without either app ever seeing the other's real phone number.
- *
- * How the bridge actually happens: Africa's Talking Voice dials the
- * *initiator* first (the person who tapped "Call"), and only once they
- * pick up does AT ask our Voice Callback URL what to do next — that's
- * when we tell it to bridge to the other party's real number. So
- * initiateMaskedCall() only ever starts half the connection; the
- * second half is completed in voiceCallback() below once AT tells us
- * the first leg answered.
+ * Backs the in-app WebRTC calling flow. This service does NOT relay any
+ * signaling itself - that happens over the existing `/tracking` socket
+ * namespace's `ride:${rideId}` room (see TrackingGateway's call:* handlers),
+ * reusing the connection and room both apps already hold open during an
+ * active ride rather than standing up a second socket. This service only
+ * does two things a plain socket handler shouldn't own directly: issuing
+ * short-lived TURN credentials, and persisting call history.
  */
 @Injectable()
 export class CallsService {
   private readonly logger = new Logger(CallsService.name);
 
   constructor(
-    @InjectRepository(Ride) private readonly rideRepo: Repository<Ride>,
     @InjectRepository(CallLog) private readonly callLogRepo: Repository<CallLog>,
-    private readonly usersService: UsersService,
-    private readonly voiceProvider: AfricasTalkingVoiceProvider,
+    private readonly config: ConfigService,
   ) {}
 
-  async initiateMaskedCall(rideId: string, requesterId: string, requesterRole: UserRole) {
-    const ride = await this.rideRepo.findOne({ where: { id: rideId } });
-    if (!ride) throw new NotFoundException('Ride not found');
+  /**
+   * Returns the ICE server list a client's RTCPeerConnection needs.
+   * STUN alone (Google's public server) is enough when both devices are
+   * on networks that allow direct peer-to-peer traversal - which is NOT
+   * guaranteed, especially on carrier-grade NAT (common on Nigerian
+   * mobile networks). TURN is the fallback relay for when direct
+   * traversal fails, and unlike STUN it can't be a fixed public server -
+   * anyone who could read a hardcoded TURN credential could relay
+   * arbitrary traffic through your server, so credentials here are
+   * short-lived and generated per-request via the standard coturn
+   * time-limited REST credential mechanism (username is "<expiry
+   * unix-timestamp>:<userId>", credential is
+   * base64(HMAC-SHA1(sharedSecret, username))) rather than a static
+   * username/password pair.
+   *
+   * Returns STUN-only (still gets calls working for the common case)
+   * when TURN_SERVER_URL/TURN_SHARED_SECRET aren't configured, rather
+   * than failing the whole call setup - same graceful-degradation
+   * pattern as every other optional integration in this project.
+   */
+  getIceServers(userId: string): { iceServers: IceServer[] } {
+    const iceServers: IceServer[] = [
+      { urls: this.config.get<string>('webrtc.stunUrls')!.split(',') },
+    ];
 
-    const isPassenger = ride.passengerId === requesterId;
-    const isDriver = ride.driverId === requesterId;
-    const isStaff = STAFF_ROLES.includes(requesterRole);
+    const turnUrl = this.config.get<string>('webrtc.turnUrl');
+    const turnSecret = this.config.get<string>('webrtc.turnSharedSecret');
+    const ttlSeconds = this.config.get<number>('webrtc.turnCredentialTtlSeconds')!;
 
-    if (!isPassenger && !isDriver && !isStaff) {
-      throw new ForbiddenException("You don't have access to this ride");
-    }
-    if (!ride.driverId) {
-      throw new ForbiddenException('No driver assigned to this ride yet');
-    }
-
-    // Staff placing a support call bridges driver -> passenger by default.
-    const initiatorUserId = isDriver ? ride.driverId : ride.passengerId;
-    const calleeUserId = isDriver ? ride.passengerId : ride.driverId;
-
-    const [initiator, callee] = await Promise.all([
-      this.usersService.findById(initiatorUserId),
-      this.usersService.findById(calleeUserId),
-    ]);
-
-    if (!initiator.phone || !callee.phone) {
-      throw new ForbiddenException('Missing phone number on file for this ride');
-    }
-
-    const result = await this.voiceProvider.initiateCall(initiator.phone);
-
-    const log = this.callLogRepo.create({
-      rideId,
-      initiatedByUserId: initiatorUserId,
-      calleeUserId,
-      bridgeToPhone: callee.phone,
-      providerSessionId: result.entries?.[0]?.sessionId ?? null,
-      status: result.success ? CallStatus.INITIATED : CallStatus.FAILED,
-    });
-    await this.callLogRepo.save(log);
-
-    if (!result.success) {
-      this.logger.warn(`Masked call failed to initiate for ride ${rideId}: ${result.error}`);
-      throw new ForbiddenException('Could not place call right now — please try again');
+    if (turnUrl && turnSecret) {
+      const expiry = Math.floor(Date.now() / 1000) + ttlSeconds;
+      const username = `${expiry}:${userId}`;
+      const credential = createHmac('sha1', turnSecret).update(username).digest('base64');
+      iceServers.push({ urls: turnUrl, username, credential });
+    } else {
+      this.logger.warn('TURN not configured - calls will only connect when direct P2P traversal succeeds');
     }
 
-    return { status: 'initiated' };
+    return { iceServers };
+  }
+
+  async createCallLog(rideId: string, callerId: string, calleeId: string): Promise<CallLog> {
+    return this.callLogRepo.save(this.callLogRepo.create({ rideId, callerId, calleeId }));
+  }
+
+  async findById(callId: string): Promise<CallLog | null> {
+    return this.callLogRepo.findOne({ where: { id: callId } });
   }
 
   /**
-   * Africa's Talking Voice callback. Called once when the initiator's
-   * leg answers (isActive=1, no dialDurations yet), and again at call
-   * end with final duration. Must respond with AT's Voice XML — this
-   * is the only place either real number is ever used again after
-   * initiateMaskedCall(), and it never leaves the backend.
+   * Used when a callee's socket (re)connects — e.g. they were on a
+   * screen with no tracking socket open when the call came in, got the
+   * push notification instead, and just tapped it (see
+   * notification-routing.ts's 'incoming_call' case and call-manager.ts's
+   * attach()). A plain socket broadcast only reaches sockets already in
+   * the room at the moment it's sent - it is NOT replayed to a socket
+   * that joins later, so without this a reconnecting callee would never
+   * learn a call is still waiting for them and the caller would be
+   * stuck showing "Calling..." with no way to ever fail or succeed.
    */
-  async voiceCallback(body: Record<string, string>): Promise<string> {
-    const sessionId = body.sessionId;
-    const isActive = body.isActive === '1';
+  async findPendingRingingCall(rideId: string, calleeId: string): Promise<CallLog | null> {
+    return this.callLogRepo.findOne({
+      where: {
+        rideId,
+        calleeId,
+        status: CallStatus.RINGING,
+        createdAt: MoreThan(new Date(Date.now() - PENDING_CALL_WINDOW_MS)),
+      },
+      order: { createdAt: 'DESC' },
+    });
+  }
 
-    const log = sessionId
-      ? await this.callLogRepo.findOne({ where: { providerSessionId: sessionId } })
-      : null;
+  async markAccepted(callId: string): Promise<void> {
+    await this.callLogRepo.update(callId, { status: CallStatus.ACCEPTED, acceptedAt: new Date() });
+  }
 
-    if (!log) {
-      this.logger.warn(`Voice callback for unknown session ${sessionId}`);
-      return '<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry, this call could not be connected.</Say></Response>';
-    }
+  async markRejected(callId: string): Promise<void> {
+    await this.callLogRepo.update(callId, { status: CallStatus.REJECTED, endedAt: new Date() });
+  }
 
-    if (!isActive) {
-      // Call ended — record final duration if AT included it.
-      const duration = Number(body.durationInSeconds ?? body.callDurationInSeconds ?? 0) || null;
-      log.status = CallStatus.COMPLETED;
-      log.durationSeconds = duration;
-      await this.callLogRepo.save(log);
-      return '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
-    }
+  async markOngoing(callId: string): Promise<void> {
+    await this.callLogRepo.update(callId, { status: CallStatus.ONGOING });
+  }
 
-    // Initiator just answered — bridge them to the other party's real
-    // number now. AT displays our shared virtual number as caller ID
-    // on both legs, so the callee never sees the initiator's number.
-    log.status = CallStatus.BRIDGED;
-    await this.callLogRepo.save(log);
-
-    return `<?xml version="1.0" encoding="UTF-8"?><Response><Say>Connecting your call.</Say><Dial phoneNumbers="${log.bridgeToPhone}"/></Response>`;
+  async markEnded(callId: string): Promise<CallLog | null> {
+    const log = await this.callLogRepo.findOne({ where: { id: callId } });
+    if (!log) return null;
+    const wasConnected = !!log.acceptedAt;
+    const durationSeconds = wasConnected ? Math.round((Date.now() - log.acceptedAt!.getTime()) / 1000) : null;
+    const status = wasConnected ? CallStatus.ENDED : CallStatus.MISSED;
+    await this.callLogRepo.update(callId, { status, endedAt: new Date(), durationSeconds });
+    return { ...log, status, durationSeconds };
   }
 }

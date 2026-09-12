@@ -14,6 +14,9 @@ import { HistoryService } from './history.service';
 import { LiveTrackingService } from './live-tracking.service';
 import { LocationQualityService } from './location-quality.service';
 import { TrackingController } from './tracking.controller';
+import { CallsModule } from '../calls/calls.module';
+import { NotificationsModule } from '../notifications/notifications.module';
+import { ChatModule } from '../chat/chat.module';
 
 @Module({
   imports: [
@@ -31,6 +34,9 @@ import { TrackingController } from './tracking.controller';
         secret: config.get<string>('jwt.accessSecret'),
       }),
     }),
+    CallsModule,
+    NotificationsModule,
+    ChatModule,
   ],
   providers: [
     TrackingGateway,

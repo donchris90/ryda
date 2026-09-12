@@ -41,6 +41,24 @@ export class ChatService {
     return saved;
   }
 
+  /**
+   * Same delivery path as sendMessage() (saved + broadcast the same
+   * way), but with no real sender — used for call-outcome messages
+   * ("Missed call", "Call ended • 2:34") posted by TrackingGateway's
+   * call:end handler. senderId has no FK constraint (see
+   * CreateRideMessagesTable migration), so the literal string 'system'
+   * is a safe, simple sentinel rather than needing a nullable column.
+   * No participant check here - the caller (TrackingGateway) already
+   * verified both parties are on this ride when it validated the call.
+   */
+  async postSystemMessage(rideId: string, message: string): Promise<RideMessage> {
+    const saved = await this.messagesRepo.save(
+      this.messagesRepo.create({ rideId, senderId: 'system', senderRole: 'system', message }),
+    );
+    this.events.emit('ride.message.sent', saved);
+    return saved;
+  }
+
   async getMessages(rideId: string, requesterId: string): Promise<RideMessage[]> {
     await this.assertParticipant(rideId, requesterId);
     return this.messagesRepo.find({ where: { rideId }, order: { createdAt: 'ASC' } });

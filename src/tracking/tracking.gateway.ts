@@ -20,6 +20,11 @@ import { DeliveryOrder, DeliveryStatus } from '../logistics/entities/delivery-or
 import { SupportTicket } from '../support/entities/support-ticket.entity';
 import { SUPPORT_STAFF_ROLES } from '../support/support.service';
 import { UserRole, SAFETY_OPS_ROLES } from '../common/enums/user-role.enum';
+import { CallsService } from '../calls/calls.service';
+import { CallStatus } from '../calls/entities/call-log.entity';
+import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationCategory } from '../notifications/entities/notification.entity';
+import { ChatService } from '../chat/chat.service';
 
 const ADMIN_LIKE_SOCKET_ROLES = SAFETY_OPS_ROLES;
 
@@ -52,6 +57,9 @@ export class TrackingGateway
     private readonly deliveryOrdersRepo: Repository<DeliveryOrder>,
     @InjectRepository(SupportTicket)
     private readonly ticketsRepo: Repository<SupportTicket>,
+    private readonly callsService: CallsService,
+    private readonly notificationsService: NotificationsService,
+    private readonly chatService: ChatService,
   ) {}
 
   handleConnection(client: AuthedSocket) {
@@ -386,4 +394,188 @@ export class TrackingGateway
       .to(this.roomForTicket(message.ticketId))
       .emit('ticket:message', message);
   }
+
+  // ---------------------------------------------------------------------
+  // In-app WebRTC call signaling. Deliberately reuses this same gateway,
+  // the same /tracking namespace, and the same ride:${rideId} room a
+  // client already joined via subscribe:ride — a call only ever happens
+  // between the two people already in that room, so there's no reason to
+  // stand up a second socket connection or a second auth/room-membership
+  // check just for calling. CallsService owns TURN credentials and call
+  // history; this gateway owns relaying the actual offer/answer/ICE
+  // messages neither the client nor CallsService should need to know how
+  // socket.io rooms work to use.
+  //
+  // Flow: call:invite -> (if callee reachable) call:incoming, else a push
+  // notification -> call:accept/call:reject -> call:offer -> call:answer
+  // -> call:ice-candidate (both directions, as many times as needed) ->
+  // call:end. Every message after call:invite carries only a callId, not
+  // a rideId — the room to relay into is always re-derived from the
+  // CallLog row, not trusted from the client, so a stale/forged rideId in
+  // a later message can't route a call into the wrong room.
+  // ---------------------------------------------------------------------
+
+  @SubscribeMessage('call:check-pending')
+  async handleCallCheckPending(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() data: { rideId: string },
+  ) {
+    const userId = client.data.userId!;
+    const log = await this.callsService.findPendingRingingCall(data.rideId, userId);
+    return { pendingCall: log ? { callId: log.id, rideId: log.rideId } : null };
+  }
+
+  @SubscribeMessage('call:invite')
+  async handleCallInvite(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() data: { rideId: string },
+  ) {
+    const ride = await this.ridesRepo.findOne({ where: { id: data.rideId } });
+    if (!ride) return { error: 'Ride not found' };
+
+    const callerId = client.data.userId!;
+    const isPassenger = ride.passengerId === callerId;
+    const isDriver = ride.driverId === callerId;
+    if (!isPassenger && !isDriver) return { error: 'Not a participant in this ride' };
+    if (!ride.driverId) return { error: 'No driver assigned to this ride yet' };
+
+    const calleeId = isDriver ? ride.passengerId : ride.driverId;
+    const log = await this.callsService.createCallLog(data.rideId, callerId, calleeId);
+
+    const room = this.roomFor(data.rideId);
+    const calleeReachable = await this.isUserConnectedToRoom(room, calleeId);
+
+    if (calleeReachable) {
+      client.to(room).emit('call:incoming', { callId: log.id, rideId: data.rideId });
+    } else {
+      // Callee's app isn't holding the socket open (backgrounded/killed) —
+      // wake it with a push. Tapping it is still required to actually
+      // join the call; there's no CallKit-style native ringing screen
+      // wired up yet (that needs react-native-callkeep and native
+      // iOS/Android config, deliberately out of scope for this pass).
+      await this.notificationsService.sendPush(
+        calleeId,
+        'Incoming call',
+        isDriver ? 'Your driver is calling' : 'Your passenger is calling',
+        { type: 'incoming_call', callId: log.id, rideId: data.rideId },
+        NotificationCategory.RIDE,
+      );
+    }
+
+    return { callId: log.id };
+  }
+
+  @SubscribeMessage('call:accept')
+  async handleCallAccept(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() data: { callId: string },
+  ) {
+    const log = await this.callsService.findById(data.callId);
+    if (!log || log.calleeId !== client.data.userId) return { error: 'Call not found' };
+
+    await this.callsService.markAccepted(data.callId);
+    client.to(this.roomFor(log.rideId)).emit('call:accepted', { callId: data.callId });
+    return { accepted: true };
+  }
+
+  @SubscribeMessage('call:reject')
+  async handleCallReject(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() data: { callId: string },
+  ) {
+    const log = await this.callsService.findById(data.callId);
+    if (!log || log.calleeId !== client.data.userId) return { error: 'Call not found' };
+
+    await this.callsService.markRejected(data.callId);
+    client.to(this.roomFor(log.rideId)).emit('call:rejected', { callId: data.callId });
+    await this.chatService.postSystemMessage(log.rideId, '📞 Missed call');
+    return { rejected: true };
+  }
+
+  /** Caller sends its SDP offer once call:accepted comes back. */
+  @SubscribeMessage('call:offer')
+  async handleCallOffer(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() data: { callId: string; sdp: unknown },
+  ) {
+    const log = await this.callsService.findById(data.callId);
+    if (!log || log.callerId !== client.data.userId) return { error: 'Call not found' };
+
+    await this.callsService.markOngoing(data.callId);
+    client.to(this.roomFor(log.rideId)).emit('call:offer', { callId: data.callId, sdp: data.sdp });
+    return { sent: true };
+  }
+
+  @SubscribeMessage('call:answer')
+  async handleCallAnswer(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() data: { callId: string; sdp: unknown },
+  ) {
+    const log = await this.callsService.findById(data.callId);
+    if (!log || log.calleeId !== client.data.userId) return { error: 'Call not found' };
+
+    client.to(this.roomFor(log.rideId)).emit('call:answer', { callId: data.callId, sdp: data.sdp });
+    return { sent: true };
+  }
+
+  /** Either party can send ICE candidates as they trickle in from their own RTCPeerConnection. */
+  @SubscribeMessage('call:ice-candidate')
+  async handleCallIceCandidate(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() data: { callId: string; candidate: unknown },
+  ) {
+    const log = await this.callsService.findById(data.callId);
+    const userId = client.data.userId;
+    if (!log || (log.callerId !== userId && log.calleeId !== userId)) return { error: 'Call not found' };
+
+    client.to(this.roomFor(log.rideId)).emit('call:ice-candidate', { callId: data.callId, candidate: data.candidate });
+    return { sent: true };
+  }
+
+  @SubscribeMessage('call:end')
+  async handleCallEnd(
+    @ConnectedSocket() client: AuthedSocket,
+    @MessageBody() data: { callId: string },
+  ) {
+    const log = await this.callsService.findById(data.callId);
+    const userId = client.data.userId;
+    if (!log || (log.callerId !== userId && log.calleeId !== userId)) return { error: 'Call not found' };
+
+    const updated = await this.callsService.markEnded(data.callId);
+    client.to(this.roomFor(log.rideId)).emit('call:ended', { callId: data.callId });
+
+    // Posted as an ordinary chat message (see ChatService.postSystemMessage)
+    // rather than a separate UI surface, so it shows up right in the
+    // conversation the way a missed-call notice does in WhatsApp/iMessage -
+    // no new screen or badge needed, and it's already timestamped and
+    // ordered correctly relative to any other messages around the call.
+    if (updated) {
+      const text =
+        updated.status === CallStatus.MISSED
+          ? '📞 Missed call'
+          : `📞 Call ended · ${formatCallDuration(updated.durationSeconds)}`;
+      await this.chatService.postSystemMessage(log.rideId, text);
+    }
+
+    return { ended: true };
+  }
+
+  /**
+   * fetchSockets() works in-process (this deployment runs one gateway
+   * instance, no Redis socket.io adapter) - if this project ever scales
+   * TrackingGateway across multiple instances, this needs a Redis
+   * adapter-aware equivalent instead, since sockets connected to other
+   * instances wouldn't be visible here.
+   */
+  private async isUserConnectedToRoom(room: string, userId: string): Promise<boolean> {
+    const sockets = await this.server.in(room).fetchSockets();
+    return sockets.some((s) => (s.data as { userId?: string }).userId === userId);
+  }
+}
+
+function formatCallDuration(totalSeconds: number | null): string {
+  const seconds = totalSeconds ?? 0;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
 }
